@@ -106,7 +106,7 @@ private struct ReadingNowView: View {
     @EnvironmentObject private var app: AppModel
 
     var body: some View {
-        if let book = app.books.max(by: { ($0.lastReadAt ?? .distantPast) < ($1.lastReadAt ?? .distantPast) }) {
+        if let book = ReadingRecents.mostRecent(in: app.books) {
             BookDetailView(book: book, autoOpenReader: true)
         } else {
             EmptyStateView(title: "还没有阅读记录", message: "先从书架打开一本书。", systemImage: "book")

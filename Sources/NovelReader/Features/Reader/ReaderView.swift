@@ -316,15 +316,27 @@ private struct ReaderTopBar: View {
             Button {
                 onShowTOC()
             } label: {
-                HStack(spacing: 4) {
-                    Text(model.book.name)
-                        .font(.subheadline.weight(.medium))
-                        .lineLimit(1)
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 10, weight: .semibold))
+                VStack(spacing: 2) {
+                    HStack(spacing: 4) {
+                        Text(model.currentChapter?.title ?? model.book.name)
+                            .font(.subheadline.weight(.medium))
+                            .lineLimit(1)
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 10, weight: .semibold))
+                    }
+                    // The chapter is what changes as you read; the book name is
+                    // the context you need once, so it sits underneath in the
+                    // quieter style rather than competing for the same line.
+                    if !model.book.name.isEmpty {
+                        Text(model.book.name)
+                            .font(.caption2)
+                            .foregroundStyle(theme.secondaryText)
+                            .lineLimit(1)
+                    }
                 }
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("目录 · \(model.currentChapter?.title ?? model.book.name)")
             Spacer()
 
             Menu {
@@ -392,7 +404,7 @@ private struct ReaderTopBar: View {
 private struct ReaderBottomBar: View {
     @ObservedObject var model: ReaderModel
     let theme: Theme
-    @EnvironmentObject private var app: AppModel
+    @State private var showSpeechSettings = false
 
     /// Chapter title and position live in one view for both modes.
     ///
@@ -404,35 +416,20 @@ private struct ReaderBottomBar: View {
 
     var body: some View {
         VStack(spacing: 10) {
-            ProgressView(value: model.progressFraction)
-                .tint(theme.accent)
+            // Progress and position share a row: with the chapter title moved to
+            // the top bar there is no longer a line's worth of text to hold the
+            // bar open, and an empty-looking row made the bar taller than it is
+            // useful.
             HStack(spacing: 10) {
-                Text(model.currentChapter?.title ?? "")
-                    .font(.caption)
-                    .foregroundStyle(theme.secondaryText)
-                    .lineLimit(1)
-                Spacer(minLength: 8)
+                ProgressView(value: model.progressFraction)
+                    .tint(theme.accent)
                 Text("\(model.currentIndex + 1)/\(model.chapters.count)")
-                    .font(.caption2)
+                    .font(.caption2.monospacedDigit())
                     .foregroundStyle(theme.secondaryText)
                 if isSpeaking {
-                    // Speed and exit live on the title row rather than under the
-                    // buttons: the five transport controls need the full width,
-                    // and an overlay on top of them would steal their taps.
-                    Menu {
-                        ForEach([0.35, 0.45, 0.5, 0.6, 0.75, 0.9, 1.0], id: \.self) { rate in
-                            Button(String(format: "%.2fx", rate)) {
-                                app.settings.tts.rate = rate
-                                app.saveSettings()
-                                model.speech.configure(app.settings.tts)
-                            }
-                        }
-                    } label: {
-                        Text(String(format: "%.2fx", app.settings.tts.rate))
-                            .font(.caption2.monospacedDigit())
-                    }
-                    .foregroundStyle(theme.accent)
-
+                    // Exit sits here rather than in the transport row: an
+                    // overlay above those buttons would steal their taps, and
+                    // the row itself needs its full width.
                     Button { model.stopSpeaking() } label: {
                         Label("退出", systemImage: "xmark.circle")
                             .font(.caption2)
@@ -452,6 +449,13 @@ private struct ReaderBottomBar: View {
         .padding(.top, 12)
         .padding(.bottom, 8)
         .background(.ultraThinMaterial)
+        .sheet(isPresented: $showSpeechSettings) {
+            SpeechSettingsSheet(speech: model.speech)
+                .presentationDetents([.medium, .large])
+                // The sheet is hosted apart from the reader, so the reader's
+                // own color scheme does not reach it.
+                .preferredColorScheme(theme.resolved.isDark ? .dark : .light)
+        }
     }
 
     // MARK: - Idle controls
@@ -499,11 +503,11 @@ private struct ReaderBottomBar: View {
 
     /// Same bar, now driving the speech.
     ///
-    /// Chapter and sentence are two navigation levels: the outer pair moves
-    /// between chapters — what a listener thinks of as "previous / next" — and
-    /// the inner pair nudges by one sentence, which is the correction you want
-    /// after a mis-heard line. Sizes are generous because this is used with the
-    /// phone in a cradle.
+    /// Four buttons, not five: sentence-level nudging now lives where the system
+    /// puts it (headphone double-click, Lock Screen skip), and the space it freed
+    /// goes to the settings entry — changing voice or speed is the thing you
+    /// actually reach for while listening, and it used to require leaving the
+    /// book and stopping the reading.
     private var speechControls: some View {
         HStack(spacing: 0) {
             Button {
@@ -515,14 +519,6 @@ private struct ReaderBottomBar: View {
             .buttonStyle(SpeechButtonStyle(theme: theme, diameter: 56))
             .disabled(model.currentIndex == 0)
             .opacity(model.currentIndex == 0 ? 0.4 : 1)
-
-            Spacer(minLength: 6)
-
-            Button { model.speech.previous() } label: {
-                Image(systemName: "backward.frame")
-                    .font(.system(size: 17))
-            }
-            .buttonStyle(SpeechButtonStyle(theme: theme, diameter: 44))
 
             Spacer(minLength: 8)
 
@@ -543,14 +539,6 @@ private struct ReaderBottomBar: View {
 
             Spacer(minLength: 8)
 
-            Button { model.speech.next() } label: {
-                Image(systemName: "forward.frame")
-                    .font(.system(size: 17))
-            }
-            .buttonStyle(SpeechButtonStyle(theme: theme, diameter: 44))
-
-            Spacer(minLength: 6)
-
             Button {
                 Task { await model.goNextChapter(autoPlaySpeech: true) }
             } label: {
@@ -560,6 +548,15 @@ private struct ReaderBottomBar: View {
             .buttonStyle(SpeechButtonStyle(theme: theme, diameter: 56))
             .disabled(model.currentIndex + 1 >= model.chapters.count)
             .opacity(model.currentIndex + 1 >= model.chapters.count ? 0.4 : 1)
+
+            Spacer(minLength: 8)
+
+            Button { showSpeechSettings = true } label: {
+                Image(systemName: "waveform")
+                    .font(.system(size: 19))
+            }
+            .buttonStyle(SpeechButtonStyle(theme: theme, diameter: 48))
+            .accessibilityLabel("朗读设置")
         }
         .foregroundStyle(theme.text)
     }

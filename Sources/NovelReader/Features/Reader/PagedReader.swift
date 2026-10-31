@@ -220,17 +220,13 @@ struct PagedReader: View {
     }
 
     private var footer: some View {
-        HStack(spacing: 8) {
-            Text("\(min(pageIndex + 1, max(pages.count, 1))) / \(max(pages.count, 1))")
-                .monospacedDigit()
-            if let title = model.currentChapter?.title, !title.isEmpty {
-                Text("·")
-                Text(title).lineLimit(1)
-            }
-        }
-        .font(.caption2)
-        .foregroundStyle(theme.secondaryText.opacity(0.8))
-        .padding(.horizontal, 20)
+        // Page number only: the chapter title moved to the top bar, so repeating
+        // it here would print the same line on every page of the chapter.
+        Text("\(min(pageIndex + 1, max(pages.count, 1))) / \(max(pages.count, 1))")
+            .monospacedDigit()
+            .font(.caption2)
+            .foregroundStyle(theme.secondaryText.opacity(0.8))
+            .padding(.horizontal, 20)
     }
 
     private func chapterHint(forward: Bool, box: CGSize) -> some View {

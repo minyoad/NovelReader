@@ -107,6 +107,14 @@ enum ReaderSettingSections {
         .pickerStyle(.segmented)
     }
 
+    // MARK: - Startup
+
+    /// What the app opens to on launch.
+    @ViewBuilder
+    static func startup(_ reading: Binding<ReadingSettings>) -> some View {
+        Toggle("启动时继续上次阅读", isOn: reading.resumeLastReading)
+    }
+
     // MARK: - Cache
 
     @ViewBuilder

@@ -102,6 +102,11 @@ public struct ReadingSettings: Codable, Hashable, Sendable {
     /// `theme` is kept so switching this off returns to the paper the user
     /// picked, rather than to a default.
     public var followSystemAppearance: Bool
+    /// Reopen the last book at its saved position on launch.
+    ///
+    /// Off is for readers who want the shelf first: the resume happens before
+    /// they can tap anything, so it has to be an explicit choice.
+    public var resumeLastReading: Bool
 
     public init(
         fontSize: Double = 19,
@@ -115,7 +120,8 @@ public struct ReadingSettings: Codable, Hashable, Sendable {
         firstLineIndent: Bool = true,
         alignment: BodyAlignment = .justify,
         showChapterTitle: Bool = true,
-        followSystemAppearance: Bool = false
+        followSystemAppearance: Bool = false,
+        resumeLastReading: Bool = true
     ) {
         self.fontSize = fontSize
         self.lineSpacing = lineSpacing
@@ -129,6 +135,7 @@ public struct ReadingSettings: Codable, Hashable, Sendable {
         self.alignment = alignment
         self.showChapterTitle = showChapterTitle
         self.followSystemAppearance = followSystemAppearance
+        self.resumeLastReading = resumeLastReading
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -144,6 +151,7 @@ public struct ReadingSettings: Codable, Hashable, Sendable {
         case alignment
         case showChapterTitle
         case followSystemAppearance
+        case resumeLastReading
     }
 
     /// Tolerant decoding: settings written before pagination (or before the
@@ -165,6 +173,8 @@ public struct ReadingSettings: Codable, Hashable, Sendable {
         showChapterTitle = try container.decodeIfPresent(Bool.self, forKey: .showChapterTitle) ?? defaults.showChapterTitle
         followSystemAppearance = try container.decodeIfPresent(Bool.self, forKey: .followSystemAppearance)
             ?? defaults.followSystemAppearance
+        resumeLastReading = try container.decodeIfPresent(Bool.self, forKey: .resumeLastReading)
+            ?? defaults.resumeLastReading
     }
 
     /// The paper and ink to draw with.

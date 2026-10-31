@@ -44,6 +44,14 @@ struct SettingsView: View {
                     Text("深灰与纯黑会同时把阅读界面的工具栏和弹窗切成暗色。")
                 }
 
+                Section {
+                    ReaderSettingSections.startup($app.settings.reading)
+                } header: {
+                    Text("启动")
+                } footer: {
+                    Text("打开 App 时直接回到上次读到的位置；关闭后从书架开始。")
+                }
+
                 // MARK: 朗读
 
                 Section {

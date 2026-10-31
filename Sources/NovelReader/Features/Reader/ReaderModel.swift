@@ -438,15 +438,14 @@ final class ReaderModel: ObservableObject {
         currentSentenceIndex = speech.currentIndex
     }
 
-    /// Gives the Lock Screen the book and chapter being read.
+    /// Gives the Lock Screen the book being read.
     ///
     /// Called on every chapter load too: the system UI outlives the reader, and
-    /// a stale chapter title on the Lock Screen is worse than none.
+    /// a stale title there is worse than none.
     private func describeForSystemPlayback() {
         speech.describe(
             bookTitle: book.name,
             author: book.author,
-            chapterTitle: currentChapter?.title ?? book.name,
             artworkURL: book.coverURL
         )
     }

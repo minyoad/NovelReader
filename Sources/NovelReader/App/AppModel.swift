@@ -76,6 +76,8 @@ final class AppModel: ObservableObject {
 
     let store: LibraryStore
     private var client: HTTPClient
+    /// Guards against a second run when the root view's task fires again.
+    private var didBootstrap = false
 
     init(store: LibraryStore = LibraryStore()) {
         self.store = store
@@ -100,6 +102,8 @@ final class AppModel: ObservableObject {
     // MARK: - Lifecycle
 
     func bootstrap() async {
+        guard !didBootstrap else { return }
+        didBootstrap = true
         var loaded = await store.loadSettings()
         loaded.ai.apiKey = Keychain.get("ai.apiKey") ?? ""
         loaded.tts.remote.apiKey = Keychain.get("tts.apiKey") ?? ""

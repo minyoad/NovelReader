@@ -189,16 +189,18 @@ final class SpeechController: NSObject, ObservableObject {
 
     /// Names what is being read in the system UI.
     ///
-    /// The title is the chapter, and the artist line carries the book — the Lock
-    /// Screen is glanced at from a distance, so the identity of the reading
-    /// session matters more than the sentence. The sentence itself goes with
-    /// `update`, because it changes every few seconds and only the system UI
-    /// shows it (the reader shows the highlight instead).
-    func describe(bookTitle: String, author: String, chapterTitle: String, artworkURL: String?) {
+    /// The system card shows the book and the sentence, not the chapter: the
+    /// reader itself already shows the chapter title above the text, so the
+    /// locked-screen glance is better spent on "what book" and "what line" than
+    /// on repeating the heading. The sentence arrives separately through
+    /// `setSubtitle` because it changes every few seconds.
+    func describe(bookTitle: String, author: String, artworkURL: String?) {
         trackInfo = NowPlayingCenter.Track(
-            title: chapterTitle,
-            artist: author.isEmpty ? bookTitle : "\(bookTitle) · \(author)",
-            album: bookTitle,
+            title: bookTitle,
+            artist: author,
+            // The third line is reserved for the sentence, so it deliberately
+            // starts empty rather than falling back to the chapter title.
+            album: "",
             artworkURL: artworkURL
         )
         // Registering here too, not only in `play()`: a chapter can be loaded
