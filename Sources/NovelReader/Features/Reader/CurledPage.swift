@@ -2,341 +2,437 @@
 import SwiftUI
 import UIKit
 
-/// A page turning with a paper curl, drawn in 2D.
+/// Geometry for one corner-lift page turn, in 2D.
 ///
-/// Direction comes only from the gesture: `progress` is `abs(drag) / width` and
-/// `forward` is the sign of the drag. A leftward swipe peels the current sheet
-/// leftward; a rightward swipe lays the previous sheet back down.
+/// A sheet of paper grabbed at one corner creases along a *diagonal* line, and
+/// only a band next to that crease is actually turned over — beyond the band you
+/// see the page underneath. A fold about a vertical line can at best approximate
+/// that, which is why an earlier version read as a grey strip sliding sideways
+/// rather than paper bending.
 ///
-/// **Both directions use one renderer.** A backward turn is the forward turn
-/// mirrored horizontally about the page centre, with the two page roles set so
-/// the content still makes sense: the settled page is always the sheet being
-/// folded, and the neighbour is always the page uncovered underneath
-/// (next page when swiping left, previous page when swiping right).
+/// Everything is expressed as a signed distance `d` from the crease line, with
+/// positive on the side that has been lifted off the book:
 ///
-/// The scene flip mirrors every glyph, so each page image carries the *opposite*
-/// mirror state to cancel it and land upright; the turned-over strip is the one
-/// exception, since it shows the reverse of the sheet and really is printed
-/// mirror-image. Omitting the per-image cancellation is what turned the page
-/// underneath backwards on a rightward swipe.
+///     d <= 0        front of the current page, still flat
+///     0 < d < band  the curl: back of the sheet
+///     d >= band     the page underneath, now uncovered
 ///
-/// The underside of the sheet is real paper: opaque body, print at reduced but
-/// readable strength, a cylindrical light ramp across the curl, a bowed free
-/// edge, and a dark hairline for thickness.
-struct CurledPage: View {
-    /// The page the reader is on when the gesture starts.
-    let settledText: NSAttributedString
-    /// The page being turned to, when there is one.
-    let neighborText: NSAttributedString?
-    /// 0 = untouched, 1 = fully turned.
+/// The crease is parameterised *directly* by the turn progress. Solving it from
+/// a touch point instead (crease = perpendicular bisector of corner and touch)
+/// degenerates whenever the touch point shares a scanline with the corner: the
+/// midpoint lands on that line, the divisor in the control point goes to zero,
+/// and half the flap silently flies off-screen. That is the failure mode behind
+/// the missing lower half of earlier attempts.
+///
+/// UIKit and CoreGraphics both start with y pointing down, so no flip is needed
+/// except inside CoreText itself.
+struct CurlGeometry {
+    let size: CGSize
+    /// 0 = flat, 1 = fully turned.
     let progress: CGFloat
+    /// True when peeling toward the next page.
     let forward: Bool
-    /// Paper colour of the current reading theme, so the underside matches the
-    /// page rather than the system chrome.
-    let paper: Color
 
-    var body: some View {
-        GeometryReader { proxy in
-            let size = proxy.size
-            let width = max(size.width, 1)
-            let t = min(max(progress, 0), 1)
-
-            // The sheet being turned is always the page the reader is on; only
-            // the page *underneath* differs by direction. A forward swipe
-            // reveals the next page from the right, a backward swipe reveals the
-            // previous page from the left.
-            //
-            // Backward is the forward picture mirrored, which keeps the two
-            // directions identical in weight, shade and arc. The scene flip also
-            // mirrors every glyph, so each page image asks for the *opposite*
-            // mirror state to cancel it out — that detail is what keeps type
-            // upright, and leaving it out is what turned the underlying page
-            // backwards on a rightward swipe.
-            peelScene(
-                size: size,
-                width: width,
-                t: t,
-                text: settledText,
-                under: neighborText,
-                mirrored: !forward
-            )
-            // Flip the whole scene about its centre — which is also the centre
-            // of every full-width page image, so the per-image counter-flip
-            // inside is an exact identity and the type lands upright.
-            .scaleEffect(x: forward ? 1 : -1, y: 1, anchor: .center)
-            .frame(width: width, height: size.height, alignment: .topLeading)
-            .clipped()
-        }
-        .allowsHitTesting(false)
+    init(size: CGSize, progress: CGFloat, forward: Bool) {
+        self.size = size
+        self.progress = max(min(progress, 1), 0)
+        self.forward = forward
     }
 
-    // MARK: - One turn, peeling toward the left (or its mirror)
+    private var w: CGFloat { max(size.width, 1) }
+    private var h: CGFloat { max(size.height, 1) }
 
-    /// The canonical leftward peel. `t` runs 0 → 1 as the sheet is lifted off.
+    // MARK: Crease
+
+    /// A point the crease passes through.
     ///
-    /// Drawn at every value of `t`, including 0 and 1: `t == 0` is a sheet lying
-    /// flat and `t == 1` is the page underneath filling the screen. Gating this
-    /// on `t > 0` left the reader blank the moment a turn finished and the drag
-    /// reset to zero.
-    @ViewBuilder
-    private func peelScene(
-        size: CGSize,
-        width: CGFloat,
-        t: CGFloat,
-        text sheetText: NSAttributedString?,
-        under underText: NSAttributedString?,
-        mirrored: Bool
-    ) -> some View {
-        // The crease starts at the right edge and walks left.
-        let c = width * (1 - t)
-        let stripWidth = width - c
-        // Screen span of the turned-over strip: [2c - W, c].
-        let stripLeft = 2 * c - width
-        // The flat sheet stops where the turned-over strip begins, so the two
-        // never overlap and no glyph is drawn twice.
-        let flatWidth = max(min(c, stripWidth > 0.5 ? stripLeft : c), 0)
+    /// Travels from near the lifted corner toward the opposite one, mirrored for
+    /// a backward turn so the two directions are exact reflections.
+    var creasePoint: CGPoint {
+        let t = progress
+        let x = w * (1 - 0.92 * t)
+        let y = h * (1 - 0.94 * t)
+        return forward ? CGPoint(x: x, y: y) : CGPoint(x: w - x, y: y)
+    }
 
-        // Inside the flipped scene the pages must be flipped back so they read
-        // normally; the strip is the exception — it shows the back of the sheet,
-        // which really is printed mirror-image.
-        let pageMirror = mirrored
-        let stripMirror = !mirrored
+    /// Unit tangent along the crease.
+    var tangent: CGPoint {
+        // Starts steep (nearly vertical near the corner) and tilts as it sweeps,
+        // so the lifted corner grows instead of the fold staying parallel.
+        let degrees = -80 + 62 * progress
+        let radians = degrees * .pi / 180
+        let dx = cos(radians)
+        let dy = sin(radians)
+        return forward ? CGPoint(x: dx, y: dy) : CGPoint(x: -dx, y: dy)
+    }
 
-        ZStack(alignment: .topLeading) {
-            // Page underneath, revealed as the sheet lifts. Skipped while the
-            // sheet still covers it completely — at rest the sheet is opaque and
-            // full width, so drawing the page beneath would be a second CoreText
-            // layout per frame for nothing.
-            if let underText, stripWidth > 0.5 {
-                PageImage(attributed: underText, mirror: pageMirror, paper: paper)
-                    .frame(width: width, height: size.height)
-            }
+    /// Unit normal pointing toward the lifted side.
+    var normal: CGPoint {
+        let t = tangent
+        var n = CGPoint(x: -t.y, y: t.x)
+        // Keep it pointing rightwards/inwards so the lifted region is the one
+        // that grows from the corner, in both directions.
+        let reference = forward ? CGPoint(x: 1, y: 0.35) : CGPoint(x: -1, y: 0.35)
+        if n.x * reference.x + n.y * reference.y < 0 {
+            n = CGPoint(x: -n.x, y: -n.y)
+        }
+        return n
+    }
 
-            // Still-glued part of the sheet, flat on the book.
-            if let sheetText {
-                PageImage(attributed: sheetText, mirror: pageMirror, paper: paper)
-                    .frame(width: width, height: size.height)
-                    .mask(alignment: .leading) {
-                        Rectangle().frame(width: flatWidth)
+    /// Width of the curl band, in points.
+    ///
+    /// Opens as the corner lifts and closes again as the sheet lands flat, so
+    /// the last frame is a clean page with no residual curl.
+    var band: CGFloat {
+        let grow = 0.18 + 0.82 * min(progress / 0.62, 1)
+        let shrink = 1 - Self.smoothstep(0.78, 1.0, progress)
+        return w * 0.42 * grow * shrink
+    }
+
+    // MARK: Regions
+
+    /// Signed distance from the crease.
+    func distance(_ point: CGPoint) -> CGFloat {
+        let n = normal
+        let p = creasePoint
+        return (point.x - p.x) * n.x + (point.y - p.y) * n.y
+    }
+
+    /// Builds the polygon for a half-plane or a slab by clipping the page.
+    ///
+    /// Sutherland-Hodgman: clip the page rectangle against each boundary in
+    /// turn. The earlier version collected edge intersections and filtered them
+    /// with the same predicate used for the corners, which silently discarded
+    /// every boundary point of the band — the slab has no corner inside it in
+    /// the common case, so the band polygon came back empty and the curl was
+    /// never drawn at all.
+    ///
+    /// Computed exactly rather than via a mask bitmap, which also avoids the
+    /// jagged edge that a mask left along the crease.
+    private func regionPath(_ halfPlanes: [(CGPoint) -> CGFloat]) -> CGPath {
+        var poly: [CGPoint] = [
+            CGPoint(x: 0, y: 0),
+            CGPoint(x: w, y: 0),
+            CGPoint(x: w, y: h),
+            CGPoint(x: 0, y: h),
+        ]
+
+        for signedIn in halfPlanes {
+            var output: [CGPoint] = []
+            let count = poly.count
+            var index = 0
+            while index < count {
+                let a = poly[index]
+                let b = poly[(index + 1) % count]
+                let sa = signedIn(a)
+                let sb = signedIn(b)
+                if sa >= 0 { output.append(a) }
+                if (sa >= 0) != (sb >= 0) {
+                    let denominator = sa - sb
+                    if abs(denominator) > 1e-9 {
+                        let k = sa / denominator
+                        output.append(
+                            CGPoint(x: a.x + (b.x - a.x) * k,
+                                    y: a.y + (b.y - a.y) * k)
+                        )
                     }
+                }
+                index += 1
             }
-
-            // The turned-over part, mirrored about the crease.
-            if let sheetText, c > 0.5, stripWidth > 0.5 {
-                turnedOverStrip(
-                    size: size,
-                    width: width,
-                    stripWidth: stripWidth,
-                    text: sheetText,
-                    t: t,
-                    mirrorText: stripMirror
-                )
-                .offset(x: stripLeft)
-            }
-
-            // The lift throws a shadow on the page it has uncovered.
-            if c > 0 && c < width - 1 {
-                LinearGradient(
-                    colors: [.black.opacity(0.28), .black.opacity(0)],
-                    startPoint: .leading,
-                    endPoint: .trailing
-                )
-                .frame(width: min(width * 0.20, 44), height: size.height)
-                .offset(x: c)
-                .allowsHitTesting(false)
-            }
-
-            // The curled strip shades the flat part it rests on. Gated on the
-            // strip actually existing: at rest `stripLeft` is still non-zero even
-            // though the strip has no width, which used to leave a dark band down
-            // the right edge of an untouched page.
-            if stripWidth > 2 && stripLeft > 2 {
-                LinearGradient(
-                    colors: [.black.opacity(0.28), .black.opacity(0)],
-                    startPoint: .trailing,
-                    endPoint: .leading
-                )
-                .frame(width: min(stripLeft, 32), height: size.height)
-                .offset(x: max(stripLeft - min(stripLeft, 32), 0))
-                .allowsHitTesting(false)
-            }
+            poly = output
+            if poly.isEmpty { return CGMutablePath() }
         }
-    }
 
-    // MARK: - Underside of the turning sheet
-
-    @ViewBuilder
-    private func turnedOverStrip(
-        size: CGSize,
-        width: CGFloat,
-        stripWidth: CGFloat,
-        text: NSAttributedString,
-        t: CGFloat,
-        mirrorText: Bool
-    ) -> some View {
-        // The free edge bows in as the sheet lifts. Grows with the turn.
-        let bulge = min(stripWidth * 0.10, 16) * (0.35 + 0.65 * t)
-
-        ZStack(alignment: .topLeading) {
-            // Opaque paper body: the page below must never show through.
-            paper
-
-            // Back of the print. Sustained at full opacity and dimmed by the
-            // veil below, rather than made translucent — a translucent back let
-            // the flat page's own text bleed through as a second layer.
-            PageImage(attributed: text, mirror: mirrorText, paper: paper)
-                .frame(width: width, height: size.height)
-                .frame(width: stripWidth, height: size.height, alignment: .leading)
-                .clipped()
-
-            // Backs carry the print dimmer than fronts.
-            Color.black.opacity(0.18)
-
-            // Cylindrical ramp: brightest just off the crease, falling into
-            // shadow at the fold.
-            LinearGradient(
-                colors: [
-                    .white.opacity(0.18),
-                    .black.opacity(0.06),
-                    .black.opacity(0.32),
-                ],
-                startPoint: .leading,
-                endPoint: .trailing
-            )
-            .blendMode(.multiply)
-
-            // Specular crown of the curl.
-            LinearGradient(
-                colors: [.clear, .white.opacity(0.28), .clear],
-                startPoint: .leading,
-                endPoint: .trailing
-            )
-            .frame(width: max(stripWidth * 0.55, 1))
-            .blendMode(.screen)
-
-            // Paper has thickness: a dark inner edge with a lit lip outside it.
-            Rectangle()
-                .fill(Color.black.opacity(0.30))
-                .frame(width: 2)
-                .frame(maxWidth: .infinity, alignment: .trailing)
-
-            Rectangle()
-                .fill(Color.white.opacity(0.50))
-                .frame(width: 1)
-                .frame(maxWidth: .infinity, alignment: .trailing)
-                .offset(x: -2)
-
-            // Free edge, turning away from the reader.
-            Rectangle()
-                .fill(Color.black.opacity(0.16))
-                .frame(width: 1.5)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .frame(width: stripWidth, height: size.height)
-        .clipShape(CurlEdge(bulge: bulge))
-    }
-}
-
-/// Silhouette of the turned-over strip: the free (left) edge bows inward, as a
-/// lifted sheet of paper does, while the crease stays dead straight.
-private struct CurlEdge: Shape {
-    /// Horizontal bow of the free edge, in points.
-    var bulge: CGFloat
-
-    func path(in rect: CGRect) -> Path {
-        var path = Path()
-        let left = rect.minX + bulge
-        let right = rect.maxX
-
-        path.move(to: CGPoint(x: left, y: rect.minY))
-        // Free edge bows toward the crease in the middle.
-        path.addQuadCurve(
-            to: CGPoint(x: left, y: rect.maxY),
-            control: CGPoint(x: left + bulge, y: rect.midY)
-        )
-        path.addLine(to: CGPoint(x: right, y: rect.maxY))
-        path.addLine(to: CGPoint(x: right, y: rect.minY))
+        guard poly.count >= 3 else { return CGMutablePath() }
+        let path = CGMutablePath()
+        path.addLines(between: poly)
         path.closeSubpath()
         return path
     }
+
+    /// Signed value of the crease distance, relative to an offset.
+    private func signed(_ point: CGPoint, offset: CGFloat) -> CGFloat {
+        distance(point) - offset
+    }
+
+    /// The sheet still lying flat: `d <= 0`.
+    func flatRegionPath() -> CGPath {
+        regionPath([{ -signed($0, offset: 0) }])
+    }
+
+    /// The page underneath: `d >= band`.
+    func revealedRegionPath() -> CGPath {
+        let band = self.band
+        return regionPath([{ signed($0, offset: band) }])
+    }
+
+    /// The curl itself: `0 < d < band`.
+    func bandRegionPath() -> CGPath {
+        let band = self.band
+        return regionPath([
+            { signed($0, offset: 0) },
+            { -signed($0, offset: band) },
+        ])
+    }
+
+    /// A point `offset` points from the crease along the normal.
+    func pointOnNormal(_ offset: CGFloat) -> CGPoint {
+        let n = normal
+        let p = creasePoint
+        return CGPoint(x: p.x + n.x * offset, y: p.y + n.y * offset)
+    }
+
+    static func smoothstep(_ edge0: CGFloat, _ edge1: CGFloat, _ x: CGFloat) -> CGFloat {
+        let t = min(max((x - edge0) / (edge1 - edge0), 0), 1)
+        return t * t * (3 - 2 * t)
+    }
 }
 
-/// Draws one attributed page with CoreText, optionally horizontally mirrored so
-/// it reads as the back of the same sheet.
+/// A page turning with a paper curl.
 ///
-/// When `paper` is given the view paints an opaque sheet background first. That
-/// matters for the curl, where two pages are stacked: with a clear background
-/// both sets of glyphs would show through each other, which looks like the same
-/// text printed twice.
-struct PageImage: UIViewRepresentable {
-    let attributed: NSAttributedString
-    var mirror: Bool = false
-    var paper: Color?
+/// One CoreGraphics pass draws all three regions. The curl band is produced by
+/// reflecting the front page about the crease and sampling it, so the back
+/// carries real mirrored print; composing masked SwiftUI images instead only
+/// ever produced a stretched, streaky band and cost a CoreText re-layout per
+/// layer per frame.
+struct CurledPage: View {
+    let settledText: NSAttributedString
+    let neighborText: NSAttributedString?
+    let progress: CGFloat
+    let forward: Bool
+    let paper: Color
 
-    func makeUIView(context: Context) -> PageDrawView {
-        let view = PageDrawView()
-        view.isOpaque = paper != nil
+    var body: some View {
+        CurlView(
+            settled: settledText,
+            neighbor: neighborText,
+            progress: progress,
+            forward: forward,
+            paper: UIColor(paper)
+        )
+        .allowsHitTesting(false)
+    }
+}
+
+private struct CurlView: UIViewRepresentable {
+    let settled: NSAttributedString
+    let neighbor: NSAttributedString?
+    let progress: CGFloat
+    let forward: Bool
+    let paper: UIColor
+
+    func makeUIView(context: Context) -> CurlDrawView {
+        let view = CurlDrawView()
+        view.backgroundColor = paper
+        view.isOpaque = true
         view.contentMode = .redraw
-        view.mirror = mirror
+        view.settled = settled
+        view.neighbor = neighbor
+        view.progress = progress
+        view.forward = forward
         view.paper = paper
-        view.text = attributed
         return view
     }
 
-    func updateUIView(_ view: PageDrawView, context: Context) {
-        view.mirror = mirror
+    func updateUIView(_ view: CurlDrawView, context: Context) {
         view.paper = paper
-        view.text = attributed
+        view.forward = forward
+        view.progress = progress
+        view.neighbor = neighbor
+        view.settled = settled
+    }
+}
+
+final class CurlDrawView: UIView {
+    var settled: NSAttributedString? {
+        didSet {
+            guard !Self.sameText(settled, oldValue) else { return }
+            frontImage = nil
+            setNeedsDisplay()
+        }
+    }
+    var neighbor: NSAttributedString? {
+        didSet {
+            guard !Self.sameText(neighbor, oldValue) else { return }
+            underImage = nil
+            setNeedsDisplay()
+        }
+    }
+    var progress: CGFloat = 0 {
+        didSet {
+            guard progress != oldValue else { return }
+            setNeedsDisplay()
+        }
+    }
+    var forward = true {
+        didSet {
+            guard forward != oldValue else { return }
+            setNeedsDisplay()
+        }
+    }
+    var paper: UIColor = .white {
+        didSet {
+            backgroundColor = paper
+            frontImage = nil
+            underImage = nil
+            setNeedsDisplay()
+        }
     }
 
-    final class PageDrawView: UIView {
-        var text: NSAttributedString? {
-            didSet {
-                // `updateUIView` runs on every frame of a drag, but the page
-                // content does not change then — only the fold does. Re-assigning
-                // the same string kept queuing a full CoreText re-layout per
-                // frame, which made the curl stutter on long chapters.
-                guard !PageDrawView.sameText(text, oldValue) else { return }
-                setNeedsDisplay()
-            }
-        }
-        var mirror = false {
-            didSet {
-                guard mirror != oldValue else { return }
-                setNeedsDisplay()
-            }
-        }
-        var paper: Color? {
-            didSet {
-                backgroundColor = paper.map { UIColor($0) } ?? .clear
-                isOpaque = paper != nil
-                setNeedsDisplay()
-            }
-        }
+    /// Bitmaps of the two pages, rebuilt only when their text or size changes.
+    /// Drawing text with CoreText on every frame of a drag was the main source of
+    /// stutter on long chapters.
+    private var frontImage: UIImage?
+    private var underImage: UIImage?
+    private var imageSize: CGSize = .zero
 
-        /// Cheap identity check: the paginator hands the same attributed string
-        /// back on every frame until the page itself changes.
-        private static func sameText(_ a: NSAttributedString?, _ b: NSAttributedString?) -> Bool {
-            guard let a, let b else { return a == nil && b == nil }
-            return a === b || a.isEqual(to: b)
+    override func draw(_ rect: CGRect) {
+        guard let context = UIGraphicsGetCurrentContext(),
+              bounds.width > 1, bounds.height > 1 else { return }
+
+        let t = min(max(progress, 0), 1)
+
+        // At rest and at the end, draw one plain page: no curl, no shadow, and
+        // nothing that could leave a residual band on an untouched page.
+        if t <= 0.001 {
+            pageImage(settled, cache: &frontImage).draw(in: bounds)
+            return
+        }
+        if t >= 0.999 {
+            pageImage(neighbor ?? settled, cache: &underImage).draw(in: bounds)
+            return
         }
 
-        override func draw(_ rect: CGRect) {
-            guard let context = UIGraphicsGetCurrentContext(),
-                  let text,
-                  text.length > 0,
-                  bounds.width > 0,
-                  bounds.height > 0 else { return }
+        let geometry = CurlGeometry(size: bounds.size, progress: t, forward: forward)
 
-            if mirror {
-                context.translateBy(x: bounds.width, y: 0)
-                context.scaleBy(x: -1, y: 1)
-            }
+        // 1. Current page, on the side that has not lifted.
+        context.saveGState()
+        context.addPath(geometry.flatRegionPath())
+        context.clip()
+        pageImage(settled, cache: &frontImage).draw(in: bounds)
+        context.restoreGState()
 
-            context.textMatrix = .identity
-            context.translateBy(x: 0, y: bounds.height)
-            context.scaleBy(x: 1, y: -1)
+        // 2. Page underneath, beyond the curl band.
+        context.saveGState()
+        context.addPath(geometry.revealedRegionPath())
+        context.clip()
+        pageImage(neighbor ?? settled, cache: &underImage).draw(in: bounds)
+        context.restoreGState()
 
+        // 3. The curl band.
+        drawBand(in: context, geometry: geometry)
+
+        // 4. Shadow and fold line.
+        drawCrease(in: context, geometry: geometry)
+    }
+
+    private func drawBand(in context: CGContext, geometry: CurlGeometry) {
+        let band = geometry.band
+        guard band > 0.5 else { return }
+
+        context.saveGState()
+        context.addPath(geometry.bandRegionPath())
+        context.clip()
+
+        // Reflect about the crease, then draw the front page through that
+        // transform. The result is the back of the sheet with real print.
+        let n = geometry.normal
+        let o = geometry.creasePoint
+        let a = 1 - 2 * n.x * n.x
+        let b = -2 * n.x * n.y
+        let d = 1 - 2 * n.y * n.y
+        let tx = o.x - (a * o.x + b * o.y)
+        let ty = o.y - (b * o.x + d * o.y)
+        context.concatenate(CGAffineTransform(a: a, b: b, c: b, d: d, tx: tx, ty: ty))
+
+        // Backs read a little dimmer than fronts.
+        context.setAlpha(0.9)
+        pageImage(settled, cache: &frontImage).draw(in: bounds)
+        context.setAlpha(1)
+        context.restoreGState()
+
+        // Cylindrical ramp across the band: lit just off the crease, shadowed at
+        // the free edge. This is what makes it read as paper rolled over an edge
+        // rather than a strip pasted on top.
+        context.saveGState()
+        context.addPath(geometry.bandRegionPath())
+        context.clip()
+        let colors = [
+            UIColor.white.withAlphaComponent(0.18).cgColor,
+            UIColor.black.withAlphaComponent(0.03).cgColor,
+            UIColor.black.withAlphaComponent(0.32).cgColor,
+        ]
+        if let gradient = CGGradient(
+            colorsSpace: CGColorSpaceCreateDeviceRGB(),
+            colors: colors as CFArray,
+            locations: [0, 0.4, 1]
+        ) {
+            context.drawLinearGradient(
+                gradient,
+                start: geometry.pointOnNormal(0),
+                end: geometry.pointOnNormal(band),
+                options: [.drawsBeforeStartLocation, .drawsAfterEndLocation]
+            )
+        }
+        context.restoreGState()
+    }
+
+    private func drawCrease(in context: CGContext, geometry: CurlGeometry) {
+        let p = geometry.creasePoint
+        let reach = max(bounds.width, bounds.height) * 2
+
+        // Contact shadow on the freshly uncovered page.
+        context.saveGState()
+        context.addPath(geometry.revealedRegionPath())
+        context.clip()
+        let colors = [
+            UIColor.black.withAlphaComponent(0.24).cgColor,
+            UIColor.black.withAlphaComponent(0).cgColor,
+        ]
+        if let gradient = CGGradient(
+            colorsSpace: CGColorSpaceCreateDeviceRGB(),
+            colors: colors as CFArray,
+            locations: [0, 1]
+        ) {
+            context.drawLinearGradient(
+                gradient,
+                start: geometry.pointOnNormal(geometry.band),
+                end: geometry.pointOnNormal(geometry.band + 28),
+                options: [.drawsBeforeStartLocation, .drawsAfterEndLocation]
+            )
+        }
+        context.restoreGState()
+
+        // The fold itself.
+        let tangent = geometry.tangent
+        context.saveGState()
+        context.setStrokeColor(UIColor.black.withAlphaComponent(0.16).cgColor)
+        context.setLineWidth(1)
+        context.move(to: CGPoint(x: p.x - tangent.x * reach, y: p.y - tangent.y * reach))
+        context.addLine(to: CGPoint(x: p.x + tangent.x * reach, y: p.y + tangent.y * reach))
+        context.strokePath()
+        context.restoreGState()
+    }
+
+    // MARK: Bitmaps
+
+    private func pageImage(_ text: NSAttributedString?, cache: inout UIImage?) -> UIImage {
+        guard bounds.width > 1, bounds.height > 1 else { return UIImage() }
+        if let cache, imageSize == bounds.size { return cache }
+
+        let format = UIGraphicsImageRendererFormat()
+        format.opaque = true
+        format.scale = UIScreen.main.scale
+        let renderer = UIGraphicsImageRenderer(size: bounds.size, format: format)
+        let image = renderer.image { ctx in
+            let c = ctx.cgContext
+            c.setFillColor(paper.cgColor)
+            c.fill(CGRect(origin: .zero, size: bounds.size))
+            guard let text, text.length > 0 else { return }
+            c.saveGState()
+            c.textMatrix = .identity
+            c.translateBy(x: 0, y: bounds.height)
+            c.scaleBy(x: 1, y: -1)
             let path = CGPath(rect: CGRect(origin: .zero, size: bounds.size), transform: nil)
             let framesetter = CTFramesetterCreateWithAttributedString(text)
             let frame = CTFramesetterCreateFrame(
@@ -345,8 +441,17 @@ struct PageImage: UIViewRepresentable {
                 path,
                 nil
             )
-            CTFrameDraw(frame, context)
+            CTFrameDraw(frame, c)
+            c.restoreGState()
         }
+        cache = image
+        imageSize = bounds.size
+        return image
+    }
+
+    private static func sameText(_ a: NSAttributedString?, _ b: NSAttributedString?) -> Bool {
+        guard let a, let b else { return a == nil && b == nil }
+        return a === b || a.isEqual(to: b)
     }
 }
 #endif
