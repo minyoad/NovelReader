@@ -80,13 +80,20 @@ struct CurledPage: View {
     ) -> some View {
         let c = min(max(crease, 0), width)
         let stripWidth = width - c
+        // Screen span of the turned-over strip: [2c - W, c].
+        let stripLeft = 2 * c - width
+        // The flat sheet only draws up to where the folded strip begins, so the
+        // two never overlap. Previously both covered [stripLeft, c], and any
+        // translucency in the strip let the flat page's text show through as a
+        // second layer of glyphs.
+        let flatWidth = max(min(c, stripWidth > 0.5 ? stripLeft : c), 0)
 
         ZStack(alignment: .topLeading) {
             // Flat part: the paper still lying on the book.
             PageImage(attributed: text)
                 .frame(width: width, height: size.height)
                 .mask(alignment: .leading) {
-                    Rectangle().frame(width: c)
+                    Rectangle().frame(width: flatWidth)
                 }
 
             // Turned-over part, mirrored about the crease. Mirrored about the
@@ -99,7 +106,7 @@ struct CurledPage: View {
                     text: text,
                     progress: t
                 )
-                .offset(x: 2 * c - width)
+                .offset(x: stripLeft)
             }
 
             // The fold lifts the paper off the page, so the page below darkens
@@ -116,14 +123,14 @@ struct CurledPage: View {
             }
 
             // Shadow the turned-over strip casts back onto the flat part.
-            if c > 4 && stripWidth > 4 {
+            if c > 4 && stripWidth > 4 && stripLeft > 2 {
                 LinearGradient(
                     colors: [.black.opacity(0.30), .black.opacity(0)],
                     startPoint: .trailing,
                     endPoint: .leading
                 )
-                .frame(width: min(stripWidth, 34), height: size.height)
-                .offset(x: max(c - min(stripWidth, 34), 0))
+                .frame(width: min(stripLeft, 34), height: size.height)
+                .offset(x: max(stripLeft - min(stripLeft, 34), 0))
                 .allowsHitTesting(false)
             }
         }
@@ -146,21 +153,25 @@ struct CurledPage: View {
             // Opaque paper body: nothing from the page below may show through.
             paper
 
-            // Back of the print, dimmed like ink showing through the sheet but
-            // still legible — this is what makes it read as paper.
+            // Back of the print. Drawn fully opaque onto the paper body — the
+            // dimming comes from the veil below, not from letting the page
+            // underneath bleed through.
             PageImage(attributed: text, mirror: true)
                 .frame(width: width, height: size.height)
                 .frame(width: stripWidth, height: size.height, alignment: .leading)
                 .clipped()
-                .opacity(0.72)
+
+            // Uniform veil: the back of a sheet carries the print dimmer than
+            // the front does, and never at full contrast.
+            Color.black.opacity(0.18)
 
             // Cylindrical ramp: the strip curves away from the light, so it is
             // brightest just off the crease and falls into shadow at the fold.
             LinearGradient(
                 colors: [
-                    .white.opacity(0.20),
+                    .white.opacity(0.18),
                     .black.opacity(0.06),
-                    .black.opacity(0.34),
+                    .black.opacity(0.32),
                 ],
                 startPoint: .leading,
                 endPoint: .trailing
