@@ -67,6 +67,12 @@ final class NowPlayingCenter {
 
         let center = MPRemoteCommandCenter.shared()
 
+        // Legacy but still meaningful: for audio that does not come from
+        // `AVPlayer` (here `AVAudioPlayer` and `AVSpeechSynthesizer`), some iOS
+        // versions only route Lock Screen presses to the app after this call.
+        // Harmless when redundant.
+        UIApplication.shared.beginReceivingRemoteControlEvents()
+
         // All of these matter for a headset: a single click arrives as
         // `togglePlayPause`, while Control Center and CarPlay send explicit
         // play/pause once they know the state.

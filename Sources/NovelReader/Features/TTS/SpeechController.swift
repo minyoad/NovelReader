@@ -152,12 +152,13 @@ final class SpeechController: NSObject, ObservableObject {
 
     /// Replaces the queue. When `autoPlay` is true reading starts immediately.
     ///
-    /// The audio session is kept alive when playback is about to resume: a
-    /// chapter change calls this from the background, and deactivating the
-    /// session for even a moment lets iOS suspend the app before the next
-    /// chapter's audio has been fetched.
+    /// The audio session stays alive whenever a queue is loaded, not just while
+    /// audio is playing. That is how a paused player is expected to behave — the
+    /// Lock Screen card and its buttons remain available — and a chapter change
+    /// made from the background must not drop the session even for a moment, or
+    /// iOS suspends the app before the next chapter's audio has been fetched.
     func load(sentences newSentences: [String], startAt index: Int = 0, autoPlay: Bool = true) {
-        stop(keepingSession: autoPlay)
+        stop(keepingSession: !newSentences.isEmpty)
         sentences = newSentences
         offsetsCache = nil
         currentIndex = min(max(index, 0), max(newSentences.count - 1, 0))
@@ -167,7 +168,15 @@ final class SpeechController: NSObject, ObservableObject {
         // chapter's progress would otherwise sit on the Lock Screen until the
         // first audio of this one has been fetched.
         publishNowPlaying()
-        guard autoPlay, !newSentences.isEmpty else { return }
+        guard !newSentences.isEmpty else { return }
+        guard autoPlay else {
+            // Loaded but silent: report "paused" so the reader keeps showing its
+            // controls and the system keeps the chapter as a paused track the
+            // user can resume, rather than pretending nothing is loaded.
+            isPaused = true
+            publishNowPlaying()
+            return
+        }
         play()
     }
 
@@ -183,6 +192,9 @@ final class SpeechController: NSObject, ObservableObject {
             album: bookTitle,
             artworkURL: artworkURL
         )
+        // Registering here too, not only in `play()`: a chapter can be loaded
+        // paused, and the card should still be visible and controllable.
+        nowPlaying.activate()
         nowPlaying.setTrack(trackInfo)
         publishNowPlaying()
     }
@@ -190,6 +202,10 @@ final class SpeechController: NSObject, ObservableObject {
     func play() {
         guard sentences.indices.contains(currentIndex) else { return }
         lastError = nil
+        // Session first: iOS only treats an app as the Now Playing source once
+        // its session is an active, non-mixable playback session. Publishing
+        // before that is silently dropped.
+        activateSession()
         nowPlaying.activate()
 
         if settings.engine == .system {
@@ -593,6 +609,10 @@ final class SpeechController: NSObject, ObservableObject {
             isSpeaking = true
             isPaused = false
             startProgressTimer()
+            // Audio is now actually coming out, so publish the playing state:
+            // the pre-play publish said "paused", and nothing else would correct
+            // it until the first sentence change.
+            publishNowPlaying()
             prefetchNextChunk(after: index)
         } catch {
             fail(error)
@@ -809,15 +829,40 @@ final class SpeechController: NSObject, ObservableObject {
 
     // MARK: - Audio session
 
+    /// Configures a **non-mixable** long-form playback session.
+    ///
+    /// The options matter more than they look: `.duckOthers` implies
+    /// `.mixWithOthers`, and a mixing session is never promoted to the system's
+    /// Now Playing source. That single option was why the Lock Screen and the
+    /// Now Playing widget stayed empty while audio played fine — the info
+    /// dictionary was published, but the system had no reason to show it.
     private func activateSession() {
         let session = AVAudioSession.sharedInstance()
         do {
-            try session.setCategory(.playback, mode: .spokenAudio, options: [.duckOthers])
+            // `.longFormAudio` is what tells the system this is a podcast-like
+            // session rather than a sound effect: it is what earns the Lock
+            // Screen card and the remote command routing. It is also the default
+            // policy, but asking for it explicitly costs nothing.
+            try session.setCategory(
+                .playback,
+                mode: .spokenAudio,
+                policy: .longFormAudio,
+                options: []
+            )
+        } catch {
+            // The policy overload can be rejected on some configurations; the
+            // category itself is what matters, so retry without it rather than
+            // silently ending up in the default, mixable session — that is
+            // exactly what keeps the Now Playing card away.
+            try? session.setCategory(.playback, mode: .spokenAudio, options: [])
+        }
+        do {
             try session.setActive(true)
             didConfigureSession = true
         } catch {
             // Reading still works without a properly configured session; it just
             // may not continue in the background.
+            didConfigureSession = false
         }
     }
 
@@ -827,15 +872,15 @@ final class SpeechController: NSObject, ObservableObject {
         didConfigureSession = false
     }
 
-    /// Gives up the audio session once nothing more is going to play.
+    /// Winds down after the last sentence without tearing down Now Playing.
     ///
-    /// Separate from `stop()` on purpose: the Lock Screen should keep showing
-    /// the chapter as paused after the last sentence of a book, so the system
-    /// info stays while the app stops holding audio focus.
+    /// The session is deliberately left active. Media apps keep theirs for a
+    /// paused player, and deactivating it is what makes the Lock Screen card
+    /// vanish even though the info was published — the exact symptom of "audio
+    /// stopped and the widget went blank". Only the background allowance is
+    /// returned, since nothing more is being fetched.
     func releaseSessionWhenIdle() {
         grace.end()
-        guard !isActive else { return }
-        deactivateSession()
     }
 
     /// Holds the app awake while the next chapter is fetched with the screen

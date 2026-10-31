@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import NovelKit
 
-@Suite("Edge protocol parsing")
+@Suite("Edge protocol parsing", .serialized)
 struct EdgeTTSClientTests {
 
     @Test("path is read from the header block, not the body")

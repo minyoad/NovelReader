@@ -123,6 +123,10 @@ final class ReaderModel: ObservableObject {
         // covers the auto-advance case, where the queue has already drained so
         // `isActive` is false even though reading is about to continue.
         let shouldSpeak = speech.isActive || autoplaySpeech
+        // A paused listener stays paused: switching chapter is a position
+        // change, not a command to start talking. This matches what the system
+        // does with a paused track when you press next.
+        let wasPaused = speech.isPaused
         speech.stop(keepingSession: shouldSpeak)
         // The session keeps the app alive only once audio is playing again; the
         // fetch before that needs its own short-lived allowance.
@@ -142,7 +146,11 @@ final class ReaderModel: ObservableObject {
                 // Name the chapter before playback starts, so the Lock Screen
                 // never shows the previous one even for a moment.
                 describeForSystemPlayback()
-                startSpeaking()
+                // A paused listener stays paused: with `autoPlay: false` the
+                // chapter is loaded and named but no audio is fetched, which is
+                // both correct and cheaper than starting and immediately
+                // pausing.
+                startSpeaking(autoPlay: !wasPaused)
             }
             schedulePrefetch()
         } catch {
@@ -390,7 +398,7 @@ final class ReaderModel: ObservableObject {
 
     // MARK: - Speech
 
-    func startSpeaking() {
+    func startSpeaking(autoPlay: Bool = true) {
         guard let text = content?.text, !text.isEmpty else { return }
         let sentences = TextProcessing.sentences(from: text)
         let startIndex = speech.sentenceIndex(forCharactersBefore: pendingOffset, in: text)
@@ -405,7 +413,11 @@ final class ReaderModel: ObservableObject {
         // Name the chapter before playback starts, so the Lock Screen never
         // shows the previous chapter even for a moment.
         describeForSystemPlayback()
-        speech.load(sentences: sentences, startAt: min(startIndex, max(sentences.count - 1, 0)), autoPlay: true)
+        speech.load(
+            sentences: sentences,
+            startAt: min(startIndex, max(sentences.count - 1, 0)),
+            autoPlay: autoPlay
+        )
         currentSentenceIndex = speech.currentIndex
     }
 

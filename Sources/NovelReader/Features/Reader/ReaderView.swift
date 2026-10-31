@@ -462,10 +462,30 @@ private struct TTSBar: View {
                 .lineLimit(1)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
-            HStack(spacing: 28) {
-                Button { model.speech.previous() } label: {
-                    Image(systemName: "backward.frame")
+            HStack(spacing: 0) {
+                // Two levels of navigation on purpose: the outer pair moves
+                // between chapters — what a listener thinks of as "previous /
+                // next" — and the inner pair nudges by a sentence, which is the
+                // correction you want after a mis-heard line.
+                //
+                // Split into three groups so the chapter buttons keep more of
+                // the bar: seven evenly spaced buttons would squeeze the play
+                // control on a small phone.
+                HStack(spacing: 14) {
+                    Button {
+                        Task { await model.goPreviousChapter(autoPlaySpeech: true) }
+                    } label: {
+                        Image(systemName: "backward.end.fill")
+                    }
+                    .disabled(model.currentIndex == 0)
+
+                    Button { model.speech.previous() } label: {
+                        Image(systemName: "backward.frame")
+                    }
                 }
+
+                Spacer(minLength: 8)
+
                 Button { model.speech.toggle() } label: {
                     if model.speech.isPreparing {
                         // Remote engines need a moment before the first sound;
@@ -473,15 +493,30 @@ private struct TTSBar: View {
                         // like the button did nothing.
                         ProgressView()
                             .controlSize(.small)
-                            .frame(width: 20, height: 20)
+                            .frame(width: 24, height: 24)
                     } else {
                         Image(systemName: model.speech.isPlaying ? "pause.fill" : "play.fill")
-                            .font(.system(size: 20))
+                            .font(.system(size: 22))
+                            .frame(width: 26, height: 26)
                     }
                 }
-                Button { model.speech.next() } label: {
-                    Image(systemName: "forward.frame")
+
+                Spacer(minLength: 8)
+
+                HStack(spacing: 14) {
+                    Button { model.speech.next() } label: {
+                        Image(systemName: "forward.frame")
+                    }
+
+                    Button {
+                        Task { await model.goNextChapter(autoPlaySpeech: true) }
+                    } label: {
+                        Image(systemName: "forward.end.fill")
+                    }
+                    .disabled(model.currentIndex + 1 >= model.chapters.count)
                 }
+
+                Spacer(minLength: 10)
 
                 Menu {
                     ForEach([0.35, 0.45, 0.5, 0.6, 0.75, 0.9, 1.0], id: \.self) { rate in
@@ -499,6 +534,7 @@ private struct TTSBar: View {
                 Button { model.stopSpeaking() } label: {
                     Image(systemName: "xmark")
                 }
+                .padding(.leading, 10)
             }
             .foregroundStyle(theme.text)
         }
