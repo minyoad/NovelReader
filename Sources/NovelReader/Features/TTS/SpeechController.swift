@@ -116,6 +116,13 @@ final class SpeechController: NSObject, ObservableObject {
     /// would hide the controls for the second before audio arrives.
     var isActive: Bool { isSpeaking || isPaused || isPreparing }
 
+    /// Whether the sentence highlight should be drawn.
+    ///
+    /// Requires an active session, not merely a loaded queue: `stop()` keeps
+    /// `sentences` around so the reader can resume, and the highlight lingering
+    /// on a chapter nobody is reading looks like the app is still talking.
+    var showsHighlight: Bool { isActive && hasContent }
+
     /// True while audio is actually coming out, as opposed to paused or still
     /// being fetched. Drives the play/pause icon.
     var isPlaying: Bool { isSpeaking && !isPaused }

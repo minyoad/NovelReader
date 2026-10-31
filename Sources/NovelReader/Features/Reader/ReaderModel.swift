@@ -1,4 +1,5 @@
 #if canImport(SwiftUI)
+import Combine
 import Foundation
 import SwiftUI
 import NovelKit
@@ -35,6 +36,14 @@ final class ReaderModel: ObservableObject {
     @Published var bookCacheProgress: Double?
     private let startIndexOverride: Int?
     private var prefetchTask: Task<Void, Never>?
+    /// Keeps `ReaderModel` translating the speech controller's state changes.
+    ///
+    /// `speech` is a separate `ObservableObject`, and views only observe
+    /// `ReaderModel`. Without this bridge, stopping playback changed nothing the
+    /// views could see: the sentence highlight stayed painted on the page even
+    /// though the queue was gone, because no published property of the model
+    /// changed and SwiftUI never redrew.
+    private var speechObserver: AnyCancellable?
 
     init(book: Book, app: AppModel, startIndex: Int? = nil) {
         self.book = book
@@ -72,6 +81,14 @@ final class ReaderModel: ObservableObject {
             guard let self else { return }
             guard self.isSpeaking else { return }
             Task { await self.goPreviousChapter(autoPlaySpeech: true) }
+        }
+
+        // Re-publish the speech state through this model so the page redraws
+        // when playback starts or stops. `objectWillChange` of the controller is
+        // not observed by any view; this is the bridge that makes "no speaking"
+        // actually clear the highlight.
+        speechObserver = speech.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
         }
     }
 

@@ -397,7 +397,7 @@ struct PagedReader: View {
     }
 
     private func highlightRange(in document: PagedDocument) -> NSRange? {
-        guard model.speech.hasContent,
+        guard model.speech.showsHighlight,
               model.speech.sentences.indices.contains(model.currentSentenceIndex) else { return nil }
         let sentence = model.speech.sentences[model.currentSentenceIndex]
         let probe = String(sentence.prefix(14))
