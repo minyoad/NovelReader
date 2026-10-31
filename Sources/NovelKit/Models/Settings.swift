@@ -16,6 +16,19 @@ public enum ReaderTheme: String, Codable, CaseIterable, Identifiable, Sendable {
         case .black: return "纯黑"
         }
     }
+
+    /// Whether the interface around the text should also go dark.
+    ///
+    /// The reader draws its own paper and ink, so the chrome has to be told
+    /// separately: without this the top bar, the sheets and the status bar keep
+    /// following the system appearance, which leaves a light toolbar sitting on
+    /// a dark page.
+    public var isDark: Bool {
+        switch self {
+        case .paper, .sepia: return false
+        case .night, .black: return true
+        }
+    }
 }
 
 /// How the reader advances: continuous scrolling, or discrete pages swiped

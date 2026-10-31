@@ -175,7 +175,7 @@ struct CacheSheet: View {
                 } header: {
                     Text("本书缓存")
                 } footer: {
-                    Text("缓存过的章节离线也能读。阅读时会自动往后缓存 \(app.settings.cache.prefetchCount) 章，可在「阅读设置 → 缓存」里调整。")
+                    Text("缓存过的章节离线也能读。阅读时会自动往后缓存 \(app.settings.cache.prefetchCount) 章，可在「设置 → 缓存」里调整。")
                 }
 
                 if let progress = model.bookCacheProgress {
@@ -225,7 +225,7 @@ struct CacheSheet: View {
 
                 Section {
                     NavigationLink {
-                        ReaderSettingsSheet(initialSection: .cache)
+                        ReaderSettingsSheet(initialAnchor: .cache)
                     } label: {
                         Label("缓存设置", systemImage: "gearshape")
                     }

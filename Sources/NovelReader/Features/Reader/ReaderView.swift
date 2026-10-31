@@ -16,6 +16,8 @@ struct ReaderView: View {
 
     private var theme: Theme { Theme.of(app.settings.reading.theme) }
 
+    private var reading: ReadingSettings { app.settings.reading }
+
     var body: some View {
         ZStack {
             theme.background.ignoresSafeArea()
@@ -61,18 +63,28 @@ struct ReaderView: View {
             }
         }
         .statusBarHidden(!model.showBars)
+        // The reader paints its own paper, so the system appearance has to be
+        // driven by the chosen theme rather than by the phone's setting. Without
+        // this, picking 深灰/纯黑 left a light status bar, light sheets and
+        // light toolbar material on a dark page.
+        .preferredColorScheme(reading.theme.isDark ? .dark : .light)
         .task { await model.start() }
         .sheet(isPresented: $showSettings) {
             ReaderSettingsSheet()
                 .presentationDetents([.medium, .large])
+                // Sheets are hosted apart from the presenting view, so
+                // `preferredColorScheme` above does not reach them.
+                .preferredColorScheme(reading.theme.isDark ? .dark : .light)
         }
         .sheet(isPresented: $showCacheSheet) {
             CacheSheet(model: model)
                 .presentationDetents([.medium, .large])
+                .preferredColorScheme(reading.theme.isDark ? .dark : .light)
         }
         .sheet(isPresented: $model.showSourcePicker) {
             SourcePickerSheet(model: model)
                 .presentationDetents([.medium, .large])
+                .preferredColorScheme(reading.theme.isDark ? .dark : .light)
         }
         .sheet(isPresented: $showTOC) {
             ChapterListView(
@@ -83,6 +95,7 @@ struct ReaderView: View {
                 Task { await model.loadChapter(at: index) }
             }
             .presentationDetents([.medium, .large])
+            .preferredColorScheme(reading.theme.isDark ? .dark : .light)
         }
         .alert("出错了", isPresented: Binding(
             get: { model.errorMessage != nil },

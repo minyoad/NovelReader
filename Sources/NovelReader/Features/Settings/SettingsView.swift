@@ -5,7 +5,6 @@ import NovelKit
 struct SettingsView: View {
     @EnvironmentObject private var app: AppModel
 
-    @State private var showReaderSettings = false
     @State private var testing = false
     @State private var testResult: (text: String, isError: Bool)?
     @State private var showAIDocs = false
@@ -24,26 +23,27 @@ struct SettingsView: View {
                 // MARK: 阅读
 
                 Section {
-                    Button {
-                        showReaderSettings = true
-                    } label: {
-                        HStack {
-                            Label("排版与主题", systemImage: "textformat.size")
-                            Spacer()
-                            Text("\(app.settings.reading.theme.displayName) · \(app.settings.reading.pageTurnMode.displayName)")
-                                .foregroundStyle(.secondary)
-                            Image(systemName: "chevron.right")
-                                .font(.caption)
-                                .foregroundStyle(.tertiary)
-                        }
-                    }
-                    .foregroundStyle(.primary)
-
-                    Toggle("搜索时使用全部书源", isOn: $app.settings.searchAllSources)
+                    ReaderSettingSections.typography($app.settings.reading)
                 } header: {
-                    Text("阅读")
+                    Text("排版")
                 } footer: {
-                    Text("关闭后搜索会优先使用书源列表中最上面的可用书源。")
+                    Text("小说正文用衬线或宋体更耐读；楷体适合短篇。选中的字体缺字时会自动回退到系统字体。")
+                }
+
+                Section {
+                    ReaderSettingSections.pageTurn($app.settings.reading)
+                } header: {
+                    Text("翻页")
+                } footer: {
+                    Text("「仿真」需要左右翻页模式才有意义；滚动模式下这一项不起作用。")
+                }
+
+                Section {
+                    ReaderSettingSections.background($app.settings.reading)
+                } header: {
+                    Text("背景")
+                } footer: {
+                    Text("深灰与纯黑会同时把阅读界面的工具栏和弹窗切成暗色。")
                 }
 
                 // MARK: 朗读
@@ -223,6 +223,8 @@ struct SettingsView: View {
                     )
 
                     Toggle("使用 Cookie", isOn: $app.settings.network.useCookies)
+
+                    Toggle("搜索时使用全部书源", isOn: $app.settings.searchAllSources)
                 }
 
                 // MARK: 数据
@@ -230,12 +232,6 @@ struct SettingsView: View {
                 Section("数据与缓存") {
                     LabeledContent("已缓存章节", value: "\(cachedChapters) 章")
                     LabeledContent("缓存占用", value: CacheSheet.formatted(cacheSize))
-
-                    NavigationLink {
-                        ReaderSettingsSheet(initialSection: .cache)
-                    } label: {
-                        Label("缓存设置", systemImage: "arrow.down.circle")
-                    }
 
                     Button {
                         clearChapterCache()
@@ -247,6 +243,14 @@ struct SettingsView: View {
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     }
+                }
+
+                Section {
+                    ReaderSettingSections.cache($app.settings.cache)
+                } header: {
+                    Text("缓存")
+                } footer: {
+                    Text("预缓存会在后台下载接下来的几章，断网时仍可继续读。设为 0 章即关闭。每本上限为 0 表示不自动清理。")
                 }
 
                 // MARK: 关于
@@ -263,10 +267,6 @@ struct SettingsView: View {
                 }
             }
             .navigationTitle("设置")
-            .sheet(isPresented: $showReaderSettings) {
-                ReaderSettingsSheet()
-                    .presentationDetents([.medium, .large])
-            }
             .sheet(isPresented: $showAIDocs) {
                 RuleDocsView()
             }
