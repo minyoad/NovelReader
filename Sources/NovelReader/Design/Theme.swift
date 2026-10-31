@@ -9,8 +9,23 @@ struct Theme {
     let text: Color
     let secondaryText: Color
     let accent: Color
+    /// The theme actually in effect, after resolving "follow system".
+    ///
+    /// Kept alongside the colours so callers can key caches and layout on the
+    /// resolved choice rather than on the stored one.
+    let resolved: ReaderTheme
+
+    /// Resolves the reader's paper against the phone's appearance.
+    ///
+    /// `systemIsDark` has to come from the view's own `colorScheme`; reading
+    /// `UITraitCollection` here would not invalidate when the user toggles
+    /// appearance while the app is in the foreground.
+    static func of(_ reading: ReadingSettings, systemIsDark: Bool) -> Theme {
+        of(reading.resolvedTheme(systemIsDark: systemIsDark))
+    }
 
     static func of(_ theme: ReaderTheme) -> Theme {
+        let theme = theme
         switch theme {
         case .paper:
             return Theme(
@@ -18,7 +33,8 @@ struct Theme {
                 secondaryBackground: Color(red: 0.94, green: 0.93, blue: 0.90),
                 text: Color(red: 0.15, green: 0.14, blue: 0.13),
                 secondaryText: Color(red: 0.45, green: 0.44, blue: 0.42),
-                accent: Color(red: 0.62, green: 0.35, blue: 0.20)
+                accent: Color(red: 0.62, green: 0.35, blue: 0.20),
+                resolved: theme
             )
         case .sepia:
             return Theme(
@@ -26,7 +42,8 @@ struct Theme {
                 secondaryBackground: Color(red: 0.91, green: 0.86, blue: 0.76),
                 text: Color(red: 0.24, green: 0.19, blue: 0.12),
                 secondaryText: Color(red: 0.47, green: 0.40, blue: 0.30),
-                accent: Color(red: 0.60, green: 0.40, blue: 0.18)
+                accent: Color(red: 0.60, green: 0.40, blue: 0.18),
+                resolved: theme
             )
         case .night:
             return Theme(
@@ -34,7 +51,8 @@ struct Theme {
                 secondaryBackground: Color(red: 0.19, green: 0.19, blue: 0.20),
                 text: Color(red: 0.80, green: 0.80, blue: 0.78),
                 secondaryText: Color(red: 0.55, green: 0.55, blue: 0.54),
-                accent: Color(red: 0.85, green: 0.62, blue: 0.35)
+                accent: Color(red: 0.85, green: 0.62, blue: 0.35),
+                resolved: theme
             )
         case .black:
             return Theme(
@@ -42,7 +60,8 @@ struct Theme {
                 secondaryBackground: Color(red: 0.10, green: 0.10, blue: 0.10),
                 text: Color(red: 0.72, green: 0.72, blue: 0.70),
                 secondaryText: Color(red: 0.45, green: 0.45, blue: 0.44),
-                accent: Color(red: 0.80, green: 0.58, blue: 0.30)
+                accent: Color(red: 0.80, green: 0.58, blue: 0.30),
+                resolved: theme
             )
         }
     }

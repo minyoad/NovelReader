@@ -128,6 +128,26 @@ struct ReadingSettingsTests {
         let decoded = try JSONDecoder().decode(AppSettings.self, from: data)
         #expect(decoded == settings)
     }
+
+    @Test("follow-system resolves to the dark family at night, light by day")
+    func followSystemResolves() {
+        // A reader who likes 纯黑 keeps 纯黑 after dark, and gets paper in daylight.
+        var reading = ReadingSettings(theme: .black, followSystemAppearance: true)
+        #expect(reading.resolvedTheme(systemIsDark: true) == .black)
+        #expect(reading.resolvedTheme(systemIsDark: false) == .paper)
+
+        // The mirror image: 米黄 in daylight, 深灰 after dark.
+        reading.theme = .sepia
+        #expect(reading.resolvedTheme(systemIsDark: false) == .sepia)
+        #expect(reading.resolvedTheme(systemIsDark: true) == .night)
+    }
+
+    @Test("follow-system off always uses the chosen theme")
+    func followSystemOff() {
+        let reading = ReadingSettings(theme: .sepia, followSystemAppearance: false)
+        #expect(reading.resolvedTheme(systemIsDark: true) == .sepia)
+        #expect(reading.resolvedTheme(systemIsDark: false) == .sepia)
+    }
 }
 
 @Suite("Chapter cleanup restore")

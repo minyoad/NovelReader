@@ -112,7 +112,7 @@ struct PagedReader: View {
             lineSpacing: reading.lineSpacing,
             paragraphSpacing: reading.paragraphSpacing,
             horizontalPadding: reading.horizontalPadding,
-            theme: reading.theme.rawValue,
+            theme: theme.resolved.rawValue,
             fontFamily: reading.fontFamily ?? "",
             firstLineIndent: reading.firstLineIndent,
             alignment: reading.alignment.rawValue,

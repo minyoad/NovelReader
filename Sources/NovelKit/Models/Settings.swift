@@ -97,6 +97,11 @@ public struct ReadingSettings: Codable, Hashable, Sendable {
     /// Keep the chapter title on the first page only, instead of repeating it
     /// on every screen (it is drawn once at the top of a chapter anyway).
     public var showChapterTitle: Bool
+    /// Follow the phone's light/dark switch instead of using `theme`.
+    ///
+    /// `theme` is kept so switching this off returns to the paper the user
+    /// picked, rather than to a default.
+    public var followSystemAppearance: Bool
 
     public init(
         fontSize: Double = 19,
@@ -109,7 +114,8 @@ public struct ReadingSettings: Codable, Hashable, Sendable {
         pageTurnEffect: PageTurnEffect = .slide,
         firstLineIndent: Bool = true,
         alignment: BodyAlignment = .justify,
-        showChapterTitle: Bool = true
+        showChapterTitle: Bool = true,
+        followSystemAppearance: Bool = false
     ) {
         self.fontSize = fontSize
         self.lineSpacing = lineSpacing
@@ -122,6 +128,7 @@ public struct ReadingSettings: Codable, Hashable, Sendable {
         self.firstLineIndent = firstLineIndent
         self.alignment = alignment
         self.showChapterTitle = showChapterTitle
+        self.followSystemAppearance = followSystemAppearance
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -136,6 +143,7 @@ public struct ReadingSettings: Codable, Hashable, Sendable {
         case firstLineIndent
         case alignment
         case showChapterTitle
+        case followSystemAppearance
     }
 
     /// Tolerant decoding: settings written before pagination (or before the
@@ -155,6 +163,22 @@ public struct ReadingSettings: Codable, Hashable, Sendable {
         firstLineIndent = try container.decodeIfPresent(Bool.self, forKey: .firstLineIndent) ?? defaults.firstLineIndent
         alignment = try container.decodeIfPresent(BodyAlignment.self, forKey: .alignment) ?? defaults.alignment
         showChapterTitle = try container.decodeIfPresent(Bool.self, forKey: .showChapterTitle) ?? defaults.showChapterTitle
+        followSystemAppearance = try container.decodeIfPresent(Bool.self, forKey: .followSystemAppearance)
+            ?? defaults.followSystemAppearance
+    }
+
+    /// The paper and ink to draw with.
+    ///
+    /// With follow-system on, the phone's light/dark mode picks the *family*,
+    /// while the user's chosen theme still picks the variant within it. So a
+    /// reader who likes 纯黑 gets 纯黑 in the dark, and 纸白 in daylight — instead
+    /// of a system toggle silently overriding their contrast choice.
+    public func resolvedTheme(systemIsDark: Bool) -> ReaderTheme {
+        guard followSystemAppearance else { return theme }
+        if systemIsDark {
+            return theme.isDark ? theme : .night
+        }
+        return theme.isDark ? .paper : theme
     }
 }
 

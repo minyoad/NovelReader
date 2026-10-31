@@ -6,6 +6,9 @@ struct ReaderView: View {
     @StateObject private var model: ReaderModel
     @EnvironmentObject private var app: AppModel
     @Environment(\.dismiss) private var dismiss
+    /// Only consulted when "follow system" is on; when it is off the reader
+    /// owns its appearance and this is ignored.
+    @Environment(\.colorScheme) private var systemScheme
     @State private var showSettings = false
     @State private var showTOC = false
     @State private var showCacheSheet = false
@@ -14,9 +17,16 @@ struct ReaderView: View {
         _model = StateObject(wrappedValue: ReaderModel(book: book, app: app, startIndex: startIndex))
     }
 
-    private var theme: Theme { Theme.of(app.settings.reading.theme) }
+    private var theme: Theme {
+        Theme.of(app.settings.reading, systemIsDark: systemScheme == .dark)
+    }
 
-    private var reading: ReadingSettings { app.settings.reading }
+    /// The appearance the reader is *displaying*, which is what sheets and the
+    /// status bar have to follow — not the phone's setting.
+    ///
+    /// While "follow system" is on these are the same thing, but when it is off
+    /// the phone may be in light mode while the reader is on 纯黑.
+    private var isDark: Bool { theme.resolved.isDark }
 
     var body: some View {
         ZStack {
@@ -67,24 +77,24 @@ struct ReaderView: View {
         // driven by the chosen theme rather than by the phone's setting. Without
         // this, picking 深灰/纯黑 left a light status bar, light sheets and
         // light toolbar material on a dark page.
-        .preferredColorScheme(reading.theme.isDark ? .dark : .light)
+        .preferredColorScheme(isDark ? .dark : .light)
         .task { await model.start() }
         .sheet(isPresented: $showSettings) {
             ReaderSettingsSheet()
                 .presentationDetents([.medium, .large])
                 // Sheets are hosted apart from the presenting view, so
                 // `preferredColorScheme` above does not reach them.
-                .preferredColorScheme(reading.theme.isDark ? .dark : .light)
+                .preferredColorScheme(isDark ? .dark : .light)
         }
         .sheet(isPresented: $showCacheSheet) {
             CacheSheet(model: model)
                 .presentationDetents([.medium, .large])
-                .preferredColorScheme(reading.theme.isDark ? .dark : .light)
+                .preferredColorScheme(isDark ? .dark : .light)
         }
         .sheet(isPresented: $model.showSourcePicker) {
             SourcePickerSheet(model: model)
                 .presentationDetents([.medium, .large])
-                .preferredColorScheme(reading.theme.isDark ? .dark : .light)
+                .preferredColorScheme(isDark ? .dark : .light)
         }
         .sheet(isPresented: $showTOC) {
             ChapterListView(
@@ -95,7 +105,7 @@ struct ReaderView: View {
                 Task { await model.loadChapter(at: index) }
             }
             .presentationDetents([.medium, .large])
-            .preferredColorScheme(reading.theme.isDark ? .dark : .light)
+            .preferredColorScheme(isDark ? .dark : .light)
         }
         .alert("出错了", isPresented: Binding(
             get: { model.errorMessage != nil },

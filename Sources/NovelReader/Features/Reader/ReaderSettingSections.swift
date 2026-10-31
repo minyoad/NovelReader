@@ -97,6 +97,8 @@ enum ReaderSettingSections {
 
     @ViewBuilder
     static func background(_ reading: Binding<ReadingSettings>) -> some View {
+        Toggle("跟随系统深色模式", isOn: reading.followSystemAppearance)
+
         Picker("主题", selection: reading.theme) {
             ForEach(ReaderTheme.allCases) { theme in
                 Text(theme.displayName).tag(theme)
