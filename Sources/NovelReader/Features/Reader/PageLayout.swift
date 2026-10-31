@@ -5,29 +5,29 @@ import SwiftUI
 import UIKit
 import NovelKit
 
-/// A chapter prepared for paginated layout: one attributed string holding the
-/// chapter title followed by the body, plus the offset mapping needed to turn
-/// CoreText UTF-16 positions back into chapter character offsets.
+/// A chapter prepared for paginated layout, plus the offset mapping needed to
+/// turn CoreText UTF-16 positions back into chapter character offsets.
+///
+/// The chapter title is deliberately not part of this: it is drawn in the
+/// reader's header slot, so the page holds body text only and offsets map
+/// one-to-one to the chapter text.
 struct PagedDocument {
     let attributed: NSAttributedString
-    /// UTF-16 length of `title + "\n"`, i.e. where the body begins.
-    let bodyPrefix: Int
     let text: PaginatedText
     let chapterURL: String
 
     /// UTF-16 offset inside `attributed` for a character offset in the raw
     /// chapter text.
     func attributedLocation(forOriginal offset: Int) -> Int {
-        bodyPrefix + text.bodyUTF16Offset(forOriginal: offset)
+        text.bodyUTF16Offset(forOriginal: offset)
     }
 
     /// Raw chapter character offset for a UTF-16 location in `attributed`.
     func characterOffset(atAttributed location: Int) -> Int {
-        text.originalOffset(forBodyUTF16: max(location - bodyPrefix, 0))
+        text.originalOffset(forBodyUTF16: max(location, 0))
     }
 
     static func make(
-        chapter: Chapter,
         content: ChapterContent,
         reading: ReadingSettings,
         theme: Theme
@@ -54,29 +54,16 @@ struct PagedDocument {
             NSAttributedString.Key(kCTForegroundColorAttributeName as String): textColor.cgColor,
         ]
 
-        let result = NSMutableAttributedString()
-        let title = chapter.title.trimmingCharacters(in: .whitespacesAndNewlines)
-        if reading.showChapterTitle, !title.isEmpty {
-            let titleStyle = NSMutableParagraphStyle()
-            titleStyle.lineSpacing = 0
-            titleStyle.paragraphSpacing = reading.paragraphSpacing + 10
-            titleStyle.lineBreakMode = .byWordWrapping
-            result.append(NSAttributedString(
-                string: title + "\n",
-                attributes: [
-                    .font: bodyFont(size: reading.fontSize + 3, weight: .semibold, family: reading.fontFamily),
-                    .paragraphStyle: titleStyle,
-                    .foregroundColor: textColor,
-                    NSAttributedString.Key(kCTForegroundColorAttributeName as String): textColor.cgColor,
-                ]
-            ))
-        }
-        let prefix = result.length
-        result.append(NSAttributedString(string: paginated.body, attributes: bodyAttributes))
+        // No chapter title inside the page: the reader shows it in a fixed
+        // header slot, so repeating it here would print the same line twice at
+        // the top of a chapter's first page.
+        let result = NSMutableAttributedString(
+            string: paginated.body,
+            attributes: bodyAttributes
+        )
 
         return PagedDocument(
             attributed: result,
-            bodyPrefix: prefix,
             text: paginated,
             chapterURL: content.chapterURL
         )

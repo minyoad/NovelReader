@@ -99,7 +99,6 @@ struct PagedReader: View {
         var fontFamily: String
         var firstLineIndent: Bool
         var alignment: String
-        var showChapterTitle: Bool
     }
 
     private func layoutKey(_ box: CGSize) -> LayoutKey {
@@ -115,8 +114,7 @@ struct PagedReader: View {
             theme: theme.resolved.rawValue,
             fontFamily: reading.fontFamily ?? "",
             firstLineIndent: reading.firstLineIndent,
-            alignment: reading.alignment.rawValue,
-            showChapterTitle: reading.showChapterTitle
+            alignment: reading.alignment.rawValue
         )
     }
 
@@ -319,15 +317,14 @@ struct PagedReader: View {
     // MARK: - Pagination
 
     private func paginate(box: CGSize) {
-        guard let chapter = model.currentChapter,
-              let content = model.content,
+        guard let content = model.content,
               box.width > 40, box.height > 60 else {
             document = nil
             pages = []
             return
         }
 
-        let doc = PagedDocument.make(chapter: chapter, content: content, reading: reading, theme: theme)
+        let doc = PagedDocument.make(content: content, reading: reading, theme: theme)
         let ranges = PageLayout.ranges(of: doc.attributed, in: box)
         document = doc
         pages = ranges
@@ -400,13 +397,11 @@ struct PagedReader: View {
         guard !probe.isEmpty else { return nil }
 
         let text = document.attributed.string as NSString
-        let bodyStart = min(document.bodyPrefix, text.length)
-        let bodyRange = NSRange(location: bodyStart, length: max(text.length - bodyStart, 0))
-        guard bodyRange.length > 0 else { return nil }
+        guard text.length > 0 else { return nil }
 
-        let found = text.range(of: probe, options: [], range: bodyRange)
+        let found = text.range(of: probe)
         guard found.location != NSNotFound else { return nil }
-        let length = min(max(sentence.utf16.count, found.length), bodyRange.length - (found.location - bodyRange.location))
+        let length = min(max(sentence.utf16.count, found.length), text.length - found.location)
         guard length > 0 else { return nil }
         return NSRange(location: found.location, length: length)
     }

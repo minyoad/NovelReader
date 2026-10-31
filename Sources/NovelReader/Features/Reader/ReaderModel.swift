@@ -17,7 +17,12 @@ final class ReaderModel: ObservableObject {
     @Published var content: ChapterContent?
     @Published var isLoading = false
     @Published var errorMessage: String?
-    @Published var showBars = true
+    /// Whether the chrome (top bar, bottom bar) is showing.
+    ///
+    /// Starts hidden: the reader opens full screen with just the chapter title,
+    /// and a tap brings the rest in. Playback does not bring it back either —
+    /// the Lock Screen and headphones drive it while the page stays clean.
+    @Published var showBars = false
     @Published var currentSentenceIndex = 0
     @Published var aiTask: AIPrompt.ChapterTask?
     @Published var aiProgress: Double?
@@ -460,6 +465,10 @@ final class ReaderModel: ObservableObject {
 
     func stopSpeaking() {
         speech.stop()
+        // Exiting playback returns to the clean page. The bar was only there
+        // because the reader opened it to press pause/exit; leaving it up would
+        // mean the page stays half covered after the audio is gone.
+        showBars = false
     }
 
     private func advanceAfterSpeech() async {

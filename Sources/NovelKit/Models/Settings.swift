@@ -94,9 +94,6 @@ public struct ReadingSettings: Codable, Hashable, Sendable {
     /// convention for Chinese prose.
     public var firstLineIndent: Bool
     public var alignment: BodyAlignment
-    /// Keep the chapter title on the first page only, instead of repeating it
-    /// on every screen (it is drawn once at the top of a chapter anyway).
-    public var showChapterTitle: Bool
     /// Follow the phone's light/dark switch instead of using `theme`.
     ///
     /// `theme` is kept so switching this off returns to the paper the user
@@ -119,7 +116,6 @@ public struct ReadingSettings: Codable, Hashable, Sendable {
         pageTurnEffect: PageTurnEffect = .slide,
         firstLineIndent: Bool = true,
         alignment: BodyAlignment = .justify,
-        showChapterTitle: Bool = true,
         followSystemAppearance: Bool = false,
         resumeLastReading: Bool = true
     ) {
@@ -133,7 +129,6 @@ public struct ReadingSettings: Codable, Hashable, Sendable {
         self.pageTurnEffect = pageTurnEffect
         self.firstLineIndent = firstLineIndent
         self.alignment = alignment
-        self.showChapterTitle = showChapterTitle
         self.followSystemAppearance = followSystemAppearance
         self.resumeLastReading = resumeLastReading
     }
@@ -149,7 +144,6 @@ public struct ReadingSettings: Codable, Hashable, Sendable {
         case pageTurnEffect
         case firstLineIndent
         case alignment
-        case showChapterTitle
         case followSystemAppearance
         case resumeLastReading
     }
@@ -170,7 +164,6 @@ public struct ReadingSettings: Codable, Hashable, Sendable {
         pageTurnEffect = try container.decodeIfPresent(PageTurnEffect.self, forKey: .pageTurnEffect) ?? defaults.pageTurnEffect
         firstLineIndent = try container.decodeIfPresent(Bool.self, forKey: .firstLineIndent) ?? defaults.firstLineIndent
         alignment = try container.decodeIfPresent(BodyAlignment.self, forKey: .alignment) ?? defaults.alignment
-        showChapterTitle = try container.decodeIfPresent(Bool.self, forKey: .showChapterTitle) ?? defaults.showChapterTitle
         followSystemAppearance = try container.decodeIfPresent(Bool.self, forKey: .followSystemAppearance)
             ?? defaults.followSystemAppearance
         resumeLastReading = try container.decodeIfPresent(Bool.self, forKey: .resumeLastReading)

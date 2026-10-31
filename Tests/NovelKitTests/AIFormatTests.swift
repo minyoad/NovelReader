@@ -74,7 +74,7 @@ struct ReadingSettingsTests {
         let reading = ReadingSettings()
         #expect(reading.firstLineIndent)
         #expect(reading.alignment == .justify)
-        #expect(reading.showChapterTitle)
+        #expect(reading.resumeLastReading)
     }
 
     @Test("old settings JSON still decodes and keeps its values")

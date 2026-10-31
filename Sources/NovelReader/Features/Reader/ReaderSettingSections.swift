@@ -60,8 +60,6 @@ enum ReaderSettingSections {
 
         Toggle("首行缩进两字", isOn: reading.firstLineIndent)
 
-        Toggle("正文显示章节标题", isOn: reading.showChapterTitle)
-
         Picker("字体", selection: fontFamily(reading)) {
             Text("系统衬线（推荐中文）").tag("")
             Text("系统无衬线").tag("-apple-system")

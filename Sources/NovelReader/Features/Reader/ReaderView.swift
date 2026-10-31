@@ -33,6 +33,16 @@ struct ReaderView: View {
             theme.background.ignoresSafeArea()
 
             VStack(spacing: 0) {
+                // The chapter title is the only chrome in full-screen reading.
+                // It sits in the layout rather than floating over the text, so
+                // pagination reserves the same height whether or not the bars
+                // are showing — otherwise a tap would re-flow the page.
+                ChapterHeaderTitle(
+                    title: model.currentChapter?.title,
+                    visible: !model.showBars,
+                    theme: theme
+                )
+
                 if app.settings.reading.pageTurnMode == .page {
                     PagedReader(model: model, theme: theme)
                 } else {
@@ -182,13 +192,9 @@ private struct ReaderContent: View {
                         }
                     }
 
-                    if let chapter = model.currentChapter {
-                        Text(chapter.title)
-                            .font(.system(size: 22, weight: .semibold))
-                            .foregroundStyle(theme.text)
-                            .padding(.bottom, 22)
-                    }
-
+                    // Chapter title: drawn in the reader's header slot, not
+                    // here. Repeating it would print the heading twice at the
+                    // top of a chapter and cost a paragraph of screen space.
                     ForEach(Array(paragraphs.enumerated()), id: \.offset) { index, paragraph in
                         Text(attributed(displayed(paragraph), highlighted: index == highlightIndex))
                             .font(bodyFont)
@@ -297,6 +303,37 @@ private struct ReaderContent: View {
 }
 
 // MARK: - Bars
+
+/// The single line of chrome shown while reading full screen.
+///
+/// Full-screen reading means the page and, at most, where you are in the book:
+/// the chapter title. Everything else — book name, TOC, AI, source, cache,
+/// settings, playback — appears only after a tap. It is a separate view from
+/// `ReaderTopBar` so the full-screen state cannot drift back into a toolbar as
+/// buttons get added there.
+private struct ChapterHeaderTitle: View {
+    let title: String?
+    /// Hidden while `ReaderTopBar` is showing, since that bar already names the
+    /// chapter directly below this slot.
+    let visible: Bool
+    let theme: Theme
+
+    var body: some View {
+        Text(title ?? "")
+            .font(.footnote)
+            .foregroundStyle(theme.secondaryText)
+            .lineLimit(1)
+            .frame(maxWidth: .infinity)
+            // The slot keeps its height when hidden so that tapping the page
+            // does not shift the text under the finger.
+            .padding(.horizontal, 20)
+            .padding(.top, 6)
+            .padding(.bottom, 8)
+            .opacity(visible ? 1 : 0)
+            .animation(.easeInOut(duration: 0.18), value: visible)
+            .accessibilityHidden(!visible)
+    }
+}
 
 private struct ReaderTopBar: View {
     @ObservedObject var model: ReaderModel
