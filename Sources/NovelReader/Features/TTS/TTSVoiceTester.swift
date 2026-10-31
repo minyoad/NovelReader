@@ -31,7 +31,9 @@ final class TTSVoiceTester: ObservableObject {
 
     func preview(_ settings: TTSSettings) {
         stop()
-        guard settings.isRemoteUsable else {
+        // Only the remote engines can be "not configured"; the system voice
+        // always works, so it must not be gated on `isRemoteUsable`.
+        guard !settings.engine.needsNetwork || settings.isRemoteUsable else {
             state = .failed("请先在上面选择音色或填写接口。")
             return
         }

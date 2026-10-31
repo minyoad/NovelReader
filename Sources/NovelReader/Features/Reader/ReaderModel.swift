@@ -70,10 +70,9 @@ final class ReaderModel: ObservableObject {
         return Double(currentIndex + 1) / Double(chapters.count)
     }
 
-    var isSpeaking: Bool { speech.isSpeaking }
+    var isSpeaking: Bool { speech.isActive }
 
     // MARK: - Loading
-
     func start() async {
         guard chapters.isEmpty else { return }
         isLoading = true
@@ -103,7 +102,7 @@ final class ReaderModel: ObservableObject {
 
     func loadChapter(at index: Int, offset: Int = 0, autoplaySpeech: Bool = false) async {
         guard chapters.indices.contains(index) else { return }
-        let shouldSpeak = speech.isSpeaking
+        let shouldSpeak = speech.isActive
         speech.stop()
         currentIndex = index
         currentSentenceIndex = 0
@@ -402,7 +401,7 @@ final class ReaderModel: ObservableObject {
         }
         aiTask = task
         aiProgress = 0
-        let wasSpeaking = speech.isSpeaking
+        let wasSpeaking = speech.isActive
         if wasSpeaking { speech.stop() }
 
         do {

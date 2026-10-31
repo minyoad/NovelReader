@@ -42,7 +42,7 @@ NovelReader/
 │       ├── App/                  AppModel、入口、Tab
 │       ├── Design/               主题、封面、Banner、空状态
 │       └── Features/             书架 / 详情 / 阅读器 / 搜索 / 书源 / 设置 / TTS
-└── Tests/NovelKitTests/          规则引擎与流水线测试（61 个）
+└── Tests/NovelKitTests/          规则引擎与流水线测试（65 个）
 ```
 
 ## 构建与测试
@@ -218,6 +218,8 @@ cache.autoCacheOnAdd     加入书架时自动缓存全本
 这些字段全部做了容错解码：旧版本写下的 `settings.json` 缺少新字段时取默认值，不会因为升级把已有设置重置。
 
 AI Key 单独存 Keychain（service `com.yang.NovelReader`）。
+
+`tts.remote.apiKey`（自定义朗读接口的密钥）同样只存 Keychain，`settings.json` 里始终是空字符串。
 
 ## 朗读引擎说明
 

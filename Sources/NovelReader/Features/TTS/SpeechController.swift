@@ -45,15 +45,22 @@ final class SpeechController: NSObject, ObservableObject {
 
     private var store: LibraryStore?
     private var chunks: [SpeechChunk] = []
-    private var chunkIndex = 0
+    private var currentChunkIndex = 0
     private var audioPlayer: AVAudioPlayer?
     private var progressTimer: Timer?
     private var loadTask: Task<Void, Never>?
     private var prefetchTasks: [Int: Task<Void, Never>] = [:]
     private var currentChunkBoundaries: [EdgeSentenceBoundary] = []
-    /// Sentence offset of the chunk currently loaded, used to translate the
-    /// player's clock into an index into `sentences`.
-    private var playingChunkStart = 0
+    /// Holds the chunk fetched ahead of the one playing.
+    ///
+    /// Needed even with the disk cache off: otherwise "prefetch" would fetch
+    /// audio, throw it away and fetch it again when the chunk starts, which is
+    /// worse than not prefetching at all. Only the next chunk is kept, so this
+    /// never grows past one utterance.
+    private var prefetched: (key: String, audio: Data, boundaries: [EdgeSentenceBoundary])?
+    /// Memoised sentence-end offsets for the current chapter text; invalidated
+    /// whenever the text changes (chapter switch, AI cleanup).
+    private var offsetsCache: (text: String, offsets: [Int])?
 
     override init() {
         super.init()
@@ -71,6 +78,10 @@ final class SpeechController: NSObject, ObservableObject {
     /// fetched. Without the preparing case, pressing play on a remote engine
     /// would hide the controls for the second before audio arrives.
     var isActive: Bool { isSpeaking || isPaused || isPreparing }
+
+    /// True while audio is actually coming out, as opposed to paused or still
+    /// being fetched. Drives the play/pause icon.
+    var isPlaying: Bool { isSpeaking && !isPaused }
 
     var engine: TTSEngine { settings.engine }
 
@@ -106,6 +117,7 @@ final class SpeechController: NSObject, ObservableObject {
     func load(sentences newSentences: [String], startAt index: Int = 0, autoPlay: Bool = true) {
         stop()
         sentences = newSentences
+        offsetsCache = nil
         currentIndex = min(max(index, 0), max(newSentences.count - 1, 0))
         rebuildChunks()
         guard autoPlay, !newSentences.isEmpty else { return }
@@ -129,8 +141,18 @@ final class SpeechController: NSObject, ObservableObject {
             guard synthesizer.isSpeaking else { return }
             synthesizer.pauseSpeaking(at: .immediate)
         case .edge, .openAICompatible:
-            guard let player = audioPlayer, player.isPlaying else { return }
-            player.pause()
+            if isPreparing {
+                // Still waiting on the network: there is nothing to pause, so
+                // cancel the fetch instead of leaving a spinner that never
+                // resolves into audio.
+                loadTask?.cancel()
+                loadTask = nil
+                isPreparing = false
+            } else if let player = audioPlayer, player.isPlaying {
+                player.pause()
+            } else {
+                return
+            }
             progressTimer?.invalidate()
             progressTimer = nil
         }
@@ -139,7 +161,9 @@ final class SpeechController: NSObject, ObservableObject {
     }
 
     func toggle() {
-        if isSpeaking { pause() } else { play() }
+        // `isActive` also covers the paused state, so it cannot be the test
+        // here: a paused reader has to resume, not pause again.
+        if isSpeaking || isPreparing { pause() } else { play() }
     }
 
     func stop() {
@@ -155,6 +179,7 @@ final class SpeechController: NSObject, ObservableObject {
         isSpeaking = false
         isPaused = false
         isPreparing = false
+        prefetched = nil
         deactivateSession()
     }
 
@@ -193,13 +218,35 @@ final class SpeechController: NSObject, ObservableObject {
 
     func characterOffset(ofSentence index: Int, in text: String) -> Int {
         guard sentences.indices.contains(index) else { return 0 }
-        var offset = 0
-        for i in 0..<index {
-            if let range = text.range(of: sentences[i], range: text.startIndex..<text.endIndex) {
-                offset = text.distance(from: text.startIndex, to: range.upperBound)
+        return sentenceOffsets(in: text)[index]
+    }
+
+    /// Character offset of the end of every sentence, computed in one forward
+    /// pass.
+    ///
+    /// Searching per call was both O(n²) and wrong for repeated sentences: a
+    /// chapter full of "他说。" would map every occurrence to the first one, so
+    /// the saved reading position jumped backwards. Walking forward from the
+    /// previous match keeps the offsets monotonic and does the work once.
+    private func sentenceOffsets(in text: String) -> [Int] {
+        if let cache = offsetsCache, cache.text == text { return cache.offsets }
+
+        var offsets: [Int] = []
+        offsets.reserveCapacity(sentences.count)
+        var cursor = text.startIndex
+        for sentence in sentences {
+            if let range = text.range(of: sentence, range: cursor..<text.endIndex) {
+                offsets.append(text.distance(from: text.startIndex, to: range.upperBound))
+                cursor = range.upperBound
+            } else {
+                // The text no longer contains this sentence verbatim (AI
+                // cleanup, for instance). Keep the position monotonic instead
+                // of snapping back to the top.
+                offsets.append(offsets.last ?? 0)
             }
         }
-        return offset
+        offsetsCache = (text, offsets)
+        return offsets
     }
 
     // MARK: - Chunking
@@ -270,9 +317,8 @@ final class SpeechController: NSObject, ObservableObject {
         progressTimer?.invalidate()
         progressTimer = nil
 
-        chunkIndex = index
+        currentChunkIndex = index
         currentChunkBoundaries = []
-        playingChunkStart = sentence
         isPreparing = true
         isSpeaking = false
         isPaused = false
@@ -282,6 +328,15 @@ final class SpeechController: NSObject, ObservableObject {
         let settings = self.settings
         let key = cacheKey(for: chunk)
         let store = self.store
+
+        // A prefetched chunk starts instantly; play it without a second trip
+        // through the network or the disk cache.
+        if let cached = prefetched, cached.key == key {
+            prefetched = nil
+            beginPlayback(audio: cached.audio, boundaries: cached.boundaries, chunkIndex: index)
+            return
+        }
+        prefetched = nil
 
         loadTask = Task { [weak self] in
             do {
@@ -318,7 +373,10 @@ final class SpeechController: NSObject, ObservableObject {
     ) async throws -> (audio: Data, boundaries: [EdgeSentenceBoundary]) {
         if settings.cacheEnabled, let store, let cached = await store.loadSpeech(key: key) {
             await store.touchSpeech(key: key)
-            return (cached, [])
+            // Timings survive the round trip, so a second listen highlights
+            // exactly like the first instead of falling back to an estimate.
+            let boundaries = await store.loadSpeechBoundaries(key: key)
+            return (cached, boundaries)
         }
 
         var audio: Data
@@ -348,6 +406,7 @@ final class SpeechController: NSObject, ObservableObject {
         if settings.cacheEnabled, let store, !audio.isEmpty {
             let limit = Int64(settings.cacheLimitMB) * 1024 * 1024
             await store.saveSpeech(audio, key: key, limitBytes: limit)
+            await store.saveSpeechBoundaries(boundaries, key: key)
         }
         return (audio, boundaries)
     }
@@ -368,9 +427,6 @@ final class SpeechController: NSObject, ObservableObject {
             guard player.play() else { throw EdgeTTSError.noAudio }
             audioPlayer = player
             currentChunkBoundaries = boundaries
-            // Stored so the timer can translate playback time into an index
-            // even after the chunk header changes underneath it.
-            playingChunkStart = chunks[index].sentenceStart
             isPreparing = false
             isSpeaking = true
             isPaused = false
@@ -393,7 +449,7 @@ final class SpeechController: NSObject, ObservableObject {
     private func updateHighlight() {
         guard let player = audioPlayer, player.isPlaying else { return }
         let elapsed = player.currentTime
-        let chunk = chunks.indices.contains(chunkIndex) ? chunks[chunkIndex] : nil
+        let chunk = chunks.indices.contains(currentChunkIndex) ? chunks[currentChunkIndex] : nil
         guard let chunk else { return }
 
         let offsetInChunk = sentenceOffset(at: elapsed, chunk: chunk, duration: player.duration)
@@ -424,7 +480,8 @@ final class SpeechController: NSObject, ObservableObject {
     /// sentences that were sent; otherwise falls back to a character-count
     /// estimate, which is accurate enough for highlighting and works for
     /// engines that report no timings at all.
-    private func sentenceOffset(at elapsed: Double, chunk: SpeechChunk, duration: Double) -> Int {        if currentChunkBoundaries.count == chunk.sentenceCount, !currentChunkBoundaries.isEmpty {
+    private func sentenceOffset(at elapsed: Double, chunk: SpeechChunk, duration: Double) -> Int {
+        if currentChunkBoundaries.count == chunk.sentenceCount, !currentChunkBoundaries.isEmpty {
             var result = 0
             for (index, boundary) in currentChunkBoundaries.enumerated() where boundary.start <= elapsed {
                 result = index
@@ -449,7 +506,6 @@ final class SpeechController: NSObject, ObservableObject {
     private func prefetchNextChunk(after index: Int) {
         let next = index + 1
         guard chunks.indices.contains(next), prefetchTasks[next] == nil else { return }
-        guard settings.cacheEnabled else { return }
 
         let chunk = chunks[next]
         let key = cacheKey(for: chunk)
@@ -459,12 +515,21 @@ final class SpeechController: NSObject, ObservableObject {
         prefetchTasks[next] = Task { [weak self] in
             defer { Task { @MainActor in self?.prefetchTasks[next] = nil } }
             guard !Task.isCancelled else { return }
-            _ = try? await Self.audio(for: chunk, key: key, settings: settings, store: store)
+            guard let result = try? await Self.audio(for: chunk, key: key, settings: settings, store: store) else {
+                return
+            }
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                // Only keep it if the reader has not moved on in the meantime;
+                // otherwise this would pin a chunk that may never be played.
+                guard let self, self.currentChunkIndex + 1 == next else { return }
+                self.prefetched = (key: key, audio: result.audio, boundaries: result.boundaries)
+            }
         }
     }
 
     private func advanceRemote() {
-        let next = chunkIndex + 1
+        let next = currentChunkIndex + 1
         guard chunks.indices.contains(next) else {
             finishQueue()
             return
@@ -522,7 +587,7 @@ final class SpeechController: NSObject, ObservableObject {
             guard let index = chunkIndex(containing: currentIndex) else { return }
             // Inside the chunk already loaded there is no need to refetch: seek
             // instead, which keeps "next sentence" instant.
-            if index == chunkIndex, let player = audioPlayer {
+            if index == currentChunkIndex, let player = audioPlayer {
                 player.currentTime = seekTime(forSentence: currentIndex, chunk: chunks[index], duration: player.duration)
                 player.play()
                 isSpeaking = true

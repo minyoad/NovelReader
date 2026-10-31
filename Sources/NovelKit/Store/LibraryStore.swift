@@ -230,6 +230,24 @@ public actor LibraryStore {
         try? Data(contentsOf: speechFileURL(key: key))
     }
 
+    /// Sentence timings stored next to an utterance.
+    ///
+    /// Kept as a sidecar rather than in an index because it is only useful for
+    /// the one file it belongs to, and losing it degrades highlighting to an
+    /// estimate instead of breaking playback.
+    public func saveSpeechBoundaries(_ boundaries: [EdgeSentenceBoundary], key: String) {
+        guard !boundaries.isEmpty else { return }
+        let url = speechFileURL(key: key).appendingPathExtension("json")
+        guard let data = try? encoder.encode(boundaries) else { return }
+        try? data.write(to: url, options: .atomic)
+    }
+
+    public func loadSpeechBoundaries(key: String) -> [EdgeSentenceBoundary] {
+        let url = speechFileURL(key: key).appendingPathExtension("json")
+        guard let data = try? Data(contentsOf: url) else { return [] }
+        return (try? decoder.decode([EdgeSentenceBoundary].self, from: data)) ?? []
+    }
+
     public func speechEntries() -> [(key: String, size: Int64, lastUsed: Date)] {
         let keys: [URLResourceKey] = [.fileSizeKey, .contentModificationDateKey]
         guard let files = try? FileManager.default.contentsOfDirectory(
@@ -239,6 +257,11 @@ public actor LibraryStore {
 
         let fallback = Date(timeIntervalSince1970: 0)
         return files.compactMap { file in
+            // Timings sidecars live in the same folder but are not cache
+            // entries of their own: they belong to their `.mp3` and are deleted
+            // with it, so counting them would double the reported size and let
+            // eviction pick the same key twice.
+            guard file.pathExtension == "mp3" else { return nil }
             guard let values = try? file.resourceValues(forKeys: Set(keys)) else { return nil }
             return (
                 key: file.deletingPathExtension().lastPathComponent,
@@ -273,6 +296,10 @@ public actor LibraryStore {
         for key in doomed {
             let url = speechFileURL(key: key)
             if (try? FileManager.default.removeItem(at: url)) != nil {
+                // The timings sidecar is useless without its audio, so it goes
+                // with it — otherwise it would linger forever, invisible to the
+                // size accounting.
+                try? FileManager.default.removeItem(at: url.appendingPathExtension("json"))
                 freed += sizes[key] ?? 0
                 removed += 1
             }
@@ -289,6 +316,7 @@ public actor LibraryStore {
         for entry in entries {
             let url = speechFileURL(key: entry.key)
             if (try? FileManager.default.removeItem(at: url)) != nil {
+                try? FileManager.default.removeItem(at: url.appendingPathExtension("json"))
                 freed += entry.size
                 removed += 1
             }

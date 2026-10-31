@@ -71,6 +71,19 @@ struct EdgeTTSClientTests {
         #expect(ssml.contains("rate='+50%'"))
     }
 
+    @Test("ssml clamping keeps prosody inside the accepted range")
+    func ssmlClamping() {
+        let fast = EdgeTTSClient.ssml(text: "x", voice: "v", rate: 3.0, pitch: 5.0, volume: 3.0)
+        #expect(fast.contains("rate='+100%'"))
+        #expect(fast.contains("pitch='+50Hz'"))
+        #expect(fast.contains("volume='+100%'"))
+
+        let slow = EdgeTTSClient.ssml(text: "x", voice: "v", rate: 0.01, pitch: 0.1, volume: 0)
+        #expect(slow.contains("rate='-50%'"))
+        #expect(slow.contains("pitch='-45Hz'"))
+        #expect(slow.contains("volume='-100%'"))
+    }
+
     @Test("handshake URL carries the token, version and connection id")
     func buildsHandshakeURL() throws {
         let url = try #require(EdgeTTSClient.url(connectionID: "abc123", token: "TKN-ABC"))

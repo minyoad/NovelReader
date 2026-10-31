@@ -422,7 +422,7 @@ private struct ReaderBottomBar: View {
                 Button {
                     model.toggleSpeech()
                 } label: {
-                    Image(systemName: model.speech.isSpeaking ? "pause.circle.fill" : "play.circle.fill")
+                    Image(systemName: model.speech.isActive ? "pause.circle.fill" : "play.circle.fill")
                         .font(.system(size: 34))
                         .foregroundStyle(theme.accent)
                 }
@@ -475,7 +475,7 @@ private struct TTSBar: View {
                             .controlSize(.small)
                             .frame(width: 20, height: 20)
                     } else {
-                        Image(systemName: model.speech.isSpeaking ? "pause.fill" : "play.fill")
+                        Image(systemName: model.speech.isPlaying ? "pause.fill" : "play.fill")
                             .font(.system(size: 20))
                     }
                 }
@@ -484,7 +484,7 @@ private struct TTSBar: View {
                 }
 
                 Menu {
-                    ForEach([0.35, 0.45, 0.5, 0.6, 0.75, 0.9, 1.05], id: \.self) { rate in
+                    ForEach([0.35, 0.45, 0.5, 0.6, 0.75, 0.9, 1.0], id: \.self) { rate in
                         Button(String(format: "%.2fx", rate)) {
                             app.settings.tts.rate = rate
                             app.saveSettings()

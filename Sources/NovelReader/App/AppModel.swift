@@ -82,8 +82,9 @@ final class AppModel: ObservableObject {
 
         var loaded = AppSettings()
         loaded.ai.apiKey = Keychain.get("ai.apiKey") ?? ""
+        loaded.tts.remote.apiKey = Keychain.get("tts.apiKey") ?? ""
         // Settings are loaded asynchronously in bootstrap(); this placeholder only
-        // carries the API key so the first launch is not blocked by disk IO.
+        // carries the API keys so the first launch is not blocked by disk IO.
         _settings = Published(initialValue: loaded)
         self.client = HTTPClient(settings: loaded.network)
     }
@@ -101,6 +102,7 @@ final class AppModel: ObservableObject {
     func bootstrap() async {
         var loaded = await store.loadSettings()
         loaded.ai.apiKey = Keychain.get("ai.apiKey") ?? ""
+        loaded.tts.remote.apiKey = Keychain.get("tts.apiKey") ?? ""
         settings = loaded
         client = HTTPClient(settings: loaded.network)
         books = await store.loadBooks()
@@ -207,10 +209,18 @@ final class AppModel: ObservableObject {
     func saveSettings() {
         var persisted = settings
         persisted.ai.apiKey = ""
+        // The TTS endpoint may need a key too, and it is just as sensitive as
+        // the AI one: keep it out of the plain JSON settings blob.
+        persisted.tts.remote.apiKey = ""
         if settings.ai.apiKey.isEmpty {
             Keychain.delete("ai.apiKey")
         } else {
             Keychain.set(settings.ai.apiKey, for: "ai.apiKey")
+        }
+        if settings.tts.remote.apiKey.isEmpty {
+            Keychain.delete("tts.apiKey")
+        } else {
+            Keychain.set(settings.tts.remote.apiKey, for: "tts.apiKey")
         }
         let snapshot = persisted
         Task { await store.saveSettings(snapshot) }

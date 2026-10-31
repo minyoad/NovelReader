@@ -27,7 +27,7 @@ public enum EdgeTTSError: LocalizedError {
 ///
 /// The service emits these alongside the audio, which is what lets the reader
 /// highlight the sentence being spoken instead of guessing from a byte count.
-public struct EdgeSentenceBoundary: Sendable, Equatable {
+public struct EdgeSentenceBoundary: Sendable, Equatable, Codable {
     public var text: String
     /// Seconds from the start of the returned audio.
     public var start: Double
@@ -205,12 +205,14 @@ public struct EdgeTTSClient: Sendable {
     static func ssml(text: String, voice: String, rate: Double, pitch: Double, volume: Double) -> String {
         // `rate` uses the same scale as the system voice, where 0.5 is the
         // default speaking speed. The service wants a percentage offset from
-        // normal, so 0.5 maps to +0% and 1.0 to +100%.
-        let ratePercent = Int(((rate / 0.5 - 1) * 100).rounded())
+        // normal, so 0.5 maps to +0% and 1.0 to +100%. Clamped because the
+        // service rejects values outside its accepted prosody range outright
+        // rather than saturating them.
+        let ratePercent = max(-50, min(100, Int(((rate / 0.5 - 1) * 100).rounded())))
         // Pitch is a multiplier in the model but a signed offset in Hz for the
         // service; 50 Hz per unit matches how the reference client maps it.
-        let pitchHz = Int(((pitch - 1) * 50).rounded())
-        let volumePercent = Int(((volume - 1) * 100).rounded())
+        let pitchHz = max(-50, min(50, Int(((pitch - 1) * 50).rounded())))
+        let volumePercent = max(-100, min(100, Int(((volume - 1) * 100).rounded())))
 
         func signed(_ value: Int, unit: String) -> String {
             "\(value >= 0 ? "+" : "")\(value)\(unit)"

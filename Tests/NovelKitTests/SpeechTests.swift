@@ -170,4 +170,48 @@ struct SpeechCacheStoreTests {
         #expect(result.freed == 30)
         #expect(await store.speechCacheCount() == 0)
     }
+
+    @Test("timings survive a round trip through the cache")
+    func boundariesRoundTrip() async {
+        let store = makeStore()
+        await store.saveSpeech(Data([0xFF, 0xF3]), key: "k")
+        let boundaries = [
+            EdgeSentenceBoundary(text: "第一句。", start: 0, duration: 1.2),
+            EdgeSentenceBoundary(text: "第二句。", start: 1.2, duration: 0.9),
+        ]
+        await store.saveSpeechBoundaries(boundaries, key: "k")
+
+        #expect(await store.loadSpeechBoundaries(key: "k") == boundaries)
+    }
+
+    @Test("the timings sidecar is not counted as its own cache entry")
+    func sidecarIsNotAnEntry() async {
+        let store = makeStore()
+        await store.saveSpeech(Data(repeating: 0, count: 40), key: "k")
+        await store.saveSpeechBoundaries([EdgeSentenceBoundary(text: "x", start: 0, duration: 1)], key: "k")
+
+        // Only the audio counts, so eviction cannot pick the same key twice and
+        // the reported size stays meaningful.
+        #expect(await store.speechCacheCount() == 1)
+        #expect(await store.speechCacheSize() == 40)
+
+        await store.clearSpeechCache()
+        #expect(await store.loadSpeechBoundaries(key: "k").isEmpty)
+    }
+
+    @Test("touching an utterance makes it the most recent")
+    func touchBumpsRecency() async throws {
+        let store = makeStore()
+        await store.saveSpeech(Data(repeating: 0, count: 10), key: "a")
+        let url = await store.speechFileURL(key: "a")
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date(timeIntervalSince1970: 1000)],
+            ofItemAtPath: url.path
+        )
+
+        await store.touchSpeech(key: "a")
+        let entries = await store.speechEntries()
+        let lastUsed = try #require(entries.first?.lastUsed)
+        #expect(lastUsed > Date(timeIntervalSince1970: 1000))
+    }
 }

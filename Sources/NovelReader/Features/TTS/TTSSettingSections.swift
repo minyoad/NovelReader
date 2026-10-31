@@ -33,9 +33,15 @@ enum TTSSettingSections {
         slider(
             title: "语速",
             value: tts.rate,
-            range: 0.2...1.2,
+            range: 0.25...1.0,
             step: 0.05
         ) { String(format: "%.2fx", $0) }
+
+        if tts.wrappedValue.rate < 0.35 {
+            Text("再慢一些会让部分音色听起来断续。")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
 
         Toggle("读完自动下一章", isOn: tts.autoNextChapter)
     }
