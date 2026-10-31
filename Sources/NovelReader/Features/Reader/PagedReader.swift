@@ -9,6 +9,9 @@ import NovelKit
 struct PagedReader: View {
     @ObservedObject var model: ReaderModel
     let theme: Theme
+    /// Written on every page change so the reader header can show `3/12`
+    /// alongside the chapter title. There is no page footer any more.
+    @Binding var pageIndicator: String
     @EnvironmentObject private var app: AppModel
 
     @State private var document: PagedDocument?
@@ -21,9 +24,6 @@ struct PagedReader: View {
     @State private var pagesWidth: CGFloat = 1
 
     private var reading: ReadingSettings { app.settings.reading }
-
-    /// Height reserved for the page footer (page number + chapter title).
-    private let footerHeight: CGFloat = 30
 
     var body: some View {
         GeometryReader { proxy in
@@ -51,11 +51,6 @@ struct PagedReader: View {
                         .background(.ultraThinMaterial, in: Circle())
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
-
-                footer
-                    .frame(maxHeight: .infinity, alignment: .bottom)
-                    .padding(.bottom, 6)
-                    .allowsHitTesting(false)
             }
             .contentShape(Rectangle())
             .gesture(turnGesture(box: box))
@@ -69,6 +64,9 @@ struct PagedReader: View {
             .task(id: layoutKey(box)) {
                 paginate(box: box)
             }
+            .onChange(of: pageIndex) { _, _ in
+                syncPageIndicator()
+            }
             .onChange(of: model.currentSentenceIndex) { _, _ in
                 followSpeech(box: box)
             }
@@ -78,9 +76,12 @@ struct PagedReader: View {
     // MARK: - Layout inputs
 
     private func contentSize(in available: CGSize) -> CGSize {
+        // No footer to reserve: the page number moved into the reader header, so
+        // the page finally uses the whole area between the header and the home
+        // indicator.
         CGSize(
             width: max(available.width - reading.horizontalPadding * 2, 0),
-            height: max(available.height - footerHeight, 0)
+            height: max(available.height, 0)
         )
     }
 
@@ -217,14 +218,17 @@ struct PagedReader: View {
             .clipped()
     }
 
-    private var footer: some View {
-        // Page number only: the chapter title moved to the top bar, so repeating
-        // it here would print the same line on every page of the chapter.
-        Text("\(min(pageIndex + 1, max(pages.count, 1))) / \(max(pages.count, 1))")
-            .monospacedDigit()
-            .font(.caption2)
-            .foregroundStyle(theme.secondaryText.opacity(0.8))
-            .padding(.horizontal, 20)
+    /// The page indicator lives in the reader header, not here. `nil` when the
+    /// chapter has not been paginated yet, so the header shows only the title
+    /// rather than a misleading `0/0`.
+    private var pageIndicatorText: String? {
+        guard !pages.isEmpty else { return nil }
+        return "\(min(pageIndex + 1, pages.count))/\(pages.count)"
+    }
+
+    private func syncPageIndicator() {
+        let text = pageIndicatorText ?? ""
+        if pageIndicator != text { pageIndicator = text }
     }
 
     private func chapterHint(forward: Bool, box: CGSize) -> some View {
@@ -335,6 +339,7 @@ struct PagedReader: View {
             : model.pendingOffset
         pageIndex = ranges.isEmpty ? 0 : pageIndex(forOriginalOffset: offset, document: doc)
         drag = 0
+        syncPageIndicator()
 
         // Remember where the visible page starts so changing font size / line
         // spacing reopens on the same passage instead of the cached old offset.

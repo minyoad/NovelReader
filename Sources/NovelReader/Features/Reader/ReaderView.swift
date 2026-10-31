@@ -12,6 +12,18 @@ struct ReaderView: View {
     @State private var showSettings = false
     @State private var showTOC = false
     @State private var showCacheSheet = false
+    /// Fixed height of the top slot, shared by the chapter title and the
+    /// toolbar so a tap swaps them without moving the text underneath.
+    ///
+    /// One value rather than each view padding itself: a mismatch of a few
+    /// points re-paginates the chapter every time the bars appear, which looks
+    /// like the page jumping.
+    private static let headerSlotHeight: CGFloat = 44
+
+    /// `3/12` for the current page, pushed up by `PagedReader`. Full-screen
+    /// reading has no bottom chrome, so the page position joins the chapter
+    /// title on the single line at the top.
+    @State private var pageIndicator = ""
 
     init(book: Book, app: AppModel, startIndex: Int? = nil) {
         _model = StateObject(wrappedValue: ReaderModel(book: book, app: app, startIndex: startIndex))
@@ -33,35 +45,53 @@ struct ReaderView: View {
             theme.background.ignoresSafeArea()
 
             VStack(spacing: 0) {
-                // The chapter title is the only chrome in full-screen reading.
-                // It sits in the layout rather than floating over the text, so
-                // pagination reserves the same height whether or not the bars
-                // are showing — otherwise a tap would re-flow the page.
-                ChapterHeaderTitle(
-                    title: model.currentChapter?.title,
-                    visible: !model.showBars,
-                    theme: theme
-                )
+                // One slot, two tenants: the chapter title in full-screen
+                // reading, the toolbar after a tap. Both are pinned to the same
+                // height so switching between them never re-flows the page —
+                // reserving space for both would leave an empty band above the
+                // toolbar, which is exactly the "cramped top" this fixes.
+                Group {
+                    if model.showBars {
+                        ReaderTopBar(
+                            model: model,
+                            theme: theme,
+                            onClose: { dismiss() },
+                            onShowTOC: { showTOC = true },
+                            onShowSettings: { showSettings = true },
+                            onShowCache: { showCacheSheet = true }
+                        )
+                    } else {
+                        ChapterHeaderTitle(
+                            title: model.currentChapter?.title,
+                            pageIndicator: pageIndicator,
+                            theme: theme,
+                            horizontalPadding: app.settings.reading.horizontalPadding
+                        )
+                    }
+                }
+                .frame(height: Self.headerSlotHeight)
+                .clipped()
+                .animation(.easeInOut(duration: 0.18), value: model.showBars)
 
                 if app.settings.reading.pageTurnMode == .page {
-                    PagedReader(model: model, theme: theme)
+                    PagedReader(model: model, theme: theme, pageIndicator: $pageIndicator)
                 } else {
+                    // Scroll mode has no pages; a stale `3/12` left over from
+                    // paged mode would be lying about the position.
                     ReaderContent(model: model, theme: theme)
+                        .onAppear { pageIndicator = "" }
                 }
             }
 
             if model.showBars {
                 VStack {
-                    ReaderTopBar(
+                    Spacer()
+                    ReaderBottomBar(
                         model: model,
                         theme: theme,
-                        onClose: { dismiss() },
                         onShowTOC: { showTOC = true },
-                        onShowSettings: { showSettings = true },
                         onShowCache: { showCacheSheet = true }
                     )
-                    Spacer()
-                    ReaderBottomBar(model: model, theme: theme)
                 }
                 .transition(.opacity)
             }
@@ -307,34 +337,47 @@ private struct ReaderContent: View {
 /// The single line of chrome shown while reading full screen.
 ///
 /// Full-screen reading means the page and, at most, where you are in the book:
-/// the chapter title. Everything else — book name, TOC, AI, source, cache,
-/// settings, playback — appears only after a tap. It is a separate view from
-/// `ReaderTopBar` so the full-screen state cannot drift back into a toolbar as
-/// buttons get added there.
+/// chapter title on the left, page position on the right. Everything else —
+/// book name, TOC, AI, source, cache, settings, playback — appears only after a
+/// tap. It is a separate view from `ReaderTopBar` so the full-screen state
+/// cannot drift back into a toolbar as buttons get added there.
 private struct ChapterHeaderTitle: View {
     let title: String?
-    /// Hidden while `ReaderTopBar` is showing, since that bar already names the
-    /// chapter directly below this slot.
-    let visible: Bool
+    /// `3/12` within the chapter, empty in scroll mode where there are no pages.
+    let pageIndicator: String
     let theme: Theme
+    /// Lines the title up with the body text instead of centring it: a centred
+    /// line above a left-aligned page reads as a label, not as part of the page.
+    let horizontalPadding: CGFloat
 
     var body: some View {
-        Text(title ?? "")
-            .font(.footnote)
-            .foregroundStyle(theme.secondaryText)
-            .lineLimit(1)
-            .frame(maxWidth: .infinity)
-            // The slot keeps its height when hidden so that tapping the page
-            // does not shift the text under the finger.
-            .padding(.horizontal, 20)
-            .padding(.top, 6)
-            .padding(.bottom, 8)
-            .opacity(visible ? 1 : 0)
-            .animation(.easeInOut(duration: 0.18), value: visible)
-            .accessibilityHidden(!visible)
+        HStack(spacing: 12) {
+            Text(title ?? "")
+                .font(.footnote)
+                .foregroundStyle(theme.secondaryText)
+                .lineLimit(1)
+                .truncationMode(.middle)
+
+            Spacer(minLength: 8)
+
+            if !pageIndicator.isEmpty {
+                Text(pageIndicator)
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(theme.secondaryText.opacity(0.8))
+            }
+        }
+        .padding(.horizontal, horizontalPadding)
     }
 }
 
+/// The tap-to-reveal toolbar.
+///
+/// One compact row: dismiss, the chapter title, and a menu. The title used to be
+/// squeezed between a centred title/book-name stack and four icon buttons, so it
+/// truncated exactly when you wanted it (long Chinese chapter titles). Secondary
+/// actions — source, cache, AI, settings — do not need to be one tap away while
+/// reading, so they moved into the menu, and the width they freed goes to the
+/// title.
 private struct ReaderTopBar: View {
     @ObservedObject var model: ReaderModel
     let theme: Theme
@@ -348,35 +391,41 @@ private struct ReaderTopBar: View {
         HStack(spacing: 14) {
             Button(action: onClose) {
                 Image(systemName: "chevron.down")
+                    .font(.system(size: 17, weight: .medium))
             }
-            Spacer()
-            Button {
-                onShowTOC()
-            } label: {
-                VStack(spacing: 2) {
-                    HStack(spacing: 4) {
-                        Text(model.currentChapter?.title ?? model.book.name)
-                            .font(.subheadline.weight(.medium))
-                            .lineLimit(1)
-                        Image(systemName: "chevron.down")
-                            .font(.system(size: 10, weight: .semibold))
-                    }
-                    // The chapter is what changes as you read; the book name is
-                    // the context you need once, so it sits underneath in the
-                    // quieter style rather than competing for the same line.
-                    if !model.book.name.isEmpty {
-                        Text(model.book.name)
-                            .font(.caption2)
-                            .foregroundStyle(theme.secondaryText)
-                            .lineLimit(1)
-                    }
-                }
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("目录 · \(model.currentChapter?.title ?? model.book.name)")
-            Spacer()
+            .accessibilityLabel("退出阅读")
+
+            Text(model.currentChapter?.title ?? model.book.name)
+                // The title is the reason this bar exists; when space is short it
+                // must be the icons that give way, not the words.
+                .font(.footnote.weight(.medium))
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .layoutPriority(1)
 
             Menu {
+                Button {
+                    onShowTOC()
+                } label: {
+                    Label("目录", systemImage: "list.bullet")
+                }
+
+                Button {
+                    model.showSourcePicker = true
+                } label: {
+                    Label("换源", systemImage: "arrow.left.arrow.right")
+                }
+
+                Button {
+                    onShowCache()
+                } label: {
+                    Label(
+                        model.cachedChapterCount > 0 ? "缓存（已存 \(model.cachedChapterCount) 章）" : "缓存本章",
+                        systemImage: "arrow.down.circle"
+                    )
+                }
+
                 SwiftUI.Section("AI 整理") {
                     ForEach(AIPrompt.ChapterTask.allCases) { task in
                         Button {
@@ -411,29 +460,20 @@ private struct ReaderTopBar: View {
                         }
                     }
                 }
+
+                SwiftUI.Section {
+                    Button(action: onShowSettings) {
+                        Label("阅读设置", systemImage: "textformat.size")
+                    }
+                }
             } label: {
-                Image(systemName: model.content?.cleaned == true ? "sparkles" : "wand.and.stars")
+                Image(systemName: "ellipsis.circle")
+                    .font(.system(size: 18))
             }
-            .disabled(model.content == nil || (!app.settings.ai.isUsable && model.content?.originalText == nil))
-
-            Button {
-                model.showSourcePicker = true
-            } label: {
-                Image(systemName: "arrow.left.arrow.right")
-            }
-
-            Button(action: onShowCache) {
-                Image(systemName: model.cachedChapterCount > 0 ? "arrow.down.circle.fill" : "arrow.down.circle")
-            }
-
-            Button(action: onShowSettings) {
-                Image(systemName: "textformat.size")
-            }
+            .accessibilityLabel("更多操作")
         }
-        .font(.title3)
         .foregroundStyle(theme.text)
-        .padding(.horizontal, 18)
-        .padding(.vertical, 12)
+        .padding(.horizontal, 20)
         .background(.ultraThinMaterial)
     }
 }
@@ -441,6 +481,8 @@ private struct ReaderTopBar: View {
 private struct ReaderBottomBar: View {
     @ObservedObject var model: ReaderModel
     let theme: Theme
+    var onShowTOC: () -> Void
+    var onShowCache: () -> Void
     @State private var showSpeechSettings = false
 
     /// Chapter title and position live in one view for both modes.
@@ -452,11 +494,8 @@ private struct ReaderBottomBar: View {
     private var isSpeaking: Bool { model.speech.showsHighlight }
 
     var body: some View {
-        VStack(spacing: 10) {
-            // Progress and position share a row: with the chapter title moved to
-            // the top bar there is no longer a line's worth of text to hold the
-            // bar open, and an empty-looking row made the bar taller than it is
-            // useful.
+        VStack(spacing: 6) {
+            // Progress row: the bar reads as a status line first, controls second.
             HStack(spacing: 10) {
                 ProgressView(value: model.progressFraction)
                     .tint(theme.accent)
@@ -482,9 +521,9 @@ private struct ReaderBottomBar: View {
                 readingControls
             }
         }
-        .padding(.horizontal, 20)
-        .padding(.top, 12)
-        .padding(.bottom, 8)
+        .padding(.horizontal, 16)
+        .padding(.top, 10)
+        .padding(.bottom, 6)
         .background(.ultraThinMaterial)
         .sheet(isPresented: $showSpeechSettings) {
             SpeechSettingsSheet(speech: model.speech)
@@ -497,41 +536,58 @@ private struct ReaderBottomBar: View {
 
     // MARK: - Idle controls
 
+    /// Five cells, one per thing you reach for while reading.
+    ///
+    /// Three big buttons left the bar mostly empty and put the two chapter
+    /// arrows at the edges, where a thumb has the worst reach. Filling the row
+    /// with labelled cells also makes the icons self-explanatory: an unlabelled
+    /// `backward.end` is not obviously "previous chapter".
     private var readingControls: some View {
-        HStack(spacing: 20) {
-            // Big hit areas on purpose: this bar is the one a driver uses, and
-            // the stock toolbar size is unusable at arm's length.
-            Button {
+        HStack(spacing: 0) {
+            ReaderBarButton(title: "上一章", systemImage: "backward.end", theme: theme) {
                 Task { await model.goPreviousChapter() }
-            } label: {
-                Image(systemName: "backward.end")
-                    .font(.system(size: 22))
-                    .frame(width: 52, height: 52)
-                    .contentShape(Rectangle())
             }
             .disabled(model.currentIndex == 0)
-            .opacity(model.currentIndex == 0 ? 0.4 : 1)
+            .opacity(model.currentIndex == 0 ? 0.35 : 1)
+
+            ReaderBarButton(title: "目录", systemImage: "list.bullet", theme: theme) {
+                onShowTOC()
+            }
 
             Button {
                 model.toggleSpeech()
             } label: {
-                Image(systemName: "play.circle.fill")
-                    .font(.system(size: 46))
-                    .foregroundStyle(theme.accent)
-                    .frame(width: 64, height: 64)
-                    .contentShape(Circle())
+                VStack(spacing: ReaderBarButton.labelGap) {
+                    Image(systemName: "play.fill")
+                        .font(.system(size: 20))
+                        .foregroundStyle(theme.background)
+                        .frame(width: 44, height: 44)
+                        .background(Circle().fill(theme.accent))
+                        .frame(height: ReaderBarButton.iconHeight)
+                        .contentShape(Circle())
+                    Text("朗读")
+                        .font(.caption2)
+                        .foregroundStyle(theme.secondaryText)
+                }
+                .frame(maxWidth: .infinity)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("开始朗读")
+
+            ReaderBarButton(
+                title: model.cachedChapterCount > 0 ? "已缓存" : "缓存",
+                systemImage: model.cachedChapterCount > 0 ? "arrow.down.circle.fill" : "arrow.down.circle",
+                theme: theme
+            ) {
+                onShowCache()
             }
 
-            Button {
+            ReaderBarButton(title: "下一章", systemImage: "forward.end", theme: theme) {
                 Task { await model.goNextChapter() }
-            } label: {
-                Image(systemName: "forward.end")
-                    .font(.system(size: 22))
-                    .frame(width: 52, height: 52)
-                    .contentShape(Rectangle())
             }
             .disabled(model.currentIndex + 1 >= model.chapters.count)
-            .opacity(model.currentIndex + 1 >= model.chapters.count ? 0.4 : 1)
+            .opacity(model.currentIndex + 1 >= model.chapters.count ? 0.35 : 1)
         }
         .foregroundStyle(theme.text)
     }
@@ -596,6 +652,40 @@ private struct ReaderBottomBar: View {
             .accessibilityLabel("朗读设置")
         }
         .foregroundStyle(theme.text)
+    }
+}
+
+/// One labelled cell of the reading bar: icon, then the word for it.
+///
+/// Equal-width cells with the icon centred over its label; using `maxWidth:
+/// .infinity` rather than fixed frames lets five of them share the row evenly on
+/// every phone width without hand-tuned spacing. The icon box and gap are shared
+/// constants so the centre play button — which is a filled circle rather than a
+/// glyph — still sits on the same baseline as its neighbours.
+private struct ReaderBarButton: View {
+    static let iconHeight: CGFloat = 40
+    static let labelGap: CGFloat = 3
+
+    let title: String
+    let systemImage: String
+    let theme: Theme
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: Self.labelGap) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 20))
+                    .frame(height: Self.iconHeight)
+                Text(title)
+                    .font(.caption2)
+                    .foregroundStyle(theme.secondaryText)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 }
 
