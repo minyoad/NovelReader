@@ -55,13 +55,15 @@ final class TTSVoiceTester: ObservableObject {
                         voice: settings.remote.edgeVoice,
                         rate: settings.rate,
                         pitch: settings.pitch,
-                        volume: settings.volume
+                        volume: settings.volume,
+                        proxy: settings.proxy
                     ).audio
                 case .openAICompatible:
                     audio = try await OpenAISpeechClient().synthesize(
                         text: Self.sample,
                         settings: settings.remote,
-                        rate: settings.rate
+                        rate: settings.rate,
+                        proxy: settings.proxy
                     )
                 }
 

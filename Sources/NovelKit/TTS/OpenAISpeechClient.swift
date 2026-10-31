@@ -39,7 +39,8 @@ public struct OpenAISpeechClient: Sendable {
         text: String,
         settings: RemoteTTSSettings,
         rate: Double = 1.0,
-        speed: Double = 1.0
+        speed: Double = 1.0,
+        proxy: String = ""
     ) async throws -> Data {
         guard let url = settings.speechURL else { throw OpenAISpeechError.invalidURL }
         guard !settings.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -66,7 +67,7 @@ public struct OpenAISpeechClient: Sendable {
         )
         request.httpBody = try JSONEncoder().encode(body)
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await SpeechSession.make(proxy: proxy).data(for: request)
         if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
             throw OpenAISpeechError.http(http.statusCode, String(decoding: data.prefix(400), as: UTF8.self))
         }

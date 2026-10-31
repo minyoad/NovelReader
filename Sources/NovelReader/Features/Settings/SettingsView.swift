@@ -13,6 +13,7 @@ struct SettingsView: View {
     @State private var speechCount = 0
     @State private var speechSize: Int64 = 0
     @StateObject private var voiceTester = TTSVoiceTester()
+    @State private var showDiagnostics = false
 
     var body: some View {
         NavigationStack {
@@ -80,6 +81,17 @@ struct SettingsView: View {
                             .font(.caption2)
                             .foregroundStyle(.orange)
                     }
+
+                    // Only meaningful for the Edge engine, which is the one
+                    // with a host to reach. A failing custom endpoint says
+                    // everything in its own error already.
+                    if app.settings.tts.engine == .edge {
+                        Button {
+                            showDiagnostics = true
+                        } label: {
+                            Label("朗读网络诊断", systemImage: "stethoscope")
+                        }
+                    }
                 } header: {
                     Text(app.settings.tts.engine == .system ? "系统声音" : "音色与接口")
                 }
@@ -97,6 +109,16 @@ struct SettingsView: View {
                     Text("朗读缓存")
                 } footer: {
                     Text("音频按句缓存，重复听同一段不会再联网。切换音色或语速会重新合成。")
+                }
+
+                if app.settings.tts.engine == .edge {
+                    Section {
+                        TTSSettingSections.proxy($app.settings.tts)
+                    } header: {
+                        Text("网络")
+                    } footer: {
+                        Text("如果在国内网络下试听一直报 TLS / 连接失败，填一个可用的代理地址即可。这一步只影响朗读。")
+                    }
                 }
 
                 // MARK: AI
@@ -288,6 +310,9 @@ struct SettingsView: View {
             .navigationTitle("设置")
             .sheet(isPresented: $showAIDocs) {
                 RuleDocsView()
+            }
+            .sheet(isPresented: $showDiagnostics) {
+                EdgeDiagnosticsView(proxy: app.settings.tts.proxy)
             }
             .onChange(of: app.settings) { _, _ in
                 app.saveSettings()

@@ -152,6 +152,39 @@ enum TTSSettingSections {
             .foregroundStyle(.secondary)
     }
 
+    // MARK: - Proxy
+
+    /// Optional HTTP proxy for the remote engines.
+    ///
+    /// Edge is blocked from some networks — mainland China resets the TLS
+    /// handshake outright — and a proxy is the only workaround short of
+    /// switching engines. Scoped to speech so book sources keep their own
+    /// route.
+    @ViewBuilder
+    static func proxy(_ tts: Binding<TTSSettings>) -> some View {
+        LabeledContent("代理（可选）") {
+            TextField("host:port", text: tts.proxy)
+                .multilineTextAlignment(.trailing)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .keyboardType(.URL)
+        }
+
+        if tts.wrappedValue.proxy.isEmpty {
+            Text("留空表示直连。只有朗读会走代理，抓书源仍然直连。")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        } else if let parsed = SpeechProxy(tts.wrappedValue.proxy) {
+            Text("将经由 \(parsed.displayName) 访问朗读接口。")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        } else {
+            Text("地址看不懂：请填 host:port，例如 192.168.1.5:7890（省略端口时按 7890 处理）。")
+                .font(.caption2)
+                .foregroundStyle(.orange)
+        }
+    }
+
     // MARK: - Cache
 
     @ViewBuilder

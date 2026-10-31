@@ -391,7 +391,8 @@ final class SpeechController: NSObject, ObservableObject {
                 voice: settings.remote.edgeVoice,
                 rate: settings.rate,
                 pitch: settings.pitch,
-                volume: settings.volume
+                volume: settings.volume,
+                proxy: settings.proxy
             )
             audio = result.audio
             boundaries = result.boundaries
@@ -399,7 +400,8 @@ final class SpeechController: NSObject, ObservableObject {
             audio = try await OpenAISpeechClient().synthesize(
                 text: chunk.text,
                 settings: settings.remote,
-                rate: settings.rate
+                rate: settings.rate,
+                proxy: settings.proxy
             )
         }
 

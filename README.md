@@ -42,7 +42,7 @@ NovelReader/
 │       ├── App/                  AppModel、入口、Tab
 │       ├── Design/               主题、封面、Banner、空状态
 │       └── Features/             书架 / 详情 / 阅读器 / 搜索 / 书源 / 设置 / TTS
-└── Tests/NovelKitTests/          规则引擎与流水线测试（65 个）
+└── Tests/NovelKitTests/          规则引擎与流水线测试（78 个）
 ```
 
 ## 构建与测试
@@ -210,6 +210,7 @@ aiOutputFormat           AI 整理后的段落格式
 tts.engine               朗读引擎：system / edge / openAICompatible
 tts.remote               远端引擎参数（Edge 音色、自定义接口地址与音色）
 tts.cacheEnabled / tts.cacheLimitMB  朗读音频缓存开关与上限（0 = 不限）
+tts.proxy                朗读专用的 HTTP 代理（host:port，留空直连）
 cache.prefetchCount      阅读时预缓存的章节数（0 = 关闭）
 cache.maxCachedChaptersPerBook  每本缓存上限（0 = 不限，超出后清理离阅读位置最远的章节）
 cache.autoCacheOnAdd     加入书架时自动缓存全本
@@ -231,9 +232,19 @@ AI Key 单独存 Keychain（service `com.yang.NovelReader`）。
 
 Edge 用的是未公开接口，服务端会校验 `Sec-MS-GEC` 令牌（自定义 SHA-256 + 64 位构造，每 5 分钟换一档），实现在 `NovelKit/TTS/EdgeToken.swift`，并有实测向量保证不会悄悄失效。如果哪天令牌被拒，朗读会明确报错而不是静默失败，届时换回系统朗读即可。
 
-`TTSSettings.engine` 的默认值是 `.edge`：装完可以直接听接近真人的中文，无需任何配置；想离线或接口失效时在设置里切回系统朗读。
+### 网络不通怎么办
+
+微软有两个朗读地址，代码会依次尝试：`speech.platform.bing.com`（旧）和 `api.msedgeservices.com`（迁移后的新地址）。成功过的那个会记在内存里，后续优先使用，避免每一句都先撞一次失败的手握手。
+
+如果在某些网络下两个地址都返回 `TLS error`（`URLError.notSecureConnection` 的原文 "A TLS error caused the secure connection to fail"），说明**到微软语音域名的连接被干扰了，不是令牌问题**——本仓库在两台机器上实测过：只要有一条能连上微软的线路，两个地址都能正常合成出音频。这种情况下：
+
+1. 设置 →「语音朗读」→ 会多出一节「网络」，填 `host:port` 形式的 HTTP 代理（省略端口按 7890 处理）。**只有朗读走代理，抓书源仍然直连**。
+2. 同一页的「朗读网络诊断」会分项列出每个地址的 HTTPS 可达性和朗读握手结果：两行都失败就是网络问题，只有朗读那行失败才是协议被拒。
+3. 实在没有可用线路时切回「系统朗读」，它完全离线。
 
 音频缓存按「引擎 + 音色 + 语速 + 音调 + 文本」的哈希存成 `speech/<hash>.mp3`，任一参数变化都会重新合成；缓存上限默认 300 MB，超出后按文件修改时间（即最后收听时间）淘汰最久未用的句子。
+
+`TTSSettings.engine` 的默认值是 `.edge`：装完可以直接听接近真人的中文，无需任何配置；想离线或接口失效时在设置里切回系统朗读。
 
 ## 当前限制 / 后续
 
@@ -242,6 +253,7 @@ Edge 用的是未公开接口，服务端会校验 `Sec-MS-GEC` 令牌（自定�
 - 搜索目前是并发搜全部启用书源（可在设置里改成只用第一个）。
 - 书架封面走 `AsyncImage`，无本地缓存。
 - 未做 iCloud 同步、导入导出备份、正则书源调试器。
+- 代理只支持 HTTP，且只对朗读生效；SOCKS 会提示地址无法识别。
 
 ## 已知行为
 

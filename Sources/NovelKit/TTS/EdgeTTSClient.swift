@@ -8,6 +8,13 @@ public enum EdgeTTSError: LocalizedError {
     case noAudio
     case unexpectedFrame(String)
     case closedEarly
+    /// The socket never came up. `code` is the `URLError.Code` raw value when
+    /// one was available, so the message can name the actual cause instead of
+    /// surfacing Foundation's English text.
+    case transport(host: String, code: Int?)
+    /// Every known endpoint failed. Carries the individual reasons so the
+    /// reader can see whether it was one host or the whole network.
+    case allEndpointsFailed([String])
 
     public var errorDescription: String? {
         switch self {
@@ -19,6 +26,57 @@ public enum EdgeTTSError: LocalizedError {
             return "Edge 朗读返回了意料之外的数据：\(detail)"
         case .closedEarly:
             return "Edge 朗读连接被提前关闭。"
+        case .transport(let host, let code):
+            return """
+            连接 Edge 朗读（\(host)）时\(Self.transportReason(code: code))
+            如果两个地址都失败，说明当前网络到微软语音服务的连接被干扰了。\
+            可以先切回「系统朗读」离线听，或在「自定义接口」里填一个可用的 TTS 服务。
+            """
+        case .allEndpointsFailed(let reasons):
+            return """
+            连接微软朗读服务失败，已试过全部地址：
+            \(reasons.joined(separator: "\n"))
+
+            这通常是当前网络到微软语音域名的连接被干扰（不是令牌问题）。\
+            可以先切回「系统朗读」离线听，或在「自定义接口」里填一个可用的 TTS 服务。
+            """
+        }
+    }
+
+    static func transportReason(code: Int?) -> String {
+        switch code.map({ URLError.Code(rawValue: $0) }) {
+        case .some(.secureConnectionFailed):
+            return "TLS 握手被中断，域名很可能被当前网络干扰了。"
+        case .some(.serverCertificateUntrusted),
+             .some(.serverCertificateHasBadDate),
+             .some(.serverCertificateNotYetValid),
+             .some(.serverCertificateHasUnknownRoot):
+            return "证书校验失败，网络中间可能有人在劫持这个连接。"
+        case .some(.notConnectedToInternet):
+            return "设备当前没有联网。"
+        case .some(.timedOut):
+            return "连接超时。"
+        case .some(.cannotFindHost), .some(.dnsLookupFailed):
+            return "无法解析域名。"
+        case .some(.cannotConnectToHost):
+            return "无法建立连接，端口可能被阻断。"
+        case .some(.networkConnectionLost):
+            return "连接中途断开。"
+        case .some(.badServerResponse):
+            return "服务端没有返回正常的 WebSocket 握手（可能被拒绝）。"
+        default:
+            return "网络请求失败。"
+        }
+    }
+
+    /// Whether trying a different host could plausibly succeed. A rejected
+    /// token or an empty result would fail the same way everywhere.
+    var isRetryable: Bool {
+        switch self {
+        case .transport, .closedEarly, .unexpectedFrame:
+            return true
+        case .tokenRejected, .noAudio, .allEndpointsFailed:
+            return false
         }
     }
 }
@@ -61,31 +119,136 @@ public struct EdgeSpeech: Sendable {
 /// synthesis rather than pooling connections, because the service closes the
 /// socket after each utterance anyway.
 public struct EdgeTTSClient: Sendable {
-    /// Sent as `Sec-MS-GEC-Version` alongside the token.
-    static let synthesizerPath = "/consumer/speech/synthesize/readaloud/edge/v1"
-    static let host = "speech.platform.bing.com"
+    /// One reachable form of the service.
+    ///
+    /// Microsoft migrated the synthesis socket to `api.msedgeservices.com` and
+    /// the old hostname is filtered on some networks, so both are tried. The
+    /// pair is ordered deliberately: the original host is still the faster one
+    /// where it works, and the new host is the fallback rather than the
+    /// default, so nothing changes for users who never hit the problem.
+    struct Endpoint: Sendable, Equatable {
+        var host: String
+        var path: String
+        /// The query parameter the trusted client token is sent under. The
+        /// migrated endpoint reused the same token value under a different
+        /// name.
+        var tokenParameter: String
+
+        static let legacy = Endpoint(
+            host: "speech.platform.bing.com",
+            path: "/consumer/speech/synthesize/readaloud/edge/v1",
+            tokenParameter: "TrustedClientToken"
+        )
+        static let current = Endpoint(
+            host: "api.msedgeservices.com",
+            path: "/tts/cognitiveservices/websocket/v1",
+            tokenParameter: "Ocp-Apim-Subscription-Key"
+        )
+
+        static let all: [Endpoint] = [.legacy, .current]
+    }
 
     public init() {}
+
+    /// The endpoint that last worked, tried first afterwards.
+    ///
+    /// Without this, a network that filters one host would pay a failed TLS
+    /// handshake on every single utterance — and a chapter is dozens of them,
+    /// so reading aloud would stall for tens of seconds per sentence group.
+    /// Remembered for the process lifetime only: which host works depends on
+    /// the network, and an app relaunch is exactly when that may have changed.
+    private static let preferenceLock = NSLock()
+    nonisolated(unsafe) private static var preferredEndpoint: Endpoint?
+
+    /// Endpoints in the order they should be tried.
+    static var attemptOrder: [Endpoint] {
+        preferenceLock.lock()
+        defer { preferenceLock.unlock() }
+        guard let preferred = preferredEndpoint, Endpoint.all.contains(preferred) else {
+            return Endpoint.all
+        }
+        return [preferred] + Endpoint.all.filter { $0 != preferred }
+    }
+
+    static func remember(_ endpoint: Endpoint) {
+        preferenceLock.lock()
+        preferredEndpoint = endpoint
+        preferenceLock.unlock()
+    }
+
+    /// Clears the remembered endpoint, so tests and the diagnostics screen start
+    /// from the default order.
+    public static func resetEndpointPreference() {
+        preferenceLock.lock()
+        preferredEndpoint = nil
+        preferenceLock.unlock()
+    }
 
     /// Synthesizes `text` and returns MP3 bytes plus sentence timings.
     ///
     /// `rate` and `pitch` use the model's multipliers (0.5 = normal rate,
     /// 1.0 = normal pitch) and are translated into the `+N%` / `+NHz` strings
     /// the service expects.
+    ///
+    /// Tries each known endpoint in turn. The first one is usually enough; the
+    /// second exists because the hostnames are filtered on some networks, where
+    /// the symptom is a TLS handshake failure rather than an HTTP error.
     public func synthesize(
         text: String,
         voice: String,
         rate: Double = 0.5,
         pitch: Double = 1.0,
-        volume: Double = 1.0
+        volume: Double = 1.0,
+        proxy: String = ""
     ) async throws -> EdgeSpeech {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { throw EdgeTTSError.noAudio }
 
+        var failures: [String] = []
+        for endpoint in Self.attemptOrder {
+            do {
+                let speech = try await synthesize(
+                    text: trimmed,
+                    voice: voice,
+                    rate: rate,
+                    pitch: pitch,
+                    volume: volume,
+                    endpoint: endpoint,
+                    proxy: proxy
+                )
+                Self.remember(endpoint)
+                return speech
+            } catch let error as EdgeTTSError where error.isRetryable {
+                failures.append(Self.describe(error, host: endpoint.host))
+                continue
+            }
+        }
+        throw EdgeTTSError.allEndpointsFailed(failures)
+    }
+
+    private static func describe(_ error: EdgeTTSError, host: String) -> String {
+        switch error {
+        case .transport(_, let code):
+            return "· \(host)：\(EdgeTTSError.transportReason(code: code))"
+        default:
+            return "· \(host)：\(error.errorDescription ?? "未知错误")"
+        }
+    }
+
+    /// One attempt against a single host.
+    func synthesize(
+        text: String,
+        voice: String,
+        rate: Double,
+        pitch: Double,
+        volume: Double,
+        endpoint: Endpoint,
+        proxy: String = ""
+    ) async throws -> EdgeSpeech {
         let token = EdgeToken.generate()
         let connectionID = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
 
-        guard let url = Self.url(connectionID: connectionID, token: token) else {
+        guard let url = Self.url(connectionID: connectionID, token: token, endpoint: endpoint) else {
             throw EdgeTTSError.tokenRejected
         }
 
@@ -93,72 +256,99 @@ public struct EdgeTTSClient: Sendable {
         for (key, value) in Self.handshakeHeaders() {
             request.setValue(value, forHTTPHeaderField: key)
         }
+        // Without this the handshake can hang until the socket times out, which
+        // on a filtered network looks like the app freezing.
+        request.timeoutInterval = 20
 
-        let task = URLSession.shared.webSocketTask(with: request)
+        let session = SpeechSession.make(proxy: proxy)
+        let task = session.webSocketTask(with: request)
         task.resume()
         defer { task.cancel(with: .normalClosure, reason: nil) }
 
-        try await task.send(.string(Self.configurationMessage()))
+        do {
+            try await task.send(.string(Self.configurationMessage()))
 
-        let ssml = Self.ssml(text: trimmed, voice: voice, rate: rate, pitch: pitch, volume: volume)
-        try await task.send(.string(Self.ssmlMessage(ssml: ssml, connectionID: connectionID)))
+            let ssml = Self.ssml(text: text, voice: voice, rate: rate, pitch: pitch, volume: volume)
+            try await task.send(.string(Self.ssmlMessage(ssml: ssml, connectionID: connectionID)))
 
-        var audio = Data()
-        var boundaries: [EdgeSentenceBoundary] = []
-        var receivedAudio = false
+            var audio = Data()
+            var boundaries: [EdgeSentenceBoundary] = []
+            var receivedAudio = false
 
-        while true {
-            let message: URLSessionWebSocketTask.Message
-            do {
-                message = try await task.receive()
-            } catch {
-                // A close before `turn.end` still leaves usable audio in hand
-                // when every chunk already arrived; only fail when nothing did.
-                if receivedAudio { break }
-                throw EdgeTTSError.closedEarly
-            }
-
-            switch message {
-            case .data(let data):
-                if let chunk = Self.audioPayload(fromBinary: data) {
-                    audio.append(chunk)
-                    receivedAudio = true
+            while true {
+                let message: URLSessionWebSocketTask.Message
+                do {
+                    message = try await task.receive()
+                } catch {
+                    // A close before `turn.end` still leaves usable audio in hand
+                    // when every chunk already arrived; only fail when nothing did.
+                    if receivedAudio { break }
+                    throw Self.transportError(error, host: endpoint.host)
                 }
-            case .string(let text):
-                guard let path = Self.path(inTextFrame: text) else { continue }
-                if path == "turn.end" {
-                    guard !audio.isEmpty else { throw EdgeTTSError.noAudio }
-                    return EdgeSpeech(audio: audio, boundaries: boundaries)
-                }
-                if path == "audio.metadata" {
-                    boundaries.append(contentsOf: Self.boundaries(fromMetadataFrame: text))
+
+                switch message {
+                case .data(let data):
+                    if let chunk = Self.audioPayload(fromBinary: data) {
+                        audio.append(chunk)
+                        receivedAudio = true
+                    }
+                case .string(let text):
+                    guard let path = Self.path(inTextFrame: text) else { continue }
+                    if path == "turn.end" {
+                        guard !audio.isEmpty else { throw EdgeTTSError.noAudio }
+                        return EdgeSpeech(audio: audio, boundaries: boundaries)
+                    }
+                    if path == "audio.metadata" {
+                        boundaries.append(contentsOf: Self.boundaries(fromMetadataFrame: text))
+                        continue
+                    }
+                    if path == "turn.start" || path == "response" { continue }
+                    throw EdgeTTSError.unexpectedFrame(path)
+                @unknown default:
                     continue
                 }
-                if path == "turn.start" || path == "response" { continue }
-                throw EdgeTTSError.unexpectedFrame(path)
-            @unknown default:
-                continue
             }
-        }
 
-        guard !audio.isEmpty else { throw EdgeTTSError.noAudio }
-        return EdgeSpeech(audio: audio, boundaries: boundaries)
+            guard !audio.isEmpty else { throw EdgeTTSError.noAudio }
+            return EdgeSpeech(audio: audio, boundaries: boundaries)
+        } catch let error as EdgeTTSError {
+            throw error
+        } catch {
+            // Anything thrown here is a URL-level failure: the handshake was
+            // rejected or the socket never opened. `task.send` is where a TLS
+            // error surfaces, since the WebSocket upgrade happens on first use.
+            throw Self.transportError(error, host: endpoint.host)
+        }
     }
 
     // MARK: - Protocol
 
     static func url(connectionID: String, token: String) -> URL? {
+        url(connectionID: connectionID, token: token, endpoint: .legacy)
+    }
+
+    static func url(connectionID: String, token: String, endpoint: Endpoint) -> URL? {
         var components = URLComponents()
         components.scheme = "wss"
-        components.host = Self.host
-        components.path = Self.synthesizerPath
+        components.host = endpoint.host
+        components.path = endpoint.path
         components.queryItems = [
-            URLQueryItem(name: "TrustedClientToken", value: EdgeToken.trustedClientToken),
+            URLQueryItem(name: endpoint.tokenParameter, value: EdgeToken.trustedClientToken),
             URLQueryItem(name: "ConnectionId", value: connectionID),
             URLQueryItem(name: "Sec-MS-GEC", value: token),
             URLQueryItem(name: "Sec-MS-GEC-Version", value: EdgeToken.version),
         ]
         return components.url
+    }
+
+    /// Wraps a Foundation networking error into something the UI can explain.
+    ///
+    /// TLS and DNS failures are the interesting ones here: they mean the host
+    /// is unreachable from this network, not that the request was wrong, and
+    /// the distinction decides whether retrying the other endpoint is worth it.
+    static func transportError(_ error: Error, host: String) -> EdgeTTSError {
+        let code = (error as? URLError)?.errorCode
+        return .transport(host: host, code: code)
     }
 
     static func handshakeHeaders(now: Date = Date()) -> [String: String] {

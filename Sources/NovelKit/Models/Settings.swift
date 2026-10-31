@@ -198,6 +198,13 @@ public struct TTSSettings: Codable, Hashable, Sendable {
     public var cacheEnabled: Bool
     /// Upper bound on cached speech, in megabytes. 0 means no limit.
     public var cacheLimitMB: Int
+    /// Optional HTTP proxy for the remote engines, `host:port`.
+    ///
+    /// Empty means connect directly. Only speech goes through it: the novel
+    /// sources keep using the normal session, since a proxy that exists to
+    /// reach Microsoft's voice service would otherwise also silently change
+    /// which IP a book site sees.
+    public var proxy: String
 
     public init(
         rate: Double = 0.5,
@@ -210,7 +217,8 @@ public struct TTSSettings: Codable, Hashable, Sendable {
         engine: TTSEngine = .edge,
         remote: RemoteTTSSettings = RemoteTTSSettings(),
         cacheEnabled: Bool = true,
-        cacheLimitMB: Int = 300
+        cacheLimitMB: Int = 300,
+        proxy: String = ""
     ) {
         self.rate = rate
         self.pitch = pitch
@@ -223,12 +231,13 @@ public struct TTSSettings: Codable, Hashable, Sendable {
         self.remote = remote
         self.cacheEnabled = cacheEnabled
         self.cacheLimitMB = cacheLimitMB
+        self.proxy = proxy
     }
 
     private enum CodingKeys: String, CodingKey {
         case rate, pitch, volume, voiceIdentifier, voiceName
         case autoNextChapter, sentencePause, engine, remote
-        case cacheEnabled, cacheLimitMB
+        case cacheEnabled, cacheLimitMB, proxy
     }
 
     /// Tolerant decoding: installs that predate the engine choice keep their
@@ -247,6 +256,7 @@ public struct TTSSettings: Codable, Hashable, Sendable {
         remote = try container.decodeIfPresent(RemoteTTSSettings.self, forKey: .remote) ?? defaults.remote
         cacheEnabled = try container.decodeIfPresent(Bool.self, forKey: .cacheEnabled) ?? defaults.cacheEnabled
         cacheLimitMB = try container.decodeIfPresent(Int.self, forKey: .cacheLimitMB) ?? defaults.cacheLimitMB
+        proxy = try container.decodeIfPresent(String.self, forKey: .proxy) ?? defaults.proxy
     }
 
     /// The remote engine is only useful if it has been pointed at something.

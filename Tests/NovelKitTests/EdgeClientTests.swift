@@ -98,6 +98,75 @@ struct EdgeTTSClientTests {
         #expect(items.first { $0.name == "TrustedClientToken" }?.value == EdgeToken.trustedClientToken)
     }
 
+    @Test("the migrated endpoint uses its own host and token parameter")
+    func buildsMigratedURL() throws {
+        let url = try #require(
+            EdgeTTSClient.url(connectionID: "abc123", token: "TKN", endpoint: .current)
+        )
+        let components = try #require(URLComponents(url: url, resolvingAgainstBaseURL: false))
+        let items = components.queryItems ?? []
+
+        #expect(components.host == "api.msedgeservices.com")
+        #expect(components.path == "/tts/cognitiveservices/websocket/v1")
+        // Microsoft reused the same token value under this name, so sending
+        // `TrustedClientToken` to this host would be silently ignored.
+        #expect(items.first { $0.name == "Ocp-Apim-Subscription-Key" }?.value == EdgeToken.trustedClientToken)
+        #expect(items.first { $0.name == "TrustedClientToken" } == nil)
+        #expect(items.first { $0.name == "Sec-MS-GEC" }?.value == "TKN")
+    }
+
+    @Test("both endpoints are tried, legacy first")
+    func endpointOrder() {
+        EdgeTTSClient.resetEndpointPreference()
+        #expect(EdgeTTSClient.Endpoint.all == [.legacy, .current])
+        #expect(EdgeTTSClient.attemptOrder == [.legacy, .current])
+    }
+
+    @Test("the endpoint that worked is tried first next time")
+    func remembersWorkingEndpoint() {
+        EdgeTTSClient.resetEndpointPreference()
+        EdgeTTSClient.remember(.current)
+        #expect(EdgeTTSClient.attemptOrder == [.current, .legacy])
+
+        EdgeTTSClient.resetEndpointPreference()
+        #expect(EdgeTTSClient.attemptOrder == [.legacy, .current])
+    }
+
+    @Test("a TLS failure is retryable, a rejected token is not")
+    func retryPolicy() {
+        #expect(EdgeTTSError.transport(host: "h", code: URLError.secureConnectionFailed.rawValue).isRetryable)
+        #expect(EdgeTTSError.closedEarly.isRetryable)
+        #expect(!EdgeTTSError.tokenRejected.isRetryable)
+        #expect(!EdgeTTSError.noAudio.isRetryable)
+    }
+
+    @Test("transport errors are explained in Chinese, not as Foundation text")
+    func transportMessages() {
+        let tls = EdgeTTSError.transport(
+            host: "api.msedgeservices.com",
+            code: URLError.secureConnectionFailed.rawValue
+        )
+        let text = try? #require(tls.errorDescription)
+        #expect(text?.contains("TLS") == true)
+        #expect(text?.contains("api.msedgeservices.com") == true)
+
+        // An unknown code must still produce a readable sentence rather than
+        // the raw "The operation couldn’t be completed" string.
+        let unknown = EdgeTTSError.transport(host: "h", code: 9999)
+        #expect(unknown.errorDescription?.contains("网络请求失败") == true)
+    }
+
+    @Test("all-endpoints failure lists each host's reason")
+    func allEndpointsMessage() {
+        let error = EdgeTTSError.allEndpointsFailed([
+            "· speech.platform.bing.com：TLS 握手被中断",
+            "· api.msedgeservices.com：连接超时",
+        ])
+        let text = try? #require(error.errorDescription)
+        #expect(text?.contains("speech.platform.bing.com") == true)
+        #expect(text?.contains("api.msedgeservices.com") == true)
+    }
+
     @Test("handshake headers carry a fresh muid of the right shape")
     func handshakeHeaders() {        let headers = EdgeTTSClient.handshakeHeaders()
         let cookie = try? #require(headers["Cookie"])
