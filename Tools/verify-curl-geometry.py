@@ -1,11 +1,22 @@
 #!/usr/bin/env python3
-"""Check the Swift CurlGeometry's region maths against the validated prototype.
+"""Check that the curl is anchored to the finger and does not pop.
 
-Renders with the exact same formulas as CurlGeometry in CurledPage.swift, so the
-region split (flat / band / revealed) can be verified on Linux before the app is
-installed. Region coverage is the thing that broke repeatedly: a band that
-overlaps the flat page draws the same glyphs twice, and one that never reaches
-the page edge leaves a strip of the old page behind.
+Two device complaints drove this:
+
+  * "the rolled-up part is always some distance from my finger"
+  * "the screen flashes once before the curl starts"
+
+Geometry under test, mirroring CurlGeometry: the finger holds the free edge of
+the curl, so `d = 0` (the de facto reference line) sits under the finger, the
+curl band occupies `-band < d < 0`, the flat current page is `d <= -band`, and
+beyond `d >= 0` the next page shows through.
+
+Assertions:
+  1. regions partition the page exactly, no overlap
+  2. the free edge of the band sits on the finger (within 1pt)
+  3. the band is 0 at t = 0, so nothing appears before the drag moves
+  4. the band returns to 0 at t = 1, leaving no residue
+  5. forward and backward are exact mirrors
 """
 import math
 import os
@@ -14,7 +25,6 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 W, H = 420, 760
-# Output goes next to this script so the render can be committed and compared.
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "out")
 
 
@@ -24,41 +34,31 @@ def smoothstep(e0, e1, x):
 
 
 def geometry(t, forward=True):
-    """Mirror of CurlGeometry.
-
-    The lifted corner is a top one: top-right going forward, top-left going
-    back. The crease starts on the top edge and sweeps down.
-    """
-    x = W * (1 - 0.92 * t)
-    y = H * 0.94 * t
-    cp = (x, y) if forward else (W - x, y)
-
-    # Tilt away from vertical, half of what it used to be.
+    finger_x = W * (1 - t) if forward else W * t
     tilt = 5 + 31 * t
     rad = math.radians(90 - tilt)
     dx, dy = math.cos(rad), math.sin(rad)
     tan = (dx, dy) if forward else (-dx, dy)
-
     nx, ny = -tan[1], tan[0]
     ref = (1, -0.35) if forward else (-1, -0.35)
     if nx * ref[0] + ny * ref[1] < 0:
         nx, ny = -nx, -ny
 
-    grow = 0.18 + 0.82 * min(t / 0.62, 1.0)
-    shrink = 1 - smoothstep(0.78, 1.0, t)
-    band = W * 0.42 * grow * shrink
-    return cp, (nx, ny), (dx, dy), band
+    band = W * 0.16 * smoothstep(0, 0.30, t) * (1 - smoothstep(0.80, 1.0, t))
+    # Crease sits one band width along the normal from the finger.
+    cp = (finger_x + nx * band, H * 0.94 * t)
+    return cp, (nx, ny), (dx, dy), band, finger_x
 
 
 def regions(t, forward=True):
-    cp, n, tan, band = geometry(t, forward)
+    cp, n, tan, band, finger_x = geometry(t, forward)
     ys, xs = np.mgrid[0:H, 0:W]
     d = (xs - cp[0]) * n[0] + (ys - cp[1]) * n[1]
     return {
-        "flat": d <= 0,
-        "band": (d > 0) & (d < band),
-        "revealed": d >= band,
-    }, d, band
+        "flat": d <= -band,
+        "band": (d > -band) & (d < 0),
+        "revealed": d >= 0,
+    }, d, band, finger_x
 
 
 def page(label, bg, ink, tint):
@@ -73,81 +73,106 @@ def page(label, bg, ink, tint):
 
 
 def render(t, forward=True):
-    r, d, band = regions(t, forward)
+    r, d, band, finger_x = regions(t, forward)
     front = page("1", (250, 247, 240), (58, 58, 58), (150, 120, 90))
     nxt = page("2", (236, 240, 248), (40, 70, 140), (30, 60, 130))
 
     canvas = np.asarray(front).copy()
     canvas[r["revealed"]] = np.asarray(nxt)[r["revealed"]]
 
-    cp, n, tan, _ = geometry(t, forward)
+    cp, n, tan, _, _ = geometry(t, forward)
     by, bx = np.nonzero(r["band"])
-    bd = d[r["band"]]
-    sx = np.rint(bx - 2 * bd * n[0]).astype(np.int32)
-    sy = np.rint(by - 2 * bd * n[1]).astype(np.int32)
-    ok = (sx >= 0) & (sx < W) & (sy >= 0) & (sy < H)
-    src = np.asarray(front)
-    cols = np.empty((len(by), 3), np.uint8)
-    cols[:] = (250, 247, 240)
-    cols[ok] = src[sy[ok], sx[ok]]
-    cols = np.clip(cols.astype(np.float32) * np.array([0.97, 0.95, 0.91]), 0, 255).astype(np.uint8)
-    canvas[r["band"]] = cols
+    if len(by):
+        bd = d[r["band"]]
+        sx = np.rint(bx - 2 * bd * n[0]).astype(np.int32)
+        sy = np.rint(by - 2 * bd * n[1]).astype(np.int32)
+        ok = (sx >= 0) & (sx < W) & (sy >= 0) & (sy < H)
+        src = np.asarray(front)
+        cols = np.empty((len(by), 3), np.uint8)
+        cols[:] = (250, 247, 240)
+        cols[ok] = src[sy[ok], sx[ok]]
+        cols = np.clip(cols.astype(np.float32) * np.array([0.97, 0.95, 0.91]), 0, 255).astype(np.uint8)
+        canvas[r["band"]] = cols
 
     img = Image.fromarray(canvas)
-    ramp = np.clip(bd / max(band, 1e-6), 0, 1)
-    shade = 1.06 - 0.46 * ramp ** 1.3
-    arr = np.asarray(img).astype(np.float32)
-    arr[r["band"]] *= shade[:, None]
-    img = Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
+    if len(by):
+        ramp = np.clip((bd + band) / max(band, 1e-6), 0, 1)
+        shade = 0.72 + 0.34 * ramp
+        arr = np.asarray(img).astype(np.float32)
+        arr[r["band"]] *= shade[:, None]
+        img = Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
 
     dr = ImageDraw.Draw(img)
-    reach = 2000
-    dr.line([(cp[0] - tan[0] * reach, cp[1] - tan[1] * reach),
-             (cp[0] + tan[0] * reach, cp[1] + tan[1] * reach)],
-            fill=(168, 160, 148), width=1)
-    return img, r
+    # Mark where the finger is, so alignment can be judged by eye.
+    if 0 <= finger_x < W:
+        dr.line([(finger_x, 0), (finger_x, H)], fill=(220, 0, 0), width=1)
+    dr.text((8, 8), f"t={t:.2f}", fill=(190, 0, 0))
+    return img, r, band, finger_x
 
 
 def main():
     os.makedirs(OUT, exist_ok=True)
-    ts = (0.0, 0.1, 0.25, 0.4, 0.55, 0.7, 0.85, 1.0)
+    ts = (0.0, 0.05, 0.1, 0.25, 0.4, 0.55, 0.7, 0.85, 1.0)
 
     print(f"{'t':>5} {'flat':>7} {'band':>7} {'reveal':>7} {'sum':>7} {'overlap':>8}")
-    print("-" * 50)
-    ok_all = True
+    print("-" * 52)
+    ok = True
     for t in ts:
-        r, _, _ = regions(t)
+        r, _, _, _ = regions(t)
         f, b, v = r["flat"].mean(), r["band"].mean(), r["revealed"].mean()
         total = f + b + v
-        overlap = (r["flat"] & r["band"]).sum() + (r["band"] & r["revealed"]).sum() + (r["flat"] & r["revealed"]).sum()
-        ok = abs(total - 1.0) < 0.005 and overlap == 0
-        ok_all &= ok
-        print(f"{t:>5.2f} {f:>6.1%} {b:>6.1%} {v:>6.1%} {total:>6.1%} {overlap:>8d}"
-              f"{'' if ok else '  <-- MISMATCH'}")
+        ov = ((r["flat"] & r["band"]).sum() + (r["band"] & r["revealed"]).sum()
+              + (r["flat"] & r["revealed"]).sum())
+        good = abs(total - 1.0) < 0.005 and ov == 0
+        ok &= good
+        print(f"{t:>5.2f} {f:>6.1%} {b:>6.1%} {v:>6.1%} {total:>6.1%} {ov:>8d}"
+              f"{'' if good else '  <-- MISMATCH'}")
     print()
-    print("regions partition the page with no overlap:", ok_all)
+    print("1. regions partition the page:", ok)
 
-    tiles = []
-    for t in ts:
-        img, _ = render(t)
-        tiles.append(img)
+    # 2. Free edge should land on the finger.
+    print()
+    print(f"{'t':>5} {'finger_x':>9} {'crease_x':>9} {'edge_x':>8} {'off by':>7} {'band':>6}")
+    edge_ok = True
+    for t in (0.1, 0.25, 0.4, 0.55, 0.7, 0.85):
+        cp, n, _, band, finger_x = geometry(t)
+        edge_x = cp[0] - n[0] * band
+        off = edge_x - finger_x
+        edge_ok &= abs(off) < 1.0
+        print(f"{t:>5.2f} {finger_x:>9.1f} {cp[0]:>9.1f} {edge_x:>8.1f} {off:>7.1f} {band:>6.1f}")
+    print()
+    print("2. free edge sits on the finger:", edge_ok)
+
+    # 3/4. No pop at either end.
+    b0 = geometry(0.0)[3]
+    b1 = geometry(1.0)[3]
+    print(f"3. band at t=0: {b0:.2f}pt (must be ~0)")
+    print(f"4. band at t=1: {b1:.2f}pt (must be ~0)")
+
+    # 5. Mirror symmetry.
+    print()
+    sym = True
+    for t in (0.25, 0.5, 0.75):
+        rf, _, _, _ = regions(t, True)
+        rb, _, _, _ = regions(t, False)
+        m = {k: np.fliplr(v) for k, v in rb.items()}
+        same = all((rf[k] == m[k]).mean() > 0.995 for k in rf)
+        sym &= same
+        print(f"5. t={t:.2f} forward == mirrored backward: {same}")
+
+    tiles = [render(t)[0] for t in ts]
     sheet = Image.new("RGB", (W * len(tiles), H), (26, 26, 30))
     for i, im in enumerate(tiles):
         sheet.paste(im, (i * W, 0))
     path = os.path.join(OUT, "swift-geometry.png")
     sheet.resize((sheet.width // 4, sheet.height // 4), Image.LANCZOS).save(path)
+    print()
     print("wrote", path)
 
-    # Forward and backward must be mirror images of each other.
-    print()
-    print("forward vs mirrored backward (should match):")
-    for t in (0.25, 0.5, 0.75):
-        rf, _, _ = regions(t, True)
-        rb, _, _ = regions(t, False)
-        mirrored = {k: np.fliplr(v) for k, v in rb.items()}
-        same = all((rf[k] == mirrored[k]).mean() > 0.995 for k in rf)
-        print(f"  t={t}: {same}")
+    allok = ok and edge_ok and b0 < 0.5 and b1 < 0.5 and sym
+    print("ALL CHECKS PASS:", allok)
+    return 0 if allok else 1
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

@@ -48,22 +48,25 @@ struct CurlGeometry {
 
     // MARK: Crease
 
-    /// A point the crease passes through.
+    /// Where the finger is, in page coordinates — the free edge of the curl.
+    var fingerX: CGFloat {
+        forward ? w * (1 - progress) : w * progress
+    }
+
+    /// The crease line, `d = 0`.
     ///
-    /// The sheet is lifted at a **top** corner (top-right when turning forward,
-    /// top-left when turning back) and the fold sweeps down toward the opposite
-    /// corner. Peeling from the top is how a thumb actually lifts a page; a fold
-    /// that starts at the bottom edge reads as the sheet hinging on its base
-    /// instead of being picked up.
+    /// One band width to the right of the finger. Folding the sheet about this
+    /// line is what puts the curl's free edge exactly under the thumb, which is
+    /// how a real page is held; earlier versions ran the crease ahead of the
+    /// finger and drew the band beyond it, so the roll floated 30–180pt away
+    /// from the gesture.
     ///
-    /// Mirrored horizontally for a backward turn so the two directions stay exact
-    /// reflections of each other.
+    /// Starts at the top edge and sweeps down, so the sheet lifts at a **top**
+    /// corner — top-right going forward, top-left going back. Peeling from the
+    /// top is how a thumb actually lifts a page.
     var creasePoint: CGPoint {
-        let t = progress
-        let x = w * (1 - 0.92 * t)
-        // Starts at the top edge and travels down; y grows with progress.
-        let y = h * 0.94 * t
-        return forward ? CGPoint(x: x, y: y) : CGPoint(x: w - x, y: y)
+        let n = normal
+        return CGPoint(x: fingerX + n.x * band, y: h * 0.94 * progress)
     }
 
     /// Unit tangent along the crease.
@@ -95,12 +98,20 @@ struct CurlGeometry {
 
     /// Width of the curl band, in points.
     ///
-    /// Opens as the corner lifts and closes again as the sheet lands flat, so
-    /// the last frame is a clean page with no residual curl.
+    /// This is the thickness of the material actually rolled over, measured
+    /// between the finger and the crease — roughly 60pt on a phone, which is
+    /// about four characters of print. The band used to be 34% of the page width
+    /// (133pt), which read as a whole second sheet lying on top rather than a
+    /// rolled edge.
+    ///
+    /// Starts at **zero** and grows. It used to start at 32pt, so the 8pt drag
+    /// threshold already produced a full-width band — a visible pop the instant
+    /// the gesture began. It closes again as the sheet lands flat, leaving a
+    /// clean page with no residual curl.
     var band: CGFloat {
-        let grow = 0.18 + 0.82 * min(progress / 0.62, 1)
-        let shrink = 1 - Self.smoothstep(0.78, 1.0, progress)
-        return w * 0.42 * grow * shrink
+        let open = Self.smoothstep(0, 0.30, progress)
+        let shrink = 1 - Self.smoothstep(0.80, 1.0, progress)
+        return w * 0.16 * open * shrink
     }
 
     // MARK: Regions
@@ -169,23 +180,26 @@ struct CurlGeometry {
         distance(point) - offset
     }
 
-    /// The sheet still lying flat: `d <= 0`.
+    /// The sheet still lying flat, on the far side of the curl: `d <= -band`.
+    ///
+    /// The lifted material hangs over this side, so it is the *outer* region,
+    /// not the one touching the crease.
     func flatRegionPath() -> CGPath {
-        regionPath([{ -signed($0, offset: 0) }])
-    }
-
-    /// The page underneath: `d >= band`.
-    func revealedRegionPath() -> CGPath {
         let band = self.band
-        return regionPath([{ signed($0, offset: band) }])
+        return regionPath([{ -signed($0, offset: -band) }])
     }
 
-    /// The curl itself: `0 < d < band`.
+    /// The page underneath, on the far side of the crease: `d >= 0`.
+    func revealedRegionPath() -> CGPath {
+        regionPath([{ signed($0, offset: 0) }])
+    }
+
+    /// The curl itself: `-band < d < 0`.
     func bandRegionPath() -> CGPath {
         let band = self.band
         return regionPath([
-            { signed($0, offset: 0) },
-            { -signed($0, offset: band) },
+            { signed($0, offset: -band) },
+            { -signed($0, offset: 0) },
         ])
     }
 
@@ -286,6 +300,12 @@ final class CurlDrawView: UIView {
     }
     var paper: UIColor = .white {
         didSet {
+            // Only touch the caches when the colour actually changed. SwiftUI
+            // re-runs `updateUIView` on every frame of a drag, and an
+            // unconditional invalidation here rebuilt both CoreText bitmaps per
+            // frame — one blank frame each time, which is the flash seen at the
+            // start of a turn.
+            guard paper != oldValue else { return }
             backgroundColor = paper
             frontImage = nil
             underImage = nil
@@ -296,9 +316,13 @@ final class CurlDrawView: UIView {
     /// Bitmaps of the two pages, rebuilt only when their text or size changes.
     /// Drawing text with CoreText on every frame of a drag was the main source of
     /// stutter on long chapters.
+    ///
+    /// Each caches its own size: sharing one `imageSize` meant whichever page was
+    /// drawn second invalidated the first, so the pair thrashed every frame.
     private var frontImage: UIImage?
+    private var frontImageSize: CGSize = .zero
     private var underImage: UIImage?
-    private var imageSize: CGSize = .zero
+    private var underImageSize: CGSize = .zero
 
     override func draw(_ rect: CGRect) {
         guard let context = UIGraphicsGetCurrentContext(),
@@ -309,11 +333,11 @@ final class CurlDrawView: UIView {
         // At rest and at the end, draw one plain page: no curl, no shadow, and
         // nothing that could leave a residual band on an untouched page.
         if t <= 0.001 {
-            pageImage(settled, cache: &frontImage).draw(in: bounds)
+            pageImage(settled, cache: &frontImage, sizeCache: &frontImageSize).draw(in: bounds)
             return
         }
         if t >= 0.999 {
-            pageImage(neighbor ?? settled, cache: &underImage).draw(in: bounds)
+            pageImage(neighbor ?? settled, cache: &underImage, sizeCache: &underImageSize).draw(in: bounds)
             return
         }
 
@@ -323,14 +347,14 @@ final class CurlDrawView: UIView {
         context.saveGState()
         context.addPath(geometry.flatRegionPath())
         context.clip()
-        pageImage(settled, cache: &frontImage).draw(in: bounds)
+        pageImage(settled, cache: &frontImage, sizeCache: &frontImageSize).draw(in: bounds)
         context.restoreGState()
 
         // 2. Page underneath, beyond the curl band.
         context.saveGState()
         context.addPath(geometry.revealedRegionPath())
         context.clip()
-        pageImage(neighbor ?? settled, cache: &underImage).draw(in: bounds)
+        pageImage(neighbor ?? settled, cache: &underImage, sizeCache: &underImageSize).draw(in: bounds)
         context.restoreGState()
 
         // 3. The curl band.
@@ -361,30 +385,30 @@ final class CurlDrawView: UIView {
 
         // Backs read a little dimmer than fronts.
         context.setAlpha(0.9)
-        pageImage(settled, cache: &frontImage).draw(in: bounds)
+        pageImage(settled, cache: &frontImage, sizeCache: &frontImageSize).draw(in: bounds)
         context.setAlpha(1)
         context.restoreGState()
 
-        // Cylindrical ramp across the band: lit just off the crease, shadowed at
-        // the free edge. This is what makes it read as paper rolled over an edge
-        // rather than a strip pasted on top.
+        // Cylindrical ramp across the band: lit at the crease, shadowed at the
+        // free edge the finger holds. This is what makes it read as paper rolled
+        // over an edge rather than a strip pasted on top.
         context.saveGState()
         context.addPath(geometry.bandRegionPath())
         context.clip()
         let colors = [
-            UIColor.white.withAlphaComponent(0.18).cgColor,
-            UIColor.black.withAlphaComponent(0.03).cgColor,
-            UIColor.black.withAlphaComponent(0.32).cgColor,
+            UIColor.white.withAlphaComponent(0.20).cgColor,
+            UIColor.black.withAlphaComponent(0.04).cgColor,
+            UIColor.black.withAlphaComponent(0.28).cgColor,
         ]
         if let gradient = CGGradient(
             colorsSpace: CGColorSpaceCreateDeviceRGB(),
             colors: colors as CFArray,
-            locations: [0, 0.4, 1]
+            locations: [0, 0.45, 1]
         ) {
             context.drawLinearGradient(
                 gradient,
                 start: geometry.pointOnNormal(0),
-                end: geometry.pointOnNormal(band),
+                end: geometry.pointOnNormal(-band),
                 options: [.drawsBeforeStartLocation, .drawsAfterEndLocation]
             )
         }
@@ -392,10 +416,16 @@ final class CurlDrawView: UIView {
     }
 
     private func drawCrease(in context: CGContext, geometry: CurlGeometry) {
+        // A fold line and its shadow are only meaningful once the sheet has
+        // actually lifted. Drawing them at tiny progress left a hairline on an
+        // otherwise untouched page for the first frames of a drag.
+        guard geometry.progress > 0.01 else { return }
+
         let p = geometry.creasePoint
         let reach = max(bounds.width, bounds.height) * 2
 
-        // Contact shadow on the freshly uncovered page.
+        // Contact shadow on the freshly uncovered page, falling away from the
+        // crease. The uncovered side is `d >= 0`.
         context.saveGState()
         context.addPath(geometry.revealedRegionPath())
         context.clip()
@@ -410,8 +440,8 @@ final class CurlDrawView: UIView {
         ) {
             context.drawLinearGradient(
                 gradient,
-                start: geometry.pointOnNormal(geometry.band),
-                end: geometry.pointOnNormal(geometry.band + 28),
+                start: geometry.pointOnNormal(0),
+                end: geometry.pointOnNormal(28),
                 options: [.drawsBeforeStartLocation, .drawsAfterEndLocation]
             )
         }
@@ -430,9 +460,17 @@ final class CurlDrawView: UIView {
 
     // MARK: Bitmaps
 
-    private func pageImage(_ text: NSAttributedString?, cache: inout UIImage?) -> UIImage {
+    /// Renders one page to a bitmap, cached by content and size.
+    ///
+    /// `sizeCache` is passed in rather than shared: the front and under-page
+    /// bitmaps are invalidated independently, so one cannot clear the other.
+    private func pageImage(
+        _ text: NSAttributedString?,
+        cache: inout UIImage?,
+        sizeCache: inout CGSize
+    ) -> UIImage {
         guard bounds.width > 1, bounds.height > 1 else { return UIImage() }
-        if let cache, imageSize == bounds.size { return cache }
+        if let cache, sizeCache == bounds.size { return cache }
 
         let format = UIGraphicsImageRendererFormat()
         format.opaque = true
@@ -459,7 +497,7 @@ final class CurlDrawView: UIView {
             c.restoreGState()
         }
         cache = image
-        imageSize = bounds.size
+        sizeCache = bounds.size
         return image
     }
 
