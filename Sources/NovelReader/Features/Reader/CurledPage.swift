@@ -104,53 +104,58 @@ struct CurledPage: View {
 
         // Front of the sheet, stopping where the bend begins.
         let frontWidth = max(c - curlDepth, 0)
-        // Where the curled strip sits on screen.
-        let curlLeft = frontWidth
+        // Nothing has turned yet: the previous page is not on screen at all.
+        // Without this guard `curlDepth` is non-zero even at t == 0, which left
+        // a stray shadow sliver down the left edge of an untouched page.
+        let hasTurned = t > 0.001 && c > 0.5
 
         ZStack(alignment: .topLeading) {
-            // Solid front of the previous page.
-            PageImage(attributed: text, paper: paper)
-                .frame(width: width, height: size.height)
-                .mask(alignment: .leading) {
-                    Rectangle().frame(width: frontWidth)
+            if hasTurned {
+                // Solid front of the previous page.
+                PageImage(attributed: text, paper: paper)
+                    .frame(width: width, height: size.height)
+                    .mask(alignment: .leading) {
+                        Rectangle().frame(width: frontWidth)
+                    }
+
+                // The bent strip: back of the same sheet, mirrored, with a
+                // cylindrical ramp and a curved free edge so it reads as paper
+                // lifting off.
+                if frontWidth > 0.5 && curlDepth > 0.5 {
+                    curledEdgeStrip(
+                        size: size,
+                        width: width,
+                        depth: curlDepth,
+                        bulge: bulge,
+                        text: text,
+                        progress: t
+                    )
+                    .offset(x: frontWidth)
                 }
 
-            // The bent strip: back of the same sheet, mirrored, with a cylindrical
-            // ramp and a curved free edge so it reads as paper lifting off.
-            if frontWidth > 0.5 && curlDepth > 0.5 {
-                curledEdgeStrip(
-                    size: size,
-                    width: width,
-                    depth: curlDepth,
-                    bulge: bulge,
-                    text: text,
-                    progress: t
-                )
-                .offset(x: curlLeft)
-            }
+                // Contact shadow where the lifted edge leaves the page.
+                if frontWidth > 1 {
+                    LinearGradient(
+                        colors: [.black.opacity(0), .black.opacity(0.22)],
+                        startPoint: .leading,
+                        endPoint: .trailing
+                    )
+                    .frame(width: min(frontWidth, 26), height: size.height)
+                    .offset(x: max(frontWidth - min(frontWidth, 26), 0))
+                    .allowsHitTesting(false)
+                }
 
-            // Contact shadow where the lifted edge leaves the page.
-            if frontWidth > 1 {
-                LinearGradient(
-                    colors: [.black.opacity(0), .black.opacity(0.22)],
-                    startPoint: .leading,
-                    endPoint: .trailing
-                )
-                .frame(width: min(frontWidth, 26), height: size.height)
-                .offset(x: max(frontWidth - min(frontWidth, 26), 0))
-                .allowsHitTesting(false)
-            }
-
-            // Shadow the curled strip throws onto the page still uncovered.
-            if frontWidth + curlDepth < width - 1 {
-                LinearGradient(
-                    colors: [.black.opacity(0.28), .black.opacity(0)],
-                    startPoint: .leading,
-                    endPoint: .trailing
-                )
-                .frame(width: min(width * 0.14, 34), height: size.height)
-                .offset(x: frontWidth + curlDepth)
-                .allowsHitTesting(false)
+                // Shadow the curled strip throws onto the page still uncovered.
+                if frontWidth + curlDepth < width - 1 {
+                    LinearGradient(
+                        colors: [.black.opacity(0.28), .black.opacity(0)],
+                        startPoint: .leading,
+                        endPoint: .trailing
+                    )
+                    .frame(width: min(width * 0.14, 34), height: size.height)
+                    .offset(x: frontWidth + curlDepth)
+                    .allowsHitTesting(false)
+                }
             }
         }
     }
@@ -227,6 +232,9 @@ struct CurledPage: View {
         // translucency in the strip let the flat page's text show through as a
         // second layer of glyphs.
         let flatWidth = max(min(c, stripWidth > 0.5 ? stripLeft : c), 0)
+        // At rest nothing is lifted, so no curl decoration should be drawn at
+        // all — otherwise a shadow sliver lingers on an untouched page.
+        let hasTurned = t > 0.001
 
         ZStack(alignment: .topLeading) {
             // Flat part: the paper still lying on the book.
@@ -236,42 +244,44 @@ struct CurledPage: View {
                     Rectangle().frame(width: flatWidth)
                 }
 
-            // Turned-over part, mirrored about the crease. Mirrored about the
-            // crease it occupies [2c - W, c] on screen.
-            if c > 0.5 && stripWidth > 0.5 {
-                turnedOverStrip(
-                    size: size,
-                    width: width,
-                    stripWidth: stripWidth,
-                    text: text,
-                    progress: t
-                )
-                .offset(x: stripLeft)
-            }
+            if hasTurned {
+                // Turned-over part, mirrored about the crease. Mirrored about
+                // the crease it occupies [2c - W, c] on screen.
+                if c > 0.5 && stripWidth > 0.5 {
+                    turnedOverStrip(
+                        size: size,
+                        width: width,
+                        stripWidth: stripWidth,
+                        text: text,
+                        progress: t
+                    )
+                    .offset(x: stripLeft)
+                }
 
-            // The fold lifts the paper off the page, so the page below darkens
-            // right where the sheet has just left.
-            if c > 0 {
-                LinearGradient(
-                    colors: [.black.opacity(0.30), .black.opacity(0)],
-                    startPoint: .leading,
-                    endPoint: .trailing
-                )
-                .frame(width: min(width * 0.26, 52), height: size.height)
-                .offset(x: c)
-                .allowsHitTesting(false)
-            }
+                // The fold lifts the paper off the page, so the page below
+                // darkens right where the sheet has just left.
+                if c > 0 {
+                    LinearGradient(
+                        colors: [.black.opacity(0.30), .black.opacity(0)],
+                        startPoint: .leading,
+                        endPoint: .trailing
+                    )
+                    .frame(width: min(width * 0.26, 52), height: size.height)
+                    .offset(x: c)
+                    .allowsHitTesting(false)
+                }
 
-            // Shadow the turned-over strip casts back onto the flat part.
-            if c > 4 && stripWidth > 4 && stripLeft > 2 {
-                LinearGradient(
-                    colors: [.black.opacity(0.30), .black.opacity(0)],
-                    startPoint: .trailing,
-                    endPoint: .leading
-                )
-                .frame(width: min(stripLeft, 34), height: size.height)
-                .offset(x: max(stripLeft - min(stripLeft, 34), 0))
-                .allowsHitTesting(false)
+                // Shadow the turned-over strip casts back onto the flat part.
+                if c > 4 && stripWidth > 4 && stripLeft > 2 {
+                    LinearGradient(
+                        colors: [.black.opacity(0.30), .black.opacity(0)],
+                        startPoint: .trailing,
+                        endPoint: .leading
+                    )
+                    .frame(width: min(stripLeft, 34), height: size.height)
+                    .offset(x: max(stripLeft - min(stripLeft, 34), 0))
+                    .allowsHitTesting(false)
+                }
             }
         }
     }
