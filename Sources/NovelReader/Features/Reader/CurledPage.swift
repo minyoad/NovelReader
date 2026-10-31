@@ -8,12 +8,17 @@ import UIKit
 /// `forward` is the sign of the drag. A leftward swipe peels the current sheet
 /// leftward; a rightward swipe lays the previous sheet back down.
 ///
-/// **Both directions use one renderer.** A backward turn is literally the
-/// forward turn mirrored horizontally: the whole scene is flipped, and each page
-/// image is flipped a second time so its type still reads normally. That is what
-/// guarantees the two directions look alike — earlier versions hand-rolled a
-/// separate animation for the backward turn and it never matched, ending up with
-/// a wide grey band, backwards glyphs, or a curl attached to the wrong edge.
+/// **Both directions use one renderer.** A backward turn is the forward turn
+/// mirrored horizontally about the page centre, with the two page roles set so
+/// the content still makes sense: the settled page is always the sheet being
+/// folded, and the neighbour is always the page uncovered underneath
+/// (next page when swiping left, previous page when swiping right).
+///
+/// The scene flip mirrors every glyph, so each page image carries the *opposite*
+/// mirror state to cancel it and land upright; the turned-over strip is the one
+/// exception, since it shows the reverse of the sheet and really is printed
+/// mirror-image. Omitting the per-image cancellation is what turned the page
+/// underneath backwards on a rightward swipe.
 ///
 /// The underside of the sheet is real paper: opaque body, print at reduced but
 /// readable strength, a cylindrical light ramp across the curl, a bowed free
@@ -36,39 +41,51 @@ struct CurledPage: View {
             let width = max(size.width, 1)
             let t = min(max(progress, 0), 1)
 
-            // Nothing has turned: draw nothing at all, so an untouched page has
-            // no stray shadow along either edge.
-            if t > 0.001 {
-                // The forward turn is the canonical one. Backward is the same
-                // picture mirrored, with the two pages swapped.
-                let sheet = forward ? settledText : (neighborText ?? settledText)
-                let under = forward ? neighborText : settledText
-
-                peelScene(
-                    size: size,
-                    width: width,
-                    t: t,
-                    sheet: sheet,
-                    under: under
-                )
-                // Mirror for the backward turn. Each image is un-mirrored again
-                // inside, so text stays readable.
-                .scaleEffect(x: forward ? 1 : -1, y: 1, anchor: .center)
-            }
+            // The sheet being turned is always the page the reader is on; only
+            // the page *underneath* differs by direction. A forward swipe
+            // reveals the next page from the right, a backward swipe reveals the
+            // previous page from the left.
+            //
+            // Backward is the forward picture mirrored, which keeps the two
+            // directions identical in weight, shade and arc. The scene flip also
+            // mirrors every glyph, so each page image asks for the *opposite*
+            // mirror state to cancel it out — that detail is what keeps type
+            // upright, and leaving it out is what turned the underlying page
+            // backwards on a rightward swipe.
+            peelScene(
+                size: size,
+                width: width,
+                t: t,
+                text: settledText,
+                under: neighborText,
+                mirrored: !forward
+            )
+            // Flip the whole scene about its centre — which is also the centre
+            // of every full-width page image, so the per-image counter-flip
+            // inside is an exact identity and the type lands upright.
+            .scaleEffect(x: forward ? 1 : -1, y: 1, anchor: .center)
+            .frame(width: width, height: size.height, alignment: .topLeading)
+            .clipped()
         }
         .allowsHitTesting(false)
     }
 
-    // MARK: - One turn, always peeling toward the left
+    // MARK: - One turn, peeling toward the left (or its mirror)
 
     /// The canonical leftward peel. `t` runs 0 → 1 as the sheet is lifted off.
+    ///
+    /// Drawn at every value of `t`, including 0 and 1: `t == 0` is a sheet lying
+    /// flat and `t == 1` is the page underneath filling the screen. Gating this
+    /// on `t > 0` left the reader blank the moment a turn finished and the drag
+    /// reset to zero.
     @ViewBuilder
     private func peelScene(
         size: CGSize,
         width: CGFloat,
         t: CGFloat,
-        sheet sheetText: NSAttributedString?,
-        under underText: NSAttributedString?
+        text sheetText: NSAttributedString?,
+        under underText: NSAttributedString?,
+        mirrored: Bool
     ) -> some View {
         // The crease starts at the right edge and walks left.
         let c = width * (1 - t)
@@ -79,16 +96,25 @@ struct CurledPage: View {
         // never overlap and no glyph is drawn twice.
         let flatWidth = max(min(c, stripWidth > 0.5 ? stripLeft : c), 0)
 
+        // Inside the flipped scene the pages must be flipped back so they read
+        // normally; the strip is the exception — it shows the back of the sheet,
+        // which really is printed mirror-image.
+        let pageMirror = mirrored
+        let stripMirror = !mirrored
+
         ZStack(alignment: .topLeading) {
-            // Page underneath, revealed as the sheet lifts.
-            if let underText {
-                PageImage(attributed: underText, paper: paper)
+            // Page underneath, revealed as the sheet lifts. Skipped while the
+            // sheet still covers it completely — at rest the sheet is opaque and
+            // full width, so drawing the page beneath would be a second CoreText
+            // layout per frame for nothing.
+            if let underText, stripWidth > 0.5 {
+                PageImage(attributed: underText, mirror: pageMirror, paper: paper)
                     .frame(width: width, height: size.height)
             }
 
             // Still-glued part of the sheet, flat on the book.
             if let sheetText {
-                PageImage(attributed: sheetText, paper: paper)
+                PageImage(attributed: sheetText, mirror: pageMirror, paper: paper)
                     .frame(width: width, height: size.height)
                     .mask(alignment: .leading) {
                         Rectangle().frame(width: flatWidth)
@@ -102,7 +128,8 @@ struct CurledPage: View {
                     width: width,
                     stripWidth: stripWidth,
                     text: sheetText,
-                    t: t
+                    t: t,
+                    mirrorText: stripMirror
                 )
                 .offset(x: stripLeft)
             }
@@ -119,8 +146,11 @@ struct CurledPage: View {
                 .allowsHitTesting(false)
             }
 
-            // The curled strip shades the flat part it rests on.
-            if c > 4 && stripLeft > 2 {
+            // The curled strip shades the flat part it rests on. Gated on the
+            // strip actually existing: at rest `stripLeft` is still non-zero even
+            // though the strip has no width, which used to leave a dark band down
+            // the right edge of an untouched page.
+            if stripWidth > 2 && stripLeft > 2 {
                 LinearGradient(
                     colors: [.black.opacity(0.28), .black.opacity(0)],
                     startPoint: .trailing,
@@ -141,7 +171,8 @@ struct CurledPage: View {
         width: CGFloat,
         stripWidth: CGFloat,
         text: NSAttributedString,
-        t: CGFloat
+        t: CGFloat,
+        mirrorText: Bool
     ) -> some View {
         // The free edge bows in as the sheet lifts. Grows with the turn.
         let bulge = min(stripWidth * 0.10, 16) * (0.35 + 0.65 * t)
@@ -150,10 +181,10 @@ struct CurledPage: View {
             // Opaque paper body: the page below must never show through.
             paper
 
-            // Back of the print, mirrored. Sustained at full opacity and dimmed
-            // by the veil below, rather than made translucent — a translucent
-            // back let the flat page's own text bleed through as a second layer.
-            PageImage(attributed: text, mirror: true, paper: paper)
+            // Back of the print. Sustained at full opacity and dimmed by the
+            // veil below, rather than made translucent — a translucent back let
+            // the flat page's own text bleed through as a second layer.
+            PageImage(attributed: text, mirror: mirrorText, paper: paper)
                 .frame(width: width, height: size.height)
                 .frame(width: stripWidth, height: size.height, alignment: .leading)
                 .clipped()
@@ -260,10 +291,20 @@ struct PageImage: UIViewRepresentable {
 
     final class PageDrawView: UIView {
         var text: NSAttributedString? {
-            didSet { setNeedsDisplay() }
+            didSet {
+                // `updateUIView` runs on every frame of a drag, but the page
+                // content does not change then — only the fold does. Re-assigning
+                // the same string kept queuing a full CoreText re-layout per
+                // frame, which made the curl stutter on long chapters.
+                guard !PageDrawView.sameText(text, oldValue) else { return }
+                setNeedsDisplay()
+            }
         }
         var mirror = false {
-            didSet { setNeedsDisplay() }
+            didSet {
+                guard mirror != oldValue else { return }
+                setNeedsDisplay()
+            }
         }
         var paper: Color? {
             didSet {
@@ -271,6 +312,13 @@ struct PageImage: UIViewRepresentable {
                 isOpaque = paper != nil
                 setNeedsDisplay()
             }
+        }
+
+        /// Cheap identity check: the paginator hands the same attributed string
+        /// back on every frame until the page itself changes.
+        private static func sameText(_ a: NSAttributedString?, _ b: NSAttributedString?) -> Bool {
+            guard let a, let b else { return a == nil && b == nil }
+            return a === b || a.isEqual(to: b)
         }
 
         override func draw(_ rect: CGRect) {
