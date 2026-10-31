@@ -33,8 +33,9 @@ def geometry(t, forward=True):
     y = H * 0.94 * t
     cp = (x, y) if forward else (W - x, y)
 
-    deg = 80 - 62 * t
-    rad = math.radians(deg)
+    # Tilt away from vertical, half of what it used to be.
+    tilt = 5 + 31 * t
+    rad = math.radians(90 - tilt)
     dx, dy = math.cos(rad), math.sin(rad)
     tan = (dx, dy) if forward else (-dx, dy)
 

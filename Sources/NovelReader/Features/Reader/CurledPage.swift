@@ -68,10 +68,13 @@ struct CurlGeometry {
 
     /// Unit tangent along the crease.
     var tangent: CGPoint {
-        // Nearly vertical next to the lifted top corner, tilting flatter as the
-        // fold sweeps down the page, so the lifted corner grows.
-        let degrees = 80 - 62 * progress
-        let radians = degrees * .pi / 180
+        // Expressed as the tilt *away from vertical*, which is what the eye
+        // reads: 5° next to the lifted top corner, opening to 36° as the fold
+        // sweeps down. It used to open to 72°, which made the crease look like a
+        // diagonal slash across the page instead of a fold; the sweep is now
+        // half of that.
+        let tilt = 5 + 31 * progress
+        let radians = (90 - tilt) * .pi / 180
         let dx = cos(radians)
         let dy = sin(radians)
         return forward ? CGPoint(x: dx, y: dy) : CGPoint(x: -dx, y: dy)
