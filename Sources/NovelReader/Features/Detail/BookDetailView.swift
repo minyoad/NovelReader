@@ -369,6 +369,9 @@ struct ChapterListView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var query = ""
     @State private var ascending = true
+    /// Set once the list has been scrolled to its anchor, so the user's own
+    /// scrolling is never overridden afterwards.
+    @State private var didScrollToAnchor = false
 
     private var filtered: [(Int, Chapter)] {
         let indexed = Array(chapters.enumerated()).map { ($0.offset, $0.element) }
@@ -376,41 +379,126 @@ struct ChapterListView: View {
         return ascending ? searched : searched.reversed()
     }
 
+    /// Row to anchor on when the sheet opens, or when the list is re-filtered.
+    ///
+    /// A book can run to thousands of chapters, so opening the table of contents
+    /// at the top and expecting the reader to hunt for the current one is not
+    /// usable.
+    ///
+    /// Three cases, in order:
+    ///  * a search is active — anchor on the first match, which is what the
+    ///    search was for;
+    ///  * otherwise anchor on the chapter being read;
+    ///  * the current chapter is filtered out — nothing sensible to anchor on.
+    private var anchorRowID: String? {
+        if !query.isEmpty {
+            return filtered.first?.1.id
+        }
+        guard chapters.indices.contains(currentIndex) else { return nil }
+        let id = chapters[currentIndex].id
+        return filtered.contains { $0.1.id == id } ? id : nil
+    }
+
     var body: some View {
         NavigationStack {
-            List(filtered, id: \.1.id) { index, chapter in
-                Button {
-                    onSelect(index)
-                    dismiss()
-                } label: {
-                    HStack(spacing: 8) {
-                        Text(chapter.title)
-                            .font(.subheadline)
-                            .foregroundStyle(index == currentIndex ? Palette.accent : .primary)
-                        Spacer()
-                        if index == currentIndex {
-                            Image(systemName: "bookmark.fill")
-                                .font(.caption2)
-                                .foregroundStyle(Palette.accent)
+            ScrollViewReader { proxy in
+                List(filtered, id: \.1.id) { index, chapter in
+                    row(index: index, chapter: chapter)
+                        .listRowBackground(
+                            index == currentIndex
+                                ? Palette.accent.opacity(0.12)
+                                : Color.clear
+                        )
+                }
+                .listStyle(.plain)
+                .searchable(text: $query, prompt: "搜索章节")
+                .navigationTitle("目录 · \(chapters.count) 章")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button {
+                            ascending.toggle()
+                        } label: {
+                            Image(systemName: ascending ? "arrow.up" : "arrow.down")
                         }
                     }
                 }
-                .buttonStyle(.plain)
-            }
-            .listStyle(.plain)
-            .searchable(text: $query, prompt: "搜索章节")
-            .navigationTitle("目录 · \(chapters.count) 章")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        ascending.toggle()
-                    } label: {
-                        Image(systemName: ascending ? "arrow.up" : "arrow.down")
-                    }
+                .onAppear {
+                    scrollToAnchor(proxy: proxy)
+                }
+                .onChange(of: query) { _, _ in
+                    didScrollToAnchor = false
+                    scrollToAnchor(proxy: proxy)
+                }
+                .onChange(of: ascending) { _, _ in
+                    didScrollToAnchor = false
+                    scrollToAnchor(proxy: proxy)
                 }
             }
         }
+    }
+
+    /// Scrolls to the anchor row.
+    ///
+    /// `scrollTo` is a no-op when the target row has not been laid out yet, which
+    /// is exactly the state during `onAppear` in a sheet — the list has not
+    /// measured its rows at that point. A single deferred call therefore lands
+    /// nowhere on a large table of contents. Instead, retry a few times with a
+    /// short gap, and stop as soon as the row can actually be found.
+    ///
+    /// Retrying is safe because the call is idempotent; it either moves to the
+    /// anchor or does nothing.
+    private func scrollToAnchor(proxy: ScrollViewProxy) {
+        // One retry task per list configuration; `onAppear` can fire more than
+        // once (keyboard dismissal, detent change) and overlapping tasks would
+        // fight over the scroll position.
+        guard !didScrollToAnchor, let id = anchorRowID else { return }
+        didScrollToAnchor = true
+
+        Task { @MainActor in
+            // Four short attempts (~110ms total): enough for a sheet's list to
+            // measure its rows, short enough that it never fights a user who
+            // starts scrolling immediately.
+            for _ in 0..<4 {
+                try? await Task.sleep(nanoseconds: 25_000_000)
+                proxy.scrollTo(id, anchor: .center)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func row(index: Int, chapter: Chapter) -> some View {
+        let isCurrent = index == currentIndex
+        Button {
+            onSelect(index)
+            dismiss()
+        } label: {
+            HStack(spacing: 8) {
+                if isCurrent {
+                    // A bar marker in addition to colour: colour alone is easy
+                    // to miss when the row happens to be near the top of the
+                    // list as it lands.
+                    RoundedRectangle(cornerRadius: 1)
+                        .fill(Palette.accent)
+                        .frame(width: 3)
+                }
+                Text(chapter.title)
+                    .font(.subheadline)
+                    .fontWeight(isCurrent ? .semibold : .regular)
+                    .foregroundStyle(isCurrent ? Palette.accent : .primary)
+                Spacer()
+                if isCurrent {
+                    Text("在读")
+                        .font(.caption2)
+                        .foregroundStyle(Palette.accent)
+                    Image(systemName: "bookmark.fill")
+                        .font(.caption2)
+                        .foregroundStyle(Palette.accent)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 }
 #endif
