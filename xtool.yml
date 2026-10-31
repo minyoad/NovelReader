@@ -1,3 +1,4 @@
 version: 1
 bundleID: com.yang.NovelReader
 infoPath: ./Info.plist
+iconPath: ./AppIcon.png

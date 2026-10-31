@@ -9,7 +9,7 @@
 - **书源**：兼容 legado 书源 JSON 的常用子集，支持搜索 / 详情 / 目录 / 正文 / 下一页。
 - **书架**：最近阅读排序、阅读进度（章节 + 字符偏移）、移出书架、清缓存。
 - **阅读器**：字号 / 行距 / 段距 / 边距 / 四种主题（纸白、米黄、深灰、纯黑）、目录跳转、上下章、阅读进度保存。
-- **翻页**：两种模式——连续滚动，或左右滑动分页（默认）。分页用 CoreText 精确排版，滑动跟手、松手按位移或甩动速度判定翻页；跨章时显示「上一章 / 下一章」提示页。三种翻页效果：覆盖（整页跟手位移）、淡入、仿真（3D 透视 + 侧边阴影）。朗读时自动翻到正在读的那一页，并高亮当前句。
+- **翻页**：两种模式——连续滚动，或左右滑动分页（默认）。分页用 CoreText 精确排版，滑动跟手、松手按位移或甩动速度判定翻页；跨章时显示「上一章 / 下一章」提示页。三种翻页效果：覆盖（整页跟手位移）、淡入、仿真（2D 纸页折叠：不透明纸背、柱面明暗、弧线轮廓，左右两个方向互为镜像）。朗读时自动翻到正在读的那一页，并高亮当前句。
 - **排版**：字号 / 行距 / 段距 / 边距、首行缩进两字、两端对齐、章节标题可关；字体可选系统衬线、系统无衬线、苹方、宋体、楷体、圆体。缩进用段落样式实现而不改写文本，字符偏移不变，阅读进度不会错位。
 - **换源**：阅读器顶栏和书目详情页都能打开候选书源列表，每个候选可先「试读这一章」，确认能取到正文再切换；切过去后按章节标题保留阅读进度。
 - **离线缓存**：阅读时后台预缓存接下来 N 章（默认 5，可设 0 关闭），断网也能继续往下读；支持「缓存全本」带进度、每本缓存上限（超出后优先清理离阅读位置最远的章节）、按本清理与占用统计；加入书架时可选择自动缓存全本。
@@ -23,8 +23,10 @@
 ```
 NovelReader/
 ├── Package.swift                 SwiftPM 工程（xtool 使用单一 library product）
-├── xtool.yml                     bundleID / Info.plist 位置
+├── xtool.yml                     bundleID / Info.plist / 图标位置
 ├── Info.plist                    显示名、后台音频、ATS、版本号
+├── AppIcon.png                   1024×1024 主图标，xtool 由此生成各尺寸
+├── Docs/app-icon-preview.png     图标预览（README 用）
 ├── Sources/
 │   ├── NovelKit/                 纯 Swift 引擎，可在 Linux 上编译和测试
 │   │   ├── Models/               Book / BookSource / Settings / JSONValue
@@ -65,6 +67,19 @@ xtool-proxy dev build
 
 > xtool 不读 `http_proxy`，联网操作请走 `xtool-proxy`。
 > 真机安装需要 Apple 账号签名，先跑 `xtool setup` 完成登录。
+
+### App 图标
+
+图标只由 `xtool.yml` 的一行决定：
+
+```yaml
+iconPath: ./AppIcon.png
+```
+
+xtool 发现 `iconPath` 后，会把主图拷进 app bundle 根目录，并在生成的 `Info.plist` 里写入 `CFBundleIconFile`，由 iOS 自行缩放取用。因此仓库里只保留一份 1024×1024 的 `AppIcon.png`，不需要各尺寸副本，也不需要 `.xcassets`。
+
+**不要**在 target 里放 `.xcassets`：Linux 上没有 `actool`，xtool 一旦发现资源目录里有 asset catalog，就会去调用它并直接构建失败（`actool is not an executable file`）。
+
 
 ## 导入书源
 
