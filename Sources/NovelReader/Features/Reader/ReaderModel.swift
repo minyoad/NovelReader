@@ -58,6 +58,21 @@ final class ReaderModel: ObservableObject {
             guard let self else { return }
             self.toast = message
         }
+        // Headphone buttons move between chapters, so they need the table of
+        // contents, which only the reader has.
+        speech.onNextChapterRequest = { [weak self] in
+            guard let self else { return }
+            // `isActive` also covers paused and still-loading, so a press while
+            // paused moves on and keeps reading. An idle reader ignores it:
+            // there is no reading session for these buttons to move.
+            guard self.isSpeaking else { return }
+            Task { await self.goNextChapter(autoPlaySpeech: true) }
+        }
+        speech.onPreviousChapterRequest = { [weak self] in
+            guard let self else { return }
+            guard self.isSpeaking else { return }
+            Task { await self.goPreviousChapter(autoPlaySpeech: true) }
+        }
     }
 
     var currentChapter: Chapter? {
@@ -102,8 +117,16 @@ final class ReaderModel: ObservableObject {
 
     func loadChapter(at index: Int, offset: Int = 0, autoplaySpeech: Bool = false) async {
         guard chapters.indices.contains(index) else { return }
-        let shouldSpeak = speech.isActive
-        speech.stop()
+        // Reading across a chapter boundary has to keep the audio session: iOS
+        // suspends a backgrounded app the moment the session goes inactive, and
+        // the next chapter would never finish downloading. `autoplaySpeech`
+        // covers the auto-advance case, where the queue has already drained so
+        // `isActive` is false even though reading is about to continue.
+        let shouldSpeak = speech.isActive || autoplaySpeech
+        speech.stop(keepingSession: shouldSpeak)
+        // The session keeps the app alive only once audio is playing again; the
+        // fetch before that needs its own short-lived allowance.
+        if shouldSpeak { speech.beginBackgroundFetch() }
         currentIndex = index
         currentSentenceIndex = 0
         pendingOffset = offset
@@ -115,13 +138,19 @@ final class ReaderModel: ObservableObject {
             let fetched = try await app.chapterContent(book: book, chapter: chapter)
             content = fetched
             app.updateProgress(bookID: book.id, chapterIndex: index, chapterTitle: chapter.title, characterOffset: offset)
-            if shouldSpeak || autoplaySpeech {
+            if shouldSpeak {
+                // Name the chapter before playback starts, so the Lock Screen
+                // never shows the previous one even for a moment.
+                describeForSystemPlayback()
                 startSpeaking()
             }
             schedulePrefetch()
         } catch {
             content = nil
             errorMessage = error.localizedDescription
+            // Nothing is going to play, so release the session kept alive for
+            // the chapter that failed to load.
+            speech.stop()
         }
         isLoading = false
         await refreshCacheStats()
@@ -244,19 +273,30 @@ final class ReaderModel: ObservableObject {
     }
 
     func goNextChapter() async {
+        await goNextChapter(autoPlaySpeech: false)
+    }
+
+    /// `autoPlaySpeech` is what the system controls need: a headset press while
+    /// reading should continue reading the next chapter rather than just moving
+    /// the page and going quiet.
+    func goNextChapter(autoPlaySpeech: Bool) async {
         guard currentIndex + 1 < chapters.count else {
             app.showBanner("已经是最后一章了", isError: false)
             return
         }
-        await loadChapter(at: currentIndex + 1)
+        await loadChapter(at: currentIndex + 1, autoplaySpeech: autoPlaySpeech)
     }
 
     func goPreviousChapter() async {
+        await goPreviousChapter(autoPlaySpeech: false)
+    }
+
+    func goPreviousChapter(autoPlaySpeech: Bool) async {
         guard currentIndex - 1 >= 0 else {
             app.showBanner("已经是第一章了", isError: false)
             return
         }
-        await loadChapter(at: currentIndex - 1)
+        await loadChapter(at: currentIndex - 1, autoplaySpeech: autoPlaySpeech)
     }
 
     func retry() async {
@@ -362,8 +402,24 @@ final class ReaderModel: ObservableObject {
                 : "自定义朗读接口还不完整，请到设置里填写地址和模型"
             return
         }
+        // Name the chapter before playback starts, so the Lock Screen never
+        // shows the previous chapter even for a moment.
+        describeForSystemPlayback()
         speech.load(sentences: sentences, startAt: min(startIndex, max(sentences.count - 1, 0)), autoPlay: true)
         currentSentenceIndex = speech.currentIndex
+    }
+
+    /// Gives the Lock Screen the book and chapter being read.
+    ///
+    /// Called on every chapter load too: the system UI outlives the reader, and
+    /// a stale chapter title on the Lock Screen is worse than none.
+    private func describeForSystemPlayback() {
+        speech.describe(
+            bookTitle: book.name,
+            author: book.author,
+            chapterTitle: currentChapter?.title ?? book.name,
+            artworkURL: book.coverURL
+        )
     }
 
     func toggleSpeech() {
@@ -379,9 +435,16 @@ final class ReaderModel: ObservableObject {
     }
 
     private func advanceAfterSpeech() async {
-        guard app.settings.tts.autoNextChapter else { return }
+        guard app.settings.tts.autoNextChapter else {
+            // Ended on the last chapter (or with auto-advance off): drop audio
+            // focus but keep the Lock Screen entry, so the reader can resume.
+            speech.releaseSessionWhenIdle()
+            return
+        }
         if currentIndex + 1 < chapters.count {
             await loadChapter(at: currentIndex + 1, autoplaySpeech: true)
+        } else {
+            speech.releaseSessionWhenIdle()
         }
     }
 

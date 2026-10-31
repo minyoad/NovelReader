@@ -36,10 +36,24 @@ final class SpeechController: NSObject, ObservableObject {
     var onFinished: (() -> Void)?
     /// Called when a remote engine could not produce audio.
     var onError: ((String) -> Void)?
+    /// Called when the system asks to move between chapters — headphone
+    /// buttons, Control Center, CarPlay. Bubbled up to the reader because only
+    /// it knows the table of contents.
+    var onNextChapterRequest: (() -> Void)?
+    var onPreviousChapterRequest: (() -> Void)?
 
     private let synthesizer = AVSpeechSynthesizer()
     private var settings = TTSSettings()
     private var didConfigureSession = false
+
+    /// Lock Screen / Control Center / headset integration.
+    let nowPlaying = NowPlayingCenter()
+    /// Set by the reader so the system UI can show what is being read.
+    private var trackInfo = NowPlayingCenter.Track.empty
+    /// Turns the sentence list into the position and duration the system
+    /// progress bar needs. Rebuilt with the queue, so it always matches
+    /// `sentences`.
+    private var timeline = SpeechTimeline(sentences: [])
 
     // MARK: Remote playback
 
@@ -51,6 +65,9 @@ final class SpeechController: NSObject, ObservableObject {
     private var loadTask: Task<Void, Never>?
     private var prefetchTasks: [Int: Task<Void, Never>] = [:]
     private var currentChunkBoundaries: [EdgeSentenceBoundary] = []
+    /// Keeps the app alive across the silent gap while the next chunk or
+    /// chapter is still being fetched with the screen locked.
+    private let grace = BackgroundGrace()
     /// Holds the chunk fetched ahead of the one playing.
     ///
     /// Needed even with the disk cache off: otherwise "prefetch" would fetch
@@ -65,6 +82,26 @@ final class SpeechController: NSObject, ObservableObject {
     override init() {
         super.init()
         synthesizer.delegate = self
+        nowPlaying.onTogglePlayPause = { [weak self] in self?.toggle() }
+        nowPlaying.onPlay = { [weak self] in self?.resumeOrPlay() }
+        nowPlaying.onPause = { [weak self] in self?.pause() }
+        nowPlaying.onNextChapter = { [weak self] in self?.onNextChapterRequest?() }
+        nowPlaying.onPreviousChapter = { [weak self] in self?.onPreviousChapterRequest?() }
+        nowPlaying.onNextSentence = { [weak self] in self?.next(resuming: false) }
+        nowPlaying.onPreviousSentence = { [weak self] in self?.previous(resuming: false) }
+        nowPlaying.onSeek = { [weak self] seconds in self?.seek(to: seconds) }
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleInterruption(_:)),
+            name: AVAudioSession.interruptionNotification,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleRouteChange(_:)),
+            name: AVAudioSession.routeChangeNotification,
+            object: nil
+        )
     }
 
     var currentSentence: String? {
@@ -106,7 +143,7 @@ final class SpeechController: NSObject, ObservableObject {
         }
 
         let wasPlaying = isActive
-        stop()
+        stop(keepingSession: wasPlaying)
         self.settings = settings
         rebuildChunks()
         guard wasPlaying else { return }
@@ -114,25 +151,62 @@ final class SpeechController: NSObject, ObservableObject {
     }
 
     /// Replaces the queue. When `autoPlay` is true reading starts immediately.
+    ///
+    /// The audio session is kept alive when playback is about to resume: a
+    /// chapter change calls this from the background, and deactivating the
+    /// session for even a moment lets iOS suspend the app before the next
+    /// chapter's audio has been fetched.
     func load(sentences newSentences: [String], startAt index: Int = 0, autoPlay: Bool = true) {
-        stop()
+        stop(keepingSession: autoPlay)
         sentences = newSentences
         offsetsCache = nil
         currentIndex = min(max(index, 0), max(newSentences.count - 1, 0))
         rebuildChunks()
+        rebuildTimeline()
+        // Publish the new chapter's opening position right away: the previous
+        // chapter's progress would otherwise sit on the Lock Screen until the
+        // first audio of this one has been fetched.
+        publishNowPlaying()
         guard autoPlay, !newSentences.isEmpty else { return }
         play()
+    }
+
+    /// Names what is being read in the system UI.
+    ///
+    /// Provides the book and chapter, not the sentence: the Lock Screen is a
+    /// glance away from the app, and "第三章 风起" is what identifies the
+    /// reading session, while the sentence would change every few seconds.
+    func describe(bookTitle: String, author: String, chapterTitle: String, artworkURL: String?) {
+        trackInfo = NowPlayingCenter.Track(
+            title: chapterTitle,
+            artist: author.isEmpty ? bookTitle : "\(bookTitle) · \(author)",
+            album: bookTitle,
+            artworkURL: artworkURL
+        )
+        nowPlaying.setTrack(trackInfo)
+        publishNowPlaying()
     }
 
     func play() {
         guard sentences.indices.contains(currentIndex) else { return }
         lastError = nil
+        nowPlaying.activate()
 
         if settings.engine == .system {
             playSystem()
         } else {
             playRemote()
         }
+        publishNowPlaying()
+    }
+
+    /// Play button semantics from the system: resume when there is a paused
+    /// queue, start from the current sentence otherwise.
+    private func resumeOrPlay() {
+        // A fetch already in flight is not something to restart: doing so would
+        // cancel the request and begin the same download again.
+        guard !isPreparing else { return }
+        if !isPlaying { play() }
     }
 
     func pause() {
@@ -158,15 +232,24 @@ final class SpeechController: NSObject, ObservableObject {
         }
         isPaused = true
         isSpeaking = false
+        grace.end()
+        publishNowPlaying()
     }
 
     func toggle() {
-        // `isActive` also covers the paused state, so it cannot be the test
-        // here: a paused reader has to resume, not pause again.
+        // `isSpeaking` covers the paused state too, so the test has to be
+        // "audio is coming out right now": a paused reader has to resume, and a
+        // playing one has to pause. `isPreparing` pauses the pending fetch.
         if isSpeaking || isPreparing { pause() } else { play() }
     }
 
-    func stop() {
+    /// Stops playback.
+    ///
+    /// `keepingSession` exists for chapter changes: the audio session has to
+    /// stay active across the gap while the next chapter is fetched, otherwise
+    /// iOS suspends the app in the background and the fetch never completes —
+    /// which is exactly when hands-free listening matters.
+    func stop(keepingSession: Bool = false) {
         synthesizer.stopSpeaking(at: .immediate)
         loadTask?.cancel()
         loadTask = nil
@@ -180,27 +263,94 @@ final class SpeechController: NSObject, ObservableObject {
         isPaused = false
         isPreparing = false
         prefetched = nil
-        deactivateSession()
+        // The system UI is cleared only when reading ends for good; a chapter
+        // switch keeps it up and the pending play() refreshes the progress.
+        if !keepingSession {
+            grace.end()
+            nowPlaying.deactivate()
+            deactivateSession()
+        }
     }
 
-    func next() {
+    func next(resuming: Bool = true) {
         guard currentIndex + 1 < sentences.count else {
+            // While paused there is no audio to finish, and ending the queue
+            // would auto-advance to the next chapter — which must not start
+            // talking just because a skip button was pressed.
+            if isPaused { return }
             finishQueue()
             return
         }
-        currentIndex += 1
-        restartCurrent()
+        step(to: currentIndex + 1, resuming: resuming)
     }
 
-    func previous() {
-        currentIndex = max(currentIndex - 1, 0)
-        restartCurrent()
+    func previous(resuming: Bool = true) {
+        step(to: max(currentIndex - 1, 0), resuming: resuming)
     }
 
-    func jump(to index: Int) {
+    func jump(to index: Int, resuming: Bool = true) {
+        step(to: index, resuming: resuming)
+    }
+
+    /// Moves to a sentence, optionally keeping a paused reader paused.
+    ///
+    /// `resuming` is false for the Lock Screen controls, where a skip or a
+    /// scrub is a position change rather than a command to start talking; the
+    /// in-app buttons keep their old behaviour of continuing playback.
+    private func step(to index: Int, resuming: Bool) {
         guard sentences.indices.contains(index) else { return }
+        if isPaused && !resuming {
+            park(at: index)
+        } else {
+            currentIndex = index
+            restartCurrent()
+        }
+    }
+
+    /// Moves to a sentence without producing audio, leaving the queue paused.
+    private func park(at index: Int) {
+        synthesizer.stopSpeaking(at: .immediate)
+        loadTask?.cancel()
+        loadTask = nil
+        prefetchTasks.values.forEach { $0.cancel() }
+        prefetchTasks.removeAll()
+        audioPlayer?.stop()
+        audioPlayer = nil
+        progressTimer?.invalidate()
+        progressTimer = nil
         currentIndex = index
-        restartCurrent()
+        isPaused = true
+        isSpeaking = false
+        isPreparing = false
+        // The session is deliberately kept: a paused reader still has to answer
+        // the Lock Screen, and an app whose session went away gets suspended
+        // and stops receiving those commands.
+        onSentenceChange?(index)
+        publishNowPlaying()
+    }
+
+    /// Turns a position from the Lock Screen scrubber into a sentence.
+    ///
+    /// The chapter has no single duration — it is synthesized in chunks — so
+    /// the total comes from `SpeechTimeline`. That keeps the scrubber
+    /// proportional to the text, which is what it is used for: jumping to a
+    /// rough place, then letting the reader adjust by sentence.
+    private func seek(to seconds: Double) {
+        guard !sentences.isEmpty else { return }
+        jump(to: timeline.sentenceIndex(atSeconds: seconds, rate: settings.rate), resuming: false)
+    }
+
+    /// Pushes the current state to the Lock Screen.
+    ///
+    /// Skipped while no chapter has been named yet: an empty title would show up
+    /// as a blank Now Playing card, which looks like a bug.
+    private func publishNowPlaying() {
+        guard !trackInfo.title.isEmpty else { return }
+        nowPlaying.update(
+            elapsed: timeline.elapsed(before: currentIndex, atRate: settings.rate),
+            duration: timeline.duration(atRate: settings.rate),
+            isPlaying: isPlaying
+        )
     }
 
     /// Jump to the sentence that best matches an offset inside the chapter text.
@@ -259,6 +409,11 @@ final class SpeechController: NSObject, ObservableObject {
         chunks = SpeechChunker.sentenceChunks(sentences)
     }
 
+    /// Rebuilds the mapping used for the system progress bar.
+    private func rebuildTimeline() {
+        timeline = SpeechTimeline(sentences: sentences)
+    }
+
     private func chunkIndex(containing sentence: Int) -> Int? {
         chunks.firstIndex { sentence >= $0.sentenceStart && sentence < $0.sentenceStart + $0.sentenceCount }
     }
@@ -296,6 +451,10 @@ final class SpeechController: NSObject, ObservableObject {
 
     private func playRemote() {
         if let player = audioPlayer, isPaused {
+            // The session may have been deactivated by an interruption or a
+            // route change, in which case the player is silent until it is
+            // reactivated.
+            activateSession()
             player.play()
             isPaused = false
             isSpeaking = true
@@ -420,6 +579,7 @@ final class SpeechController: NSObject, ObservableObject {
     ) {
         guard chunks.indices.contains(index) else { return }
         activateSession()
+        grace.end()
 
         do {
             let player = try AVAudioPlayer(data: audio)
@@ -460,6 +620,7 @@ final class SpeechController: NSObject, ObservableObject {
         guard sentence != currentIndex else { return }
         currentIndex = sentence
         onSentenceChange?(sentence)
+        publishNowPlaying()
     }
 
     /// Where inside a chunk a given sentence begins, for seeking on "previous".
@@ -545,7 +706,9 @@ final class SpeechController: NSObject, ObservableObject {
         isPreparing = false
         progressTimer?.invalidate()
         progressTimer = nil
+        grace.end()
         lastError = error.localizedDescription
+        publishNowPlaying()
         onError?(error.localizedDescription)
     }
 
@@ -617,7 +780,9 @@ final class SpeechController: NSObject, ObservableObject {
 
         isSpeaking = true
         isPaused = false
+        grace.end()
         onSentenceChange?(currentIndex)
+        publishNowPlaying()
         synthesizer.speak(utterance)
     }
 
@@ -637,6 +802,8 @@ final class SpeechController: NSObject, ObservableObject {
         isPreparing = false
         progressTimer?.invalidate()
         progressTimer = nil
+        grace.end()
+        publishNowPlaying()
         onFinished?()
     }
 
@@ -659,6 +826,72 @@ final class SpeechController: NSObject, ObservableObject {
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         didConfigureSession = false
     }
+
+    /// Gives up the audio session once nothing more is going to play.
+    ///
+    /// Separate from `stop()` on purpose: the Lock Screen should keep showing
+    /// the chapter as paused after the last sentence of a book, so the system
+    /// info stays while the app stops holding audio focus.
+    func releaseSessionWhenIdle() {
+        grace.end()
+        guard !isActive else { return }
+        deactivateSession()
+    }
+
+    /// Holds the app awake while the next chapter is fetched with the screen
+    /// locked.
+    ///
+    /// Audio keeps a background app alive only while something is playing, and
+    /// a chapter boundary is a silent gap: the download, the sentence split and
+    /// the first chunk's synthesis can easily outlast the few seconds iOS
+    /// waits before suspending. Called by the reader, released as soon as audio
+    /// starts or playback stops.
+    func beginBackgroundFetch() {
+        grace.begin(reason: "继续朗读")
+    }
+
+    // MARK: - Audio interruptions
+
+    /// Pauses for a phone call or another app taking the session, and resumes
+    /// afterwards only if the system says it is appropriate.
+    ///
+    /// Resuming unconditionally would start talking over whatever interrupted
+    /// it — a call in particular — so the interruption options are respected.
+    @objc private func handleInterruption(_ note: Notification) {
+        guard let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+              let type = AVAudioSession.InterruptionType(rawValue: raw) else { return }
+
+        switch type {
+        case .began:
+            guard isActive else { return }
+            wasPlayingBeforeInterruption = isPlaying
+            pause()
+        case .ended:
+            let options = AVAudioSession.InterruptionOptions(
+                rawValue: note.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
+            )
+            guard wasPlayingBeforeInterruption, options.contains(.shouldResume), isPaused else { return }
+            wasPlayingBeforeInterruption = false
+            play()
+        @unknown default:
+            break
+        }
+    }
+
+    /// Pausing when the headphones are unplugged.
+    ///
+    /// Without this a chapter keeps reading out loud through the phone speaker,
+    /// which is the worst possible outcome of taking an earbud out.
+    @objc private func handleRouteChange(_ note: Notification) {
+        guard let raw = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt,
+              let reason = AVAudioSession.RouteChangeReason(rawValue: raw) else { return }
+        guard reason == .oldDeviceUnavailable, isActive else { return }
+        pause()
+    }
+
+    /// Remembers whether audio was actually coming out, so an interrupted pause
+    /// does not turn into an unexpected resume of something already paused.
+    private var wasPlayingBeforeInterruption = false
 
     static func availableChineseVoices() -> [AVSpeechSynthesisVoice] {
         AVSpeechSynthesisVoice.speechVoices()
