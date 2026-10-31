@@ -48,18 +48,26 @@ struct CurledPage: View {
             ZStack(alignment: .topLeading) {
                 // Page underneath: visible wherever the sheet has moved away.
                 if let underText {
-                    PageImage(attributed: underText)
+                    PageImage(attributed: underText, paper: paper)
                         .frame(width: width, height: size.height)
                 }
 
-                foldedSheet(
-                    size: size,
-                    width: width,
-                    crease: crease,
-                    text: sheetText,
-                    forward: forward,
-                    t: t
-                )
+                if forward {
+                    foldedSheet(
+                        size: size,
+                        width: width,
+                        crease: crease,
+                        text: sheetText,
+                        t: t
+                    )
+                } else {
+                    incomingSheet(
+                        size: size,
+                        width: width,
+                        crease: crease,
+                        text: sheetText
+                    )
+                }
             }
             .frame(width: width, height: size.height, alignment: .topLeading)
             .clipped()
@@ -67,7 +75,71 @@ struct CurledPage: View {
         .allowsHitTesting(false)
     }
 
-    // MARK: - The folded sheet
+    // MARK: - Backward: lay the previous page back down
+
+    /// The previous page arriving from the left.
+    ///
+    /// It lands **face up**, so only its front is ever drawn. An earlier version
+    /// reused the fold renderer here, which also painted the mirrored back of the
+    /// sheet on top of the front — two copies of the same text, one of them
+    /// backwards, stacked on the left half of the screen.
+    ///
+    /// The curl is suggested instead by the trailing bevel: a lit lip at the
+    /// moving edge and a shadow it throws onto the page still visible to its
+    /// right.
+    @ViewBuilder
+    private func incomingSheet(
+        size: CGSize,
+        width: CGFloat,
+        crease: CGFloat,
+        text: NSAttributedString
+    ) -> some View {
+        let c = min(max(crease, 0), width)
+        let bevel: CGFloat = 14
+
+        ZStack(alignment: .topLeading) {
+            // Front of the previous page, revealed from the left.
+            PageImage(attributed: text, paper: paper)
+                .frame(width: width, height: size.height)
+                .mask(alignment: .leading) {
+                    Rectangle().frame(width: c)
+                }
+
+            // Shade rolling off the curled trailing edge, so the page does not
+            // meet the current page as a hard cut.
+            if c > 1 {
+                LinearGradient(
+                    colors: [.black.opacity(0), .black.opacity(0.26)],
+                    startPoint: .leading,
+                    endPoint: .trailing
+                )
+                .frame(width: min(bevel, c), height: size.height)
+                .offset(x: max(c - min(bevel, c), 0))
+                .allowsHitTesting(false)
+
+                // The lifted edge itself catches the light.
+                Rectangle()
+                    .fill(Color.white.opacity(0.38))
+                    .frame(width: 1.2, height: size.height)
+                    .offset(x: max(c - 1.2, 0))
+                    .allowsHitTesting(false)
+            }
+
+            // Shadow cast onto the page that is still uncovered.
+            if c > 1 && c < width - 1 {
+                LinearGradient(
+                    colors: [.black.opacity(0.26), .black.opacity(0)],
+                    startPoint: .leading,
+                    endPoint: .trailing
+                )
+                .frame(width: min(width * 0.18, 38), height: size.height)
+                .offset(x: c)
+                .allowsHitTesting(false)
+            }
+        }
+    }
+
+    // MARK: - Forward: peel the current sheet away
 
     @ViewBuilder
     private func foldedSheet(
@@ -75,7 +147,6 @@ struct CurledPage: View {
         width: CGFloat,
         crease: CGFloat,
         text: NSAttributedString,
-        forward: Bool,
         t: CGFloat
     ) -> some View {
         let c = min(max(crease, 0), width)
@@ -90,7 +161,7 @@ struct CurledPage: View {
 
         ZStack(alignment: .topLeading) {
             // Flat part: the paper still lying on the book.
-            PageImage(attributed: text)
+            PageImage(attributed: text, paper: paper)
                 .frame(width: width, height: size.height)
                 .mask(alignment: .leading) {
                     Rectangle().frame(width: flatWidth)
@@ -156,7 +227,7 @@ struct CurledPage: View {
             // Back of the print. Drawn fully opaque onto the paper body — the
             // dimming comes from the veil below, not from letting the page
             // underneath bleed through.
-            PageImage(attributed: text, mirror: true)
+            PageImage(attributed: text, mirror: true, paper: paper)
                 .frame(width: width, height: size.height)
                 .frame(width: stripWidth, height: size.height, alignment: .leading)
                 .clipped()
@@ -238,22 +309,29 @@ private struct CurlEdge: Shape {
 
 /// Draws one attributed page with CoreText, optionally horizontally mirrored so
 /// it reads as the back of the same sheet.
+///
+/// When `paper` is given the view paints an opaque sheet background first. That
+/// matters for the curl, where two pages are stacked: with a clear background
+/// both sets of glyphs would show through each other, which looks like the same
+/// text printed twice.
 struct PageImage: UIViewRepresentable {
     let attributed: NSAttributedString
     var mirror: Bool = false
+    var paper: Color?
 
     func makeUIView(context: Context) -> PageDrawView {
         let view = PageDrawView()
-        view.backgroundColor = .clear
-        view.isOpaque = false
+        view.isOpaque = paper != nil
         view.contentMode = .redraw
         view.mirror = mirror
+        view.paper = paper
         view.text = attributed
         return view
     }
 
     func updateUIView(_ view: PageDrawView, context: Context) {
         view.mirror = mirror
+        view.paper = paper
         view.text = attributed
     }
 
@@ -263,6 +341,13 @@ struct PageImage: UIViewRepresentable {
         }
         var mirror = false {
             didSet { setNeedsDisplay() }
+        }
+        var paper: Color? {
+            didSet {
+                backgroundColor = paper.map { UIColor($0) } ?? .clear
+                isOpaque = paper != nil
+                setNeedsDisplay()
+            }
         }
 
         override func draw(_ rect: CGRect) {
