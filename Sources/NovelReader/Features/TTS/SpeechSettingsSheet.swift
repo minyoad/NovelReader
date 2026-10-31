@@ -7,8 +7,9 @@ import NovelKit
 /// The same rows as the settings tab (`TTSSettingSections`), shown here because
 /// changing voice or speed is something you do *while listening*: leaving the
 /// book to open the settings tab would stop the reading. Only the parts that
-/// affect playback are here — proxy, Keychain and diagnostics stay in the
-/// settings tab, where a mis-set field cannot silently break the current book.
+/// affect playback are here — the proxy and the diagnostics screen stay in the
+/// settings tab, since neither is something you change mid-chapter and a wrong
+/// proxy there would silently kill the current session.
 struct SpeechSettingsSheet: View {
     @EnvironmentObject private var app: AppModel
     @Environment(\.dismiss) private var dismiss
