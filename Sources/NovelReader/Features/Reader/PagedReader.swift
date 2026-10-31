@@ -161,7 +161,13 @@ struct PagedReader: View {
                     .rotation3DEffect(
                         .degrees(reading.pageTurnEffect == .curl ? Double(dragProgress * 80) * (isForward ? 1 : -1) : 0),
                         axis: (x: 0, y: 1, z: 0),
-                        anchor: isForward ? .trailing : .leading,
+                        // The spine is on the left (left-to-right reading), so
+                        // every turning sheet hinges there: forward folds the
+                        // free (right) edge away from the reader, backward
+                        // brings it back toward them. Hinging the forward turn
+                        // on the trailing edge mirrored the motion and made the
+                        // curl run against the finger.
+                        anchor: .leading,
                         perspective: reading.pageTurnEffect == .curl ? 0.45 : 0
                     )
             }
