@@ -117,7 +117,7 @@ struct SettingsView: View {
                     } header: {
                         Text("网络")
                     } footer: {
-                        Text("如果在国内网络下试听一直报 TLS / 连接失败，填一个可用的代理地址即可。这一步只影响朗读。")
+                        Text("默认直连，通常不需要填。注意：如果手机系统里开着代理 / VPN，Edge 朗读反而可能握手失败（报 TLS 错误）——那种情况和这里无关，关掉系统的代理即可。这一步只影响朗读，不影响抓书源。")
                     }
                 }
 
@@ -313,8 +313,7 @@ struct SettingsView: View {
             }
             .sheet(isPresented: $showDiagnostics) {
                 EdgeDiagnosticsView(proxy: app.settings.tts.proxy)
-            }
-            .onChange(of: app.settings) { _, _ in
+            }            .onChange(of: app.settings) { _, _ in
                 app.saveSettings()
             }
             .onAppear { Task { await refreshCacheStats() } }

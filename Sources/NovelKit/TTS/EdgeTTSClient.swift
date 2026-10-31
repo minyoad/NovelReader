@@ -29,16 +29,17 @@ public enum EdgeTTSError: LocalizedError {
         case .transport(let host, let code):
             return """
             连接 Edge 朗读（\(host)）时\(Self.transportReason(code: code))
-            如果两个地址都失败，说明当前网络到微软语音服务的连接被干扰了。\
-            可以先切回「系统朗读」离线听，或在「自定义接口」里填一个可用的 TTS 服务。
+            如果两个地址都失败，先检查手机是否开着代理 / VPN 或网络受限；也可以点「朗读网络诊断」看具体是哪一层不通。\
+            临时可以先切回「系统朗读」离线听。
             """
         case .allEndpointsFailed(let reasons):
             return """
             连接微软朗读服务失败，已试过全部地址：
             \(reasons.joined(separator: "\n"))
 
-            这通常是当前网络到微软语音域名的连接被干扰（不是令牌问题）。\
-            可以先切回「系统朗读」离线听，或在「自定义接口」里填一个可用的 TTS 服务。
+            多半是手机的网络环境问题（系统代理 / VPN / 网络限制），而不是令牌。\
+            先试试关掉系统代理或 VPN，也可以在设置里点「朗读网络诊断」定位。\
+            临时可以切回「系统朗读」。
             """
         }
     }
@@ -46,18 +47,21 @@ public enum EdgeTTSError: LocalizedError {
     static func transportReason(code: Int?) -> String {
         switch code.map({ URLError.Code(rawValue: $0) }) {
         case .some(.secureConnectionFailed):
-            return "TLS 握手被中断，域名很可能被当前网络干扰了。"
+            // Seen in practice with a system-wide proxy or VPN in the path:
+            // it intercepts the TLS handshake to Microsoft's speech host. Worth
+            // naming first, because it is the easiest thing to turn off.
+            return "TLS 握手被中断。常见原因是手机开着代理 / VPN 拦截了这次连接，或者当前网络到该域名不通。"
         case .some(.serverCertificateUntrusted),
              .some(.serverCertificateHasBadDate),
              .some(.serverCertificateNotYetValid),
              .some(.serverCertificateHasUnknownRoot):
-            return "证书校验失败，网络中间可能有人在劫持这个连接。"
+            return "证书校验失败，网络中间可能有代理或劫持。"
         case .some(.notConnectedToInternet):
             return "设备当前没有联网。"
         case .some(.timedOut):
             return "连接超时。"
         case .some(.cannotFindHost), .some(.dnsLookupFailed):
-            return "无法解析域名。"
+            return "无法解析域名。代理或 DNS 可能有问题。"
         case .some(.cannotConnectToHost):
             return "无法建立连接，端口可能被阻断。"
         case .some(.networkConnectionLost):

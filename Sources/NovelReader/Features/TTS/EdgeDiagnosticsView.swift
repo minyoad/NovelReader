@@ -40,7 +40,7 @@ struct EdgeDiagnosticsView: View {
                 } header: {
                     Text("检测结果")
                 } footer: {
-                    Text("「HTTPS」这一行能通过、但「朗读」失败，说明网络通、只是 WebSocket 被拒绝；两行都失败说明当前网络到微软语音域名不通。")
+                    Text("「HTTPS」能通过、但「朗读」失败，说明网络通、只是 WebSocket 被拒绝；两行都失败多半是手机的网络环境（系统代理 / VPN / 网络限制）。这里填的代理只在朗读时使用。")
                 }
             }
             .navigationTitle("朗读网络诊断")

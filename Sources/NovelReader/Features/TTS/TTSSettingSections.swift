@@ -156,10 +156,11 @@ enum TTSSettingSections {
 
     /// Optional HTTP proxy for the remote engines.
     ///
-    /// Edge is blocked from some networks — mainland China resets the TLS
-    /// handshake outright — and a proxy is the only workaround short of
-    /// switching engines. Scoped to speech so book sources keep their own
-    /// route.
+    /// Not needed on a normal connection — the service works direct from a
+    /// phone. It exists for networks that block Microsoft's speech hosts, and
+    /// for the opposite case that was actually observed: a system-wide proxy or
+    /// VPN that breaks the TLS handshake, where this field is *not* the fix.
+    /// Scoped to speech so book sources keep their own route.
     @ViewBuilder
     static func proxy(_ tts: Binding<TTSSettings>) -> some View {
         LabeledContent("代理（可选）") {
