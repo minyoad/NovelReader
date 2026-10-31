@@ -10,6 +10,10 @@ import UIKit
 /// that, which is why an earlier version read as a grey strip sliding sideways
 /// rather than paper bending.
 ///
+/// The corner that lifts is a **top** one — top-right when turning forward,
+/// top-left when turning back — because that is where a thumb actually grabs a
+/// page. The fold then sweeps downward across the sheet.
+///
 /// Everything is expressed as a signed distance `d` from the crease line, with
 /// positive on the side that has been lifted off the book:
 ///
@@ -46,20 +50,27 @@ struct CurlGeometry {
 
     /// A point the crease passes through.
     ///
-    /// Travels from near the lifted corner toward the opposite one, mirrored for
-    /// a backward turn so the two directions are exact reflections.
+    /// The sheet is lifted at a **top** corner (top-right when turning forward,
+    /// top-left when turning back) and the fold sweeps down toward the opposite
+    /// corner. Peeling from the top is how a thumb actually lifts a page; a fold
+    /// that starts at the bottom edge reads as the sheet hinging on its base
+    /// instead of being picked up.
+    ///
+    /// Mirrored horizontally for a backward turn so the two directions stay exact
+    /// reflections of each other.
     var creasePoint: CGPoint {
         let t = progress
         let x = w * (1 - 0.92 * t)
-        let y = h * (1 - 0.94 * t)
+        // Starts at the top edge and travels down; y grows with progress.
+        let y = h * 0.94 * t
         return forward ? CGPoint(x: x, y: y) : CGPoint(x: w - x, y: y)
     }
 
     /// Unit tangent along the crease.
     var tangent: CGPoint {
-        // Starts steep (nearly vertical near the corner) and tilts as it sweeps,
-        // so the lifted corner grows instead of the fold staying parallel.
-        let degrees = -80 + 62 * progress
+        // Nearly vertical next to the lifted top corner, tilting flatter as the
+        // fold sweeps down the page, so the lifted corner grows.
+        let degrees = 80 - 62 * progress
         let radians = degrees * .pi / 180
         let dx = cos(radians)
         let dy = sin(radians)
@@ -70,9 +81,9 @@ struct CurlGeometry {
     var normal: CGPoint {
         let t = tangent
         var n = CGPoint(x: -t.y, y: t.x)
-        // Keep it pointing rightwards/inwards so the lifted region is the one
-        // that grows from the corner, in both directions.
-        let reference = forward ? CGPoint(x: 1, y: 0.35) : CGPoint(x: -1, y: 0.35)
+        // Keep it pointing up and inwards, so the lifted region is the one that
+        // grows down from the top corner, in both directions.
+        let reference = forward ? CGPoint(x: 1, y: -0.35) : CGPoint(x: -1, y: -0.35)
         if n.x * reference.x + n.y * reference.y < 0 {
             n = CGPoint(x: -n.x, y: -n.y)
         }

@@ -24,18 +24,22 @@ def smoothstep(e0, e1, x):
 
 
 def geometry(t, forward=True):
-    """Mirror of CurlGeometry."""
+    """Mirror of CurlGeometry.
+
+    The lifted corner is a top one: top-right going forward, top-left going
+    back. The crease starts on the top edge and sweeps down.
+    """
     x = W * (1 - 0.92 * t)
-    y = H * (1 - 0.94 * t)
+    y = H * 0.94 * t
     cp = (x, y) if forward else (W - x, y)
 
-    deg = -80 + 62 * t
+    deg = 80 - 62 * t
     rad = math.radians(deg)
     dx, dy = math.cos(rad), math.sin(rad)
     tan = (dx, dy) if forward else (-dx, dy)
 
     nx, ny = -tan[1], tan[0]
-    ref = (1, 0.35) if forward else (-1, 0.35)
+    ref = (1, -0.35) if forward else (-1, -0.35)
     if nx * ref[0] + ny * ref[1] < 0:
         nx, ny = -nx, -ny
 
