@@ -89,8 +89,4 @@ struct ReaderSettingsSheet: View {
     }
 }
 
-struct AVSpeechVoiceOption: Identifiable, Hashable {
-    let id: String
-    let name: String
-}
 #endif

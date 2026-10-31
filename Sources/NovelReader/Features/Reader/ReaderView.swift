@@ -38,7 +38,7 @@ struct ReaderView: View {
                 } else {
                     ReaderContent(model: model, theme: theme)
                 }
-                if model.speech.hasContent && (model.speech.isSpeaking || model.speech.isPaused) {
+                if model.speech.hasContent && model.speech.isActive {
                     TTSBar(model: model, theme: theme)
                 }
             }
@@ -467,15 +467,24 @@ private struct TTSBar: View {
                     Image(systemName: "backward.frame")
                 }
                 Button { model.speech.toggle() } label: {
-                    Image(systemName: model.speech.isSpeaking ? "pause.fill" : "play.fill")
-                        .font(.system(size: 20))
+                    if model.speech.isPreparing {
+                        // Remote engines need a moment before the first sound;
+                        // a spinner explains the silence instead of looking
+                        // like the button did nothing.
+                        ProgressView()
+                            .controlSize(.small)
+                            .frame(width: 20, height: 20)
+                    } else {
+                        Image(systemName: model.speech.isSpeaking ? "pause.fill" : "play.fill")
+                            .font(.system(size: 20))
+                    }
                 }
                 Button { model.speech.next() } label: {
                     Image(systemName: "forward.frame")
                 }
 
                 Menu {
-                    ForEach([0.35, 0.45, 0.5, 0.6, 0.75], id: \.self) { rate in
+                    ForEach([0.35, 0.45, 0.5, 0.6, 0.75, 0.9, 1.05], id: \.self) { rate in
                         Button(String(format: "%.2fx", rate)) {
                             app.settings.tts.rate = rate
                             app.saveSettings()

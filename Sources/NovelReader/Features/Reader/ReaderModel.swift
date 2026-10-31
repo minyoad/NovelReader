@@ -43,6 +43,7 @@ final class ReaderModel: ObservableObject {
         self.pendingOffset = startIndex == nil ? book.progress.characterOffset : 0
         self.startIndexOverride = startIndex
 
+        speech.attach(store: app.store)
         speech.configure(app.settings.tts)
         speech.onSentenceChange = { [weak self] index in
             guard let self else { return }
@@ -52,6 +53,10 @@ final class ReaderModel: ObservableObject {
         speech.onFinished = { [weak self] in
             guard let self else { return }
             Task { await self.advanceAfterSpeech() }
+        }
+        speech.onError = { [weak self] message in
+            guard let self else { return }
+            self.toast = message
         }
     }
 
@@ -351,6 +356,13 @@ final class ReaderModel: ObservableObject {
         let sentences = TextProcessing.sentences(from: text)
         let startIndex = speech.sentenceIndex(forCharactersBefore: pendingOffset, in: text)
         speech.configure(app.settings.tts)
+        speech.attach(store: app.store)
+        if app.settings.tts.engine.needsNetwork && !app.settings.tts.isRemoteUsable {
+            toast = app.settings.tts.engine == .edge
+                ? "还没有选择 Edge 音色，请到设置里选一个"
+                : "自定义朗读接口还不完整，请到设置里填写地址和模型"
+            return
+        }
         speech.load(sentences: sentences, startAt: min(startIndex, max(sentences.count - 1, 0)), autoPlay: true)
         currentSentenceIndex = speech.currentIndex
     }

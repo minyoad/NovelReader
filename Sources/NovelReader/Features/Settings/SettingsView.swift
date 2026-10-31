@@ -10,12 +10,9 @@ struct SettingsView: View {
     @State private var showAIDocs = false
     @State private var cachedChapters = 0
     @State private var cacheSize: Int64 = 0
-
-    private var voices: [AVSpeechVoiceOption] {
-        SpeechController.availableChineseVoices().map {
-            AVSpeechVoiceOption(id: $0.identifier, name: $0.name)
-        }
-    }
+    @State private var speechCount = 0
+    @State private var speechSize: Int64 = 0
+    @StateObject private var voiceTester = TTSVoiceTester()
 
     var body: some View {
         NavigationStack {
@@ -49,35 +46,57 @@ struct SettingsView: View {
                 // MARK: 朗读
 
                 Section {
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack {
-                            Text("语速")
-                            Spacer()
-                            Text(String(format: "%.2fx", app.settings.tts.rate))
-                                .foregroundStyle(.secondary)
-                                .monospacedDigit()
-                        }
-                        Slider(value: $app.settings.tts.rate, in: 0.2...0.9, step: 0.05)
-                    }
-
-                    Picker("声音", selection: Binding(
-                        get: { app.settings.tts.voiceIdentifier ?? "" },
-                        set: { identifier in
-                            app.settings.tts.voiceIdentifier = identifier.isEmpty ? nil : identifier
-                            app.settings.tts.voiceName = voices.first { $0.id == identifier }?.name
-                        }
-                    )) {
-                        Text("系统默认（中文）").tag("")
-                        ForEach(voices) { voice in
-                            Text(voice.name).tag(voice.id)
-                        }
-                    }
-
-                    Toggle("读完自动下一章", isOn: $app.settings.tts.autoNextChapter)
+                    TTSSettingSections.engine($app.settings.tts)
                 } header: {
                     Text("语音朗读")
                 } footer: {
-                    Text("可以在「设置 → 辅助功能 → 朗读内容」里下载更多中文语音，下载后会出现在上面的列表里。")
+                    Text("系统朗读完全离线；Edge 音色更自然但需要联网；自定义接口可以指向本地部署的语音模型。")
+                }
+
+                Section {
+                    TTSSettingSections.engineOptions($app.settings.tts)
+
+                    Button {
+                        voiceTester.preview(app.settings.tts)
+                    } label: {
+                        HStack {
+                            Label("试听", systemImage: "play.circle")
+                            Spacer()
+                            switch voiceTester.state {
+                            case .idle:
+                                EmptyView()
+                            case .loading:
+                                ProgressView().controlSize(.small)
+                            case .failed:
+                                Image(systemName: "exclamationmark.triangle")
+                                    .foregroundStyle(.orange)
+                            }
+                        }
+                    }
+                    .disabled(voiceTester.state == .loading)
+
+                    if case .failed(let message) = voiceTester.state {
+                        Text(message)
+                            .font(.caption2)
+                            .foregroundStyle(.orange)
+                    }
+                } header: {
+                    Text(app.settings.tts.engine == .system ? "系统声音" : "音色与接口")
+                }
+
+                Section {
+                    TTSSettingSections.cache($app.settings.tts)
+                    LabeledContent("已缓存朗读", value: "\(speechCount) 句 · \(CacheSheet.formatted(speechSize))")
+                    Button {
+                        clearSpeechCache()
+                    } label: {
+                        Label("清理朗读缓存", systemImage: "waveform.slash")
+                    }
+                    .disabled(speechSize == 0)
+                } header: {
+                    Text("朗读缓存")
+                } footer: {
+                    Text("音频按句缓存，重复听同一段不会再联网。切换音色或语速会重新合成。")
                 }
 
                 // MARK: AI
@@ -274,7 +293,10 @@ struct SettingsView: View {
                 app.saveSettings()
             }
             .onAppear { Task { await refreshCacheStats() } }
-            .onDisappear { app.saveSettings() }
+            .onDisappear {
+                app.saveSettings()
+                voiceTester.stop()
+            }
         }
     }
 
@@ -285,6 +307,16 @@ struct SettingsView: View {
         }
         cachedChapters = chapters
         cacheSize = await app.store.totalCachedSize()
+        speechCount = await app.store.speechCacheCount()
+        speechSize = await app.store.speechCacheSize()
+    }
+
+    private func clearSpeechCache() {
+        Task {
+            let result = await app.store.clearSpeechCache()
+            await refreshCacheStats()
+            app.showBanner("已删除 \(result.removed) 段朗读缓存，释放 \(CacheSheet.formatted(result.freed))", isError: false)
+        }
     }
 
     private var appVersion: String {

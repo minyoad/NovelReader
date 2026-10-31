@@ -190,6 +190,14 @@ public struct TTSSettings: Codable, Hashable, Sendable {
     public var voiceName: String?
     public var autoNextChapter: Bool
     public var sentencePause: Double
+    /// Which engine reads the text.
+    public var engine: TTSEngine
+    /// Remote engine configuration; ignored by the system engine.
+    public var remote: RemoteTTSSettings
+    /// Keep synthesized audio on disk so replaying a chapter costs nothing.
+    public var cacheEnabled: Bool
+    /// Upper bound on cached speech, in megabytes. 0 means no limit.
+    public var cacheLimitMB: Int
 
     public init(
         rate: Double = 0.5,
@@ -198,7 +206,11 @@ public struct TTSSettings: Codable, Hashable, Sendable {
         voiceIdentifier: String? = nil,
         voiceName: String? = nil,
         autoNextChapter: Bool = true,
-        sentencePause: Double = 0.15
+        sentencePause: Double = 0.15,
+        engine: TTSEngine = .edge,
+        remote: RemoteTTSSettings = RemoteTTSSettings(),
+        cacheEnabled: Bool = true,
+        cacheLimitMB: Int = 300
     ) {
         self.rate = rate
         self.pitch = pitch
@@ -207,6 +219,46 @@ public struct TTSSettings: Codable, Hashable, Sendable {
         self.voiceName = voiceName
         self.autoNextChapter = autoNextChapter
         self.sentencePause = sentencePause
+        self.engine = engine
+        self.remote = remote
+        self.cacheEnabled = cacheEnabled
+        self.cacheLimitMB = cacheLimitMB
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case rate, pitch, volume, voiceIdentifier, voiceName
+        case autoNextChapter, sentencePause, engine, remote
+        case cacheEnabled, cacheLimitMB
+    }
+
+    /// Tolerant decoding: installs that predate the engine choice keep their
+    /// system voice and speed instead of resetting to defaults.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let defaults = TTSSettings()
+        rate = try container.decodeIfPresent(Double.self, forKey: .rate) ?? defaults.rate
+        pitch = try container.decodeIfPresent(Double.self, forKey: .pitch) ?? defaults.pitch
+        volume = try container.decodeIfPresent(Double.self, forKey: .volume) ?? defaults.volume
+        voiceIdentifier = try container.decodeIfPresent(String.self, forKey: .voiceIdentifier)
+        voiceName = try container.decodeIfPresent(String.self, forKey: .voiceName)
+        autoNextChapter = try container.decodeIfPresent(Bool.self, forKey: .autoNextChapter) ?? defaults.autoNextChapter
+        sentencePause = try container.decodeIfPresent(Double.self, forKey: .sentencePause) ?? defaults.sentencePause
+        engine = try container.decodeIfPresent(TTSEngine.self, forKey: .engine) ?? defaults.engine
+        remote = try container.decodeIfPresent(RemoteTTSSettings.self, forKey: .remote) ?? defaults.remote
+        cacheEnabled = try container.decodeIfPresent(Bool.self, forKey: .cacheEnabled) ?? defaults.cacheEnabled
+        cacheLimitMB = try container.decodeIfPresent(Int.self, forKey: .cacheLimitMB) ?? defaults.cacheLimitMB
+    }
+
+    /// The remote engine is only useful if it has been pointed at something.
+    public var isRemoteUsable: Bool {
+        switch engine {
+        case .system:
+            return false
+        case .edge:
+            return !remote.edgeVoice.isEmpty
+        case .openAICompatible:
+            return remote.speechURL != nil && !remote.model.isEmpty
+        }
     }
 }
 

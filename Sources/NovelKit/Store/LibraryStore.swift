@@ -6,6 +6,12 @@ public actor LibraryStore {
     public let directory: URL
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
+    /// How many utterances can be written between cache sweeps.
+    ///
+    /// 20 chunks is roughly a chapter, so the cache never drifts far past its
+    /// cap while the directory scan stays off the hot path.
+    static let speechTrimInterval = 20
+    private var speechWritesSinceTrim = 0
 
     public init(directory: URL? = nil) {
         let base = directory ?? LibraryStore.defaultDirectory()
@@ -22,6 +28,7 @@ public actor LibraryStore {
 
         try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         try? FileManager.default.createDirectory(at: base.appendingPathComponent("chapters"), withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(at: base.appendingPathComponent("speech"), withIntermediateDirectories: true)
     }
 
     public static func defaultDirectory() -> URL {
@@ -168,6 +175,125 @@ public actor LibraryStore {
             total += Int64(size)
         }
         return total
+    }
+
+    // MARK: - Synthesized speech
+
+    /// Where cached utterances live.
+    ///
+    /// Kept apart from `chapters/` so clearing one never touches the other: a
+    /// reader who runs out of space wants to drop audio without losing the
+    /// offline copy of the text they are reading.
+    public var speechDirectory: URL {
+        directory.appendingPathComponent("speech", isDirectory: true)
+    }
+
+    public func speechFileURL(key: String) -> URL {
+        speechDirectory.appendingPathComponent("\(key).mp3")
+    }
+
+    public func hasSpeech(key: String) -> Bool {
+        FileManager.default.fileExists(atPath: speechFileURL(key: key).path)
+    }
+
+    /// Bumps the access time so eviction treats a replayed utterance as recent.
+    ///
+    /// The modification date doubles as "last used" on purpose: it costs no
+    /// extra index file, and a half-written cache can never disagree with it.
+    public func touchSpeech(key: String) {
+        let url = speechFileURL(key: key)
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: url.path)
+    }
+
+    public func saveSpeech(_ data: Data, key: String) {
+        try? FileManager.default.createDirectory(at: speechDirectory, withIntermediateDirectories: true)
+        try? data.write(to: speechFileURL(key: key), options: .atomic)
+    }
+
+    /// Saves an utterance and enforces the size cap.
+    ///
+    /// Trimming on every write would stat the whole directory once per
+    /// sentence — with a 300 MB cache that is thousands of entries per
+    /// sentence read aloud. Instead the sweep runs every `speechTrimInterval`
+    /// saves, which keeps the cap approximate but the cost amortised to
+    /// nothing.
+    public func saveSpeech(_ data: Data, key: String, limitBytes: Int64) {
+        saveSpeech(data, key: key)
+        speechWritesSinceTrim += 1
+        guard speechWritesSinceTrim >= Self.speechTrimInterval else { return }
+        speechWritesSinceTrim = 0
+        trimSpeechCache(limitBytes: limitBytes)
+    }
+
+    public func loadSpeech(key: String) -> Data? {
+        try? Data(contentsOf: speechFileURL(key: key))
+    }
+
+    public func speechEntries() -> [(key: String, size: Int64, lastUsed: Date)] {
+        let keys: [URLResourceKey] = [.fileSizeKey, .contentModificationDateKey]
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: speechDirectory,
+            includingPropertiesForKeys: keys
+        ) else { return [] }
+
+        let fallback = Date(timeIntervalSince1970: 0)
+        return files.compactMap { file in
+            guard let values = try? file.resourceValues(forKeys: Set(keys)) else { return nil }
+            return (
+                key: file.deletingPathExtension().lastPathComponent,
+                size: Int64(values.fileSize ?? 0),
+                lastUsed: values.contentModificationDate ?? fallback
+            )
+        }
+    }
+
+    public func speechCacheCount() -> Int {
+        speechEntries().count
+    }
+
+    public func speechCacheSize() -> Int64 {
+        speechEntries().reduce(Int64(0)) { $0 + $1.size }
+    }
+
+    /// Deletes least-recently-used utterances until the cache fits.
+    ///
+    /// Returns what was freed so the settings screen can report it without a
+    /// second scan.
+    @discardableResult
+    public func trimSpeechCache(limitBytes: Int64) -> (removed: Int, freed: Int64) {
+        guard limitBytes > 0 else { return (0, 0) }
+        let entries = speechEntries()
+        let doomed = SpeechCachePolicy.evictionOrder(entries: entries, limitBytes: limitBytes)
+        guard !doomed.isEmpty else { return (0, 0) }
+
+        let sizes = Dictionary(uniqueKeysWithValues: entries.map { ($0.key, $0.size) })
+        var freed: Int64 = 0
+        var removed = 0
+        for key in doomed {
+            let url = speechFileURL(key: key)
+            if (try? FileManager.default.removeItem(at: url)) != nil {
+                freed += sizes[key] ?? 0
+                removed += 1
+            }
+        }
+        return (removed, freed)
+    }
+
+    @discardableResult
+    public func clearSpeechCache() -> (removed: Int, freed: Int64) {
+        let entries = speechEntries()
+        guard !entries.isEmpty else { return (0, 0) }
+        var freed: Int64 = 0
+        var removed = 0
+        for entry in entries {
+            let url = speechFileURL(key: entry.key)
+            if (try? FileManager.default.removeItem(at: url)) != nil {
+                freed += entry.size
+                removed += 1
+            }
+        }
+        return (removed, freed)
     }
 
     // MARK: - IO

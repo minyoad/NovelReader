@@ -1,6 +1,6 @@
 # 夜读 · NovelReader
 
-一个用 SwiftUI 写的 iOS 网络小说阅读器：导入「阅读 / legado」书源，搜索、加入书架、离线缓存章节，支持系统语音朗读（TTS）和 OpenAI 兼容接口的 AI 文本整理。
+一个用 SwiftUI 写的 iOS 网络小说阅读器：导入「阅读 / legado」书源，搜索、加入书架、离线缓存章节，支持多种语音朗读引擎（TTS）和 OpenAI 兼容接口的 AI 文本整理。
 
 引擎（`NovelKit`）只依赖 Foundation，可以在 Linux 上编译和跑单测；App 层（`NovelReader`）用 `#if canImport(SwiftUI)` 包裹，因此同一个工程既能 `swift test` 也能用 [xtool](https://github.com/xtool-org/xtool) 在没有 macOS 的机器上构建 iOS App。
 
@@ -13,7 +13,7 @@
 - **排版**：字号 / 行距 / 段距 / 边距、首行缩进两字、两端对齐、章节标题可关；字体可选系统衬线、系统无衬线、苹方、宋体、楷体、圆体。缩进用段落样式实现而不改写文本，字符偏移不变，阅读进度不会错位。
 - **换源**：阅读器顶栏和书目详情页都能打开候选书源列表，每个候选可先「试读这一章」，确认能取到正文再切换；切过去后按章节标题保留阅读进度。
 - **离线缓存**：阅读时后台预缓存接下来 N 章（默认 5，可设 0 关闭），断网也能继续往下读；支持「缓存全本」带进度、每本缓存上限（超出后优先清理离阅读位置最远的章节）、按本清理与占用统计；加入书架时可选择自动缓存全本。
-- **TTS**：按句朗读、句级高亮跟随滚动、暂停/继续、上一句/下一句、语速与音调、中文声音选择、读完自动下一章；已声明 `UIBackgroundModes: audio`，锁屏后继续播。
+- **TTS**：三种引擎——系统朗读（离线）、微软 Edge 在线朗读（免费、无需注册，音色接近真人）、自定义 OpenAI 兼容 `/audio/speech`（可指向本地部署的模型）。按整句分组请求，服务端返回的句级时间戳用来驱动高亮；暂停/继续、上一句/下一句、语速与音调、读完自动下一章；音频按句缓存，重复收听不联网，超出上限后按最久未听淘汰。已声明 `UIBackgroundModes: audio`，锁屏后继续播。
 - **AI 整理**：OpenAI 兼容 `/chat/completions`，分块处理长章节，三种模式（清理排版 / 校对纠错 / 精简去水），可附加自定义要求；输出格式可选按段换行 / 保留原换行 / 整段连排 / 段间空行，整理前的原文会保留，可一键还原；另可整理书籍简介。
 - **离线可用**：内置示例书《长夜灯下》3 章 + 内置离线书源，无网络也能体验阅读、TTS、AI（AI 需自行配置 key）。
 - **隐私**：AI API Key 存在系统钥匙串，不写入普通配置文件。
@@ -34,14 +34,15 @@ NovelReader/
 │   │   ├── Models/               Book / BookSource / Settings / JSONValue
 │   │   ├── Network/              HTTPClient（Cookie、重试、编码识别）
 │   │   ├── Source/               RuleEngine / JSONPath / SourceEngine / LegadoImporter
-│   │   ├── Store/                LibraryStore（文件 JSON 持久化）
+│   │   ├── Store/                LibraryStore（文件 JSON 持久化 + 朗读音频缓存）
 │   │   ├── AI/                   AIClient + 提示词 / 分块
-│   │   └── Support/              文本处理、编码识别、内置示例
+│   │   ├── TTS/                  EdgeToken / EdgeTTSClient / OpenAISpeechClient
+│   │   └── Support/              文本处理、编码识别、分句分块、内置示例
 │   └── NovelReader/              SwiftUI App（Linux 上被 #if canImport(SwiftUI) 跳过）
 │       ├── App/                  AppModel、入口、Tab
 │       ├── Design/               主题、封面、Banner、空状态
 │       └── Features/             书架 / 详情 / 阅读器 / 搜索 / 书源 / 设置 / TTS
-└── Tests/NovelKitTests/          规则引擎与流水线测试（45 个）
+└── Tests/NovelKitTests/          规则引擎与流水线测试（61 个）
 ```
 
 ## 构建与测试
@@ -195,6 +196,7 @@ sources.json             书源配置
 settings.json            阅读 / TTS / 网络 / AI 设置（不含 key）
 chapters/<book>-toc.json 目录缓存
 chapters/<book>-<hash>.json 章节正文缓存（含整理前的原文时体积约为两倍）
+speech/<hash>.mp3        朗读音频缓存（按句，文件时间即「最后收听时间」）
 ```
 
 `settings.json` 里与阅读体验相关的字段：
@@ -203,7 +205,11 @@ chapters/<book>-<hash>.json 章节正文缓存（含整理前的原文时体积�
 reading.fontSize / lineSpacing / paragraphSpacing / horizontalPadding
 reading.theme / pageTurnMode / pageTurnEffect
 reading.fontFamily / firstLineIndent / alignment / showChapterTitle
+reading.followSystemAppearance  跟随系统深/浅色（选中主题决定用哪一族色）
 aiOutputFormat           AI 整理后的段落格式
+tts.engine               朗读引擎：system / edge / openAICompatible
+tts.remote               远端引擎参数（Edge 音色、自定义接口地址与音色）
+tts.cacheEnabled / tts.cacheLimitMB  朗读音频缓存开关与上限（0 = 不限）
 cache.prefetchCount      阅读时预缓存的章节数（0 = 关闭）
 cache.maxCachedChaptersPerBook  每本缓存上限（0 = 不限，超出后清理离阅读位置最远的章节）
 cache.autoCacheOnAdd     加入书架时自动缓存全本
@@ -212,6 +218,20 @@ cache.autoCacheOnAdd     加入书架时自动缓存全本
 这些字段全部做了容错解码：旧版本写下的 `settings.json` 缺少新字段时取默认值，不会因为升级把已有设置重置。
 
 AI Key 单独存 Keychain（service `com.yang.NovelReader`）。
+
+## 朗读引擎说明
+
+| 引擎 | 费用 | 联网 | 音质 | 备注 |
+| --- | --- | --- | --- | --- |
+| 系统朗读 | 免费 | 否 | 偏机械 | `AVSpeechSynthesizer`，可在系统里下载更好的中文语音 |
+| Edge 在线 | 免费 | 是 | 接近真人 | 微软 Edge「大声朗读」的未公开接口，无需 key，但可能随时失效 |
+| 自定义接口 | 取决于服务 | 视部署 | 视模型 | 任何兼容 `POST /v1/audio/speech` 的服务，可指向本地 |
+
+Edge 用的是未公开接口，服务端会校验 `Sec-MS-GEC` 令牌（自定义 SHA-256 + 64 位构造，每 5 分钟换一档），实现在 `NovelKit/TTS/EdgeToken.swift`，并有实测向量保证不会悄悄失效。如果哪天令牌被拒，朗读会明确报错而不是静默失败，届时换回系统朗读即可。
+
+`TTSSettings.engine` 的默认值是 `.edge`：装完可以直接听接近真人的中文，无需任何配置；想离线或接口失效时在设置里切回系统朗读。
+
+音频缓存按「引擎 + 音色 + 语速 + 音调 + 文本」的哈希存成 `speech/<hash>.mp3`，任一参数变化都会重新合成；缓存上限默认 300 MB，超出后按文件修改时间（即最后收听时间）淘汰最久未用的句子。
 
 ## 当前限制 / 后续
 
