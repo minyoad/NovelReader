@@ -15,10 +15,11 @@ import UIKit
 /// - forward: fold the current page, reveal the next one
 /// - backward: fold the previous page, reveal the current one
 ///
-/// Describing it as "fold a sheet over a page" instead of two separate
-/// animations is what keeps the two directions feeling identical — the earlier
-/// version drew the backward turn as a flat wipe plus a white wash, which is why
-/// it looked weak and washed-out.
+/// The underside is drawn as real paper: an opaque body, print at reduced but
+/// still readable strength, a cylindrical light ramp across the curl, a bowed
+/// free edge and a dark inner edge for thickness. An earlier version let the
+/// page below show through the strip, which read as a glass panel rather than a
+/// sheet of paper.
 struct CurledPage: View {
     /// The page the reader is on when the gesture starts.
     let settledText: NSAttributedString
@@ -27,6 +28,9 @@ struct CurledPage: View {
     /// 0 = untouched, 1 = fully turned. Never negative, never above 1.
     let progress: CGFloat
     let forward: Bool
+    /// Paper colour of the current reading theme, so the underside matches the
+    /// page rather than the system chrome.
+    let paper: Color
 
     var body: some View {
         GeometryReader { proxy in
@@ -35,11 +39,9 @@ struct CurledPage: View {
             let t = min(max(progress, 0), 1)
 
             // Forward: the crease walks right → left as the sheet is peeled.
-            // Backward: it walks left → right as the sheet is laid back down,
-            // so the sheet's leading edge tracks the finger from the far side.
+            // Backward: it walks left → right as the sheet is laid back down.
             let crease = forward ? width * (1 - t) : width * t
 
-            // Which page is the paper being bent, and which is underneath.
             let sheetText = forward ? settledText : (neighborText ?? settledText)
             let underText = forward ? neighborText : settledText
 
@@ -55,7 +57,8 @@ struct CurledPage: View {
                     width: width,
                     crease: crease,
                     text: sheetText,
-                    forward: forward
+                    forward: forward,
+                    t: t
                 )
             }
             .frame(width: width, height: size.height, alignment: .topLeading)
@@ -66,19 +69,14 @@ struct CurledPage: View {
 
     // MARK: - The folded sheet
 
-    /// One sheet, hinged at the crease.
-    ///
-    /// Left of the crease the paper is still flat against the book. Right of it
-    /// the paper has been turned over, so the visible surface there is the back
-    /// of the same page: mirrored print, dimmed, with the crease catching light
-    /// and the free edge shading off.
     @ViewBuilder
     private func foldedSheet(
         size: CGSize,
         width: CGFloat,
         crease: CGFloat,
         text: NSAttributedString,
-        forward: Bool
+        forward: Bool,
+        t: CGFloat
     ) -> some View {
         let c = min(max(crease, 0), width)
         let stripWidth = width - c
@@ -91,42 +89,42 @@ struct CurledPage: View {
                     Rectangle().frame(width: c)
                 }
 
-            // Turned-over part, mirrored about the crease.
+            // Turned-over part, mirrored about the crease. Mirrored about the
+            // crease it occupies [2c - W, c] on screen.
             if c > 0.5 && stripWidth > 0.5 {
                 turnedOverStrip(
                     size: size,
                     width: width,
                     stripWidth: stripWidth,
-                    text: text
+                    text: text,
+                    progress: t
                 )
-                // Mirrored about the crease: the sheet occupies
-                // [2c - W, c] on screen.
                 .offset(x: 2 * c - width)
             }
 
-            // Shadow the lifted sheet throws onto the page underneath, on the
-            // side the paper has already left.
+            // The fold lifts the paper off the page, so the page below darkens
+            // right where the sheet has just left.
             if c > 0 {
                 LinearGradient(
-                    colors: [.black.opacity(0.22), .black.opacity(0)],
+                    colors: [.black.opacity(0.30), .black.opacity(0)],
                     startPoint: .leading,
                     endPoint: .trailing
                 )
-                .frame(width: min(width * 0.22, 44), height: size.height)
-                .offset(x: max(c - min(width * 0.22, 44), 0))
-                .opacity(forward ? 1 : 0.85)
+                .frame(width: min(width * 0.26, 52), height: size.height)
+                .offset(x: c)
+                .allowsHitTesting(false)
             }
 
-            // Shadow under the turned-over strip itself, cast down onto the
-            // flat part just left of the crease.
+            // Shadow the turned-over strip casts back onto the flat part.
             if c > 4 && stripWidth > 4 {
                 LinearGradient(
-                    colors: [.black.opacity(0), .black.opacity(0.18)],
-                    startPoint: .leading,
-                    endPoint: .trailing
+                    colors: [.black.opacity(0.30), .black.opacity(0)],
+                    startPoint: .trailing,
+                    endPoint: .leading
                 )
-                .frame(width: min(stripWidth, 30), height: size.height)
-                .offset(x: max(c - min(stripWidth, 30), 0))
+                .frame(width: min(stripWidth, 34), height: size.height)
+                .offset(x: max(c - min(stripWidth, 34), 0))
+                .allowsHitTesting(false)
             }
         }
     }
@@ -136,47 +134,94 @@ struct CurledPage: View {
         size: CGSize,
         width: CGFloat,
         stripWidth: CGFloat,
-        text: NSAttributedString
+        text: NSAttributedString,
+        progress t: CGFloat
     ) -> some View {
-        ZStack(alignment: .topLeading) {
-            // Paper body of the underside.
-            Rectangle()
-                .fill(Color(uiColor: .secondarySystemBackground))
+        // How much the free edge bows inward. Grows with the turn so a slightly
+        // peeled corner already looks curved, and relaxes as the sheet lies flat
+        // again at the end of the animation.
+        let bulge = min(stripWidth * 0.10, 16) * (0.35 + 0.65 * t)
 
-            // Back of the print. Kept fairly strong so the strip reads as paper
-            // rather than a glass panel — the previous version was far too
-            // transparent here.
+        ZStack(alignment: .topLeading) {
+            // Opaque paper body: nothing from the page below may show through.
+            paper
+
+            // Back of the print, dimmed like ink showing through the sheet but
+            // still legible — this is what makes it read as paper.
             PageImage(attributed: text, mirror: true)
                 .frame(width: width, height: size.height)
                 .frame(width: stripWidth, height: size.height, alignment: .leading)
                 .clipped()
-                .opacity(0.62)
+                .opacity(0.72)
 
-            // Curl shading: deepest at the crease, lifting toward the free edge.
+            // Cylindrical ramp: the strip curves away from the light, so it is
+            // brightest just off the crease and falls into shadow at the fold.
             LinearGradient(
-                colors: [.black.opacity(0.26), .black.opacity(0.02)],
-                startPoint: .trailing,
-                endPoint: .leading
-            )
-            .blendMode(.multiply)
-
-            // A softer sheen where the paper bends away from the light.
-            LinearGradient(
-                colors: [.white.opacity(0.14), .clear],
+                colors: [
+                    .white.opacity(0.20),
+                    .black.opacity(0.06),
+                    .black.opacity(0.34),
+                ],
                 startPoint: .leading,
                 endPoint: .trailing
             )
-            .frame(maxWidth: .infinity)
-            .blendMode(.softLight)
+            .blendMode(.multiply)
 
-            // The crease itself.
+            // Specular sheen on the crown of the curl.
+            LinearGradient(
+                colors: [.clear, .white.opacity(0.30), .clear],
+                startPoint: .leading,
+                endPoint: .trailing
+            )
+            .frame(width: max(stripWidth * 0.55, 1))
+            .blendMode(.screen)
+
+            // Inner edge: the paper has thickness, so the fold itself reads as
+            // a dark line with a lit lip on the far side.
             Rectangle()
-                .fill(Color.white.opacity(0.42))
-                .frame(width: 1.2)
+                .fill(Color.black.opacity(0.30))
+                .frame(width: 2)
                 .frame(maxWidth: .infinity, alignment: .trailing)
+
+            Rectangle()
+                .fill(Color.white.opacity(0.55))
+                .frame(width: 1)
+                .frame(maxWidth: .infinity, alignment: .trailing)
+                .offset(x: -2)
+
+            // Free edge: a darker hairline where the sheet turns away.
+            Rectangle()
+                .fill(Color.black.opacity(0.18))
+                .frame(width: 1.5)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
         .frame(width: stripWidth, height: size.height)
-        .clipped()
+        .clipShape(CurlEdge(bulge: bulge))
+    }
+}
+
+/// Silhouette of the turned-over strip: the free (left) edge bows inward, as a
+/// lifted sheet of paper does, while the crease stays dead straight.
+private struct CurlEdge: Shape {
+    /// Horizontal bow of the free edge, in points.
+    var bulge: CGFloat
+
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        let left = rect.minX
+        let right = rect.maxX
+        let midY = rect.midY
+
+        path.move(to: CGPoint(x: left + bulge, y: rect.minY))
+        // Free edge bows toward the crease in the middle.
+        path.addQuadCurve(
+            to: CGPoint(x: left + bulge, y: rect.maxY),
+            control: CGPoint(x: left + bulge * 2, y: midY)
+        )
+        path.addLine(to: CGPoint(x: right, y: rect.maxY))
+        path.addLine(to: CGPoint(x: right, y: rect.minY))
+        path.closeSubpath()
+        return path
     }
 }
 

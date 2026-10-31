@@ -185,7 +185,8 @@ struct PagedReader: View {
                         settledText: styledPage(document: document, range: currentRange),
                         neighborText: neighborPageText(document: document, forward: forward),
                         progress: dragProgress,
-                        forward: forward
+                        forward: forward,
+                        paper: theme.background
                     )
                     .frame(width: box.width, height: box.height)
                 }
