@@ -18,6 +18,11 @@ struct BookDetailView: View {
     @State private var intro: String = ""
     @State private var aiIntroBusy = false
     @State private var errorMessage: String?
+    @State private var otherSources: [SearchResult] = []
+    @State private var didLoadOtherSources = false
+    @State private var switchingSource = false
+    @State private var isCaching = false
+    @State private var cacheProgress: Double?
 
     private var currentBook: Book {
         app.books.first { $0.id == book.id } ?? book
@@ -76,6 +81,11 @@ struct BookDetailView: View {
             if autoOpenReader, !showReader {
                 showReader = true
             }
+        }
+        .onAppear {
+            // Load candidate sources once the detail page settles; searching
+            // every source is too slow to do in `.task` alongside the TOC.
+            Task { await loadOtherSourcesIfNeeded() }
         }
         .sheet(isPresented: $showTOC, onDismiss: {
             if openReaderAfterTOC {
@@ -163,6 +173,52 @@ struct BookDetailView: View {
                 .buttonStyle(.bordered)
                 .disabled(isLoadingChapters || app.source(for: currentBook) == nil)
             }
+
+            HStack(spacing: 10) {
+                Menu {
+                    if otherSources.isEmpty {
+                        Button("正在查找…") {}
+                            .disabled(true)
+                    } else {
+                        ForEach(otherSources) { source in
+                            Button(source.name) {
+                                Task { await switchSource(to: source) }
+                            }
+                        }
+                    }
+                } label: {
+                    if switchingSource {
+                        HStack(spacing: 6) {
+                            ProgressView().controlSize(.small)
+                            Text("切换中…")
+                        }
+                        .frame(maxWidth: .infinity)
+                    } else {
+                        Label("换源", systemImage: "arrow.left.arrow.right")
+                            .frame(maxWidth: .infinity)
+                    }
+                }
+                .buttonStyle(.bordered)
+                .disabled(switchingSource || otherSources.isEmpty)
+
+                Button {
+                    Task { await cacheWholeBook() }
+                } label: {
+                    Label("缓存全本", systemImage: "arrow.down.circle")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .disabled(isCaching || chapters.isEmpty)
+            }
+
+            if let cacheProgress {
+                VStack(alignment: .leading, spacing: 6) {
+                    ProgressView(value: cacheProgress)
+                    Text("正在缓存全本…\(Int(cacheProgress * 100))%")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
         }
     }
 
@@ -227,6 +283,80 @@ struct BookDetailView: View {
         } else {
             errorMessage = AIError.notConfigured.localizedDescription
         }
+    }
+
+    /// Loads candidate sources lazily: the menu is opened rarely, and searching
+    /// every source is slow.
+    private func loadOtherSourcesIfNeeded() async {
+        guard !didLoadOtherSources, !switchingSource else { return }
+        didLoadOtherSources = true
+        otherSources = await app.alternatives(for: currentBook)
+        if otherSources.isEmpty {
+            app.showBanner("没有找到其他收录这本书的书源", isError: false)
+        }
+    }
+
+    private func switchSource(to candidate: SearchResult) async {
+        switchingSource = true
+        defer { switchingSource = false }
+        guard await app.canReadChapter(candidate, of: currentBook, chapterTitle: chapters[safe: currentBook.progress.chapterIndex]?.title) else {
+            errorMessage = "这个书源读不到当前章节，没有切换"
+            return
+        }
+        do {
+            let updated = try await app.switchSource(of: currentBook, to: candidate)
+            chapters = try await app.chapters(for: updated)
+            otherSources = []
+            app.showBanner("已切换到「\(updated.sourceName)」", isError: false)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func cacheWholeBook() async {
+        guard !isCaching else { return }
+        isCaching = true
+        cacheProgress = 0
+        defer {
+            isCaching = false
+            cacheProgress = nil
+        }
+
+        let book = currentBook
+        let list = chapters
+        let cached = await app.store.cachedChapterURLs(bookID: book.id)
+        let cachedIndices = Set(list.enumerated().filter { cached.contains($0.element.url) }.map { $0.offset })
+        let plan = CachePlanner.missingForWholeBook(
+            chapterCount: list.count,
+            alreadyCached: cachedIndices,
+            excluding: book.progress.chapterIndex
+        )
+        guard !plan.isEmpty else {
+            app.showBanner("全本已缓存", isError: false)
+            return
+        }
+
+        var done = 0
+        var failed = 0
+        for index in plan {
+            if Task.isCancelled { break }
+            if await app.cacheChapter(book: book, chapter: list[index]) {
+                done += 1
+            } else {
+                failed += 1
+            }
+            cacheProgress = Double(done + failed) / Double(plan.count)
+        }
+        app.showBanner(
+            failed == 0 ? "全本缓存完成（\(done) 章）" : "缓存完成，\(failed) 章失败",
+            isError: failed > 0
+        )
+    }
+}
+
+private extension Array {
+    subscript(safe index: Int) -> Element? {
+        indices.contains(index) ? self[index] : nil
     }
 }
 

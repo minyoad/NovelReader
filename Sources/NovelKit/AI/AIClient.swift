@@ -89,19 +89,23 @@ public struct AIClient {
         _ text: String,
         instruction: AIPrompt.ChapterTask,
         customInstruction: String = "",
+        format: AIPrompt.OutputFormat = .paragraphs,
         progress: (@Sendable (Double) -> Void)? = nil
     ) async throws -> String {
         let chunks = AIPrompt.chunk(text, maxLength: configuration.chunkSize)
         guard !chunks.isEmpty else { return text }
 
+        let system = AIPrompt.systemPrompt(for: instruction, custom: customInstruction, format: format)
         var results: [String] = []
         for (index, chunk) in chunks.enumerated() {
-            let system = AIPrompt.systemPrompt(for: instruction, custom: customInstruction)
             let answer = try await chat(system: system, user: chunk)
             results.append(AIPrompt.cleanReply(answer))
             progress?(Double(index + 1) / Double(chunks.count))
         }
-        return results.joined(separator: "\n\n")
+        // Chunks are cleaned independently, so the model cannot see paragraph
+        // boundaries across a split; re-applying the format here makes the
+        // result consistent even when the individual replies disagree.
+        return AIPrompt.apply(format, to: results.joined(separator: "\n\n"))
     }
 }
 
@@ -140,7 +144,78 @@ public enum AIPrompt {
         }
     }
 
-    public static func systemPrompt(for task: ChapterTask, custom: String = "") -> String {
+    /// How the cleaned text should be laid out on screen. Kept separate from
+    /// `ChapterTask` because it is a presentation choice, not a content one:
+    /// the same cleanup can be rendered with or without paragraph breaks.
+    public enum OutputFormat: String, Codable, CaseIterable, Identifiable, Sendable {
+        /// One paragraph per line — the reader's normal paragraph flow.
+        case paragraphs
+        /// Keep the model's own line breaks verbatim.
+        case original
+        /// Join everything into a single flowing block.
+        case continuous
+        /// Two newlines between paragraphs, for readers that render blank lines.
+        case spaced
+
+        public var id: String { rawValue }
+
+        public var displayName: String {
+            switch self {
+            case .paragraphs: return "按段换行"
+            case .original: return "保留原换行"
+            case .continuous: return "整段连排"
+            case .spaced: return "段间空行"
+            }
+        }
+
+        public var detail: String {
+            switch self {
+            case .paragraphs: return "模型给出的每一段占一行，阅读器统一控制段距"
+            case .original: return "完全沿用模型输出里的换行位置"
+            case .continuous: return "所有段落合并成一整段，适合小屏或快速扫读"
+            case .spaced: return "段落之间插入空行，观感更松散"
+            }
+        }
+    }
+
+    /// Applies an `OutputFormat` to cleaned text. Pure string work, so it is
+    /// unit tested without the network.
+    public static func apply(_ format: OutputFormat, to text: String) -> String {
+        switch format {
+        case .original:
+            // Truly verbatim: keep the model's own line breaks (including blank
+            // lines) and only tidy trailing whitespace on each line.
+            let lines = text
+                .replacingOccurrences(of: "\r\n", with: "\n")
+                .replacingOccurrences(of: "\r", with: "\n")
+                .components(separatedBy: "\n")
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+            return lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+
+        case .paragraphs:
+            return normalizedLines(text).joined(separator: "\n")
+
+        case .continuous:
+            return normalizedLines(text).joined()
+
+        case .spaced:
+            return normalizedLines(text).joined(separator: "\n\n")
+        }
+    }
+
+    /// Trimmed, non-empty paragraphs of `text`.
+    private static func normalizedLines(_ text: String) -> [String] {
+        TextProcessing.normalizeParagraphs(text)
+            .components(separatedBy: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+    }
+
+    public static func systemPrompt(
+        for task: ChapterTask,
+        custom: String = "",
+        format: OutputFormat = .paragraphs
+    ) -> String {
         var prompt = """
         你是一个中文网络小说的文本整理助手。你的任务是清洗从盗版网站抓取下来的章节正文，让它读起来像正常出版/连载的段落。
 
@@ -159,6 +234,15 @@ public enum AIPrompt {
             prompt += "\n6. 修正明显的错别字、错误的地得、缺失的标点，但不要润色文笔。"
         case .condense:
             prompt += "\n6. 删掉重复叙述和明显注水的段落，可以缩短篇幅，但保留全部关键情节和对话。"
+        }
+
+        switch format {
+        case .paragraphs, .original:
+            break
+        case .continuous:
+            prompt += "\n7. 输出时把所有段落合并为连续的一整段，不要在段与段之间换行。"
+        case .spaced:
+            prompt += "\n7. 段落之间空一行输出（即两个换行）。"
         }
 
         if !custom.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {

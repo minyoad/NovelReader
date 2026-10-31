@@ -39,8 +39,16 @@ struct PagedDocument {
         bodyStyle.lineSpacing = reading.lineSpacing
         bodyStyle.paragraphSpacing = reading.paragraphSpacing
         bodyStyle.lineBreakMode = .byWordWrapping
+        bodyStyle.alignment = reading.alignment == .justify ? .justified : .left
+        if reading.firstLineIndent {
+            // Indent without touching the string: inserting full-width spaces
+            // would shift every character offset and corrupt saved progress.
+            let indent = bodyFont(size: reading.fontSize, family: reading.fontFamily).pointSize * 2
+            bodyStyle.firstLineHeadIndent = indent
+            bodyStyle.headIndent = 0
+        }
         let bodyAttributes: [NSAttributedString.Key: Any] = [
-            .font: serifFont(size: reading.fontSize),
+            .font: bodyFont(size: reading.fontSize, family: reading.fontFamily),
             .paragraphStyle: bodyStyle,
             .foregroundColor: textColor,
             NSAttributedString.Key(kCTForegroundColorAttributeName as String): textColor.cgColor,
@@ -48,7 +56,7 @@ struct PagedDocument {
 
         let result = NSMutableAttributedString()
         let title = chapter.title.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !title.isEmpty {
+        if reading.showChapterTitle, !title.isEmpty {
             let titleStyle = NSMutableParagraphStyle()
             titleStyle.lineSpacing = 0
             titleStyle.paragraphSpacing = reading.paragraphSpacing + 10
@@ -56,7 +64,7 @@ struct PagedDocument {
             result.append(NSAttributedString(
                 string: title + "\n",
                 attributes: [
-                    .font: serifFont(size: reading.fontSize + 3, weight: .semibold),
+                    .font: bodyFont(size: reading.fontSize + 3, weight: .semibold, family: reading.fontFamily),
                     .paragraphStyle: titleStyle,
                     .foregroundColor: textColor,
                     NSAttributedString.Key(kCTForegroundColorAttributeName as String): textColor.cgColor,
@@ -74,7 +82,24 @@ struct PagedDocument {
         )
     }
 
-    private static func serifFont(size: CGFloat, weight: UIFont.Weight = .regular) -> UIFont {
+    /// Body font for the reader.
+    ///
+    /// `family` carries a PostScript name from the settings sheet. The special
+    /// value `-apple-system` means "system sans" and anything unknown falls back
+    /// to the system serif, which keeps CJK glyph coverage complete.
+    static func bodyFont(size: CGFloat, weight: UIFont.Weight = .regular, family: String? = nil) -> UIFont {
+        if let family {
+            if family == "-apple-system" {
+                return UIFont.systemFont(ofSize: size, weight: weight)
+            }
+            if let named = UIFont(name: family, size: size) {
+                if weight == .regular { return named }
+                let descriptor = named.fontDescriptor.addingAttributes([
+                    .traits: [UIFontDescriptor.TraitKey.weight: weight]
+                ])
+                return UIFont(descriptor: descriptor, size: size)
+            }
+        }
         let base = UIFont.systemFont(ofSize: size, weight: weight)
         guard let descriptor = base.fontDescriptor.withDesign(.serif) else { return base }
         return UIFont(descriptor: descriptor, size: size)

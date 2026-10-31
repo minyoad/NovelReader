@@ -24,7 +24,17 @@ final class ReaderModel: ObservableObject {
     @Published var showChapterList = false
     @Published var pendingOffset: Int = 0
     @Published var toast: String?
+    /// Source candidates for the current book, shown in the switch sheet.
+    @Published var sourceCandidates: [SearchResult] = []
+    @Published var isSearchingSources = false
+    @Published var showSourcePicker = false
+    /// Index of the candidate being probed, so the sheet can show a spinner.
+    @Published var probingSourceID: String?
+    @Published var cachedChapterCount = 0
+    @Published var isCachingBook = false
+    @Published var bookCacheProgress: Double?
     private let startIndexOverride: Int?
+    private var prefetchTask: Task<Void, Never>?
 
     init(book: Book, app: AppModel, startIndex: Int? = nil) {
         self.book = book
@@ -69,6 +79,7 @@ final class ReaderModel: ObservableObject {
             let startIndex = min(max(preferred, 0), max(chapters.count - 1, 0))
             currentIndex = startIndex
             await loadChapter(at: startIndex, offset: pendingOffset, autoplaySpeech: false)
+            await refreshCacheStats()
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -103,11 +114,129 @@ final class ReaderModel: ObservableObject {
             if shouldSpeak || autoplaySpeech {
                 startSpeaking()
             }
+            schedulePrefetch()
         } catch {
             content = nil
             errorMessage = error.localizedDescription
         }
         isLoading = false
+        await refreshCacheStats()
+    }
+
+    // MARK: - Offline cache
+
+    /// Downloads the next few chapters in the background so a dropped
+    /// connection does not stop the reader mid-chapter.
+    private func schedulePrefetch() {
+        prefetchTask?.cancel()
+        let count = app.settings.cache.prefetchCount
+        guard count > 0, !chapters.isEmpty else { return }
+
+        let index = currentIndex
+        let book = self.book
+        let chapters = self.chapters
+        let app = self.app
+
+        prefetchTask = Task { [weak self] in
+            let cachedURLs = await app.store.cachedChapterURLs(bookID: book.id)
+            let cachedIndices = Set(chapters.enumerated()
+                .filter { cachedURLs.contains($0.element.url) }
+                .map { $0.offset })
+            let plan = CachePlanner.prefetchIndices(
+                currentIndex: index,
+                chapterCount: chapters.count,
+                prefetchCount: count,
+                alreadyCached: cachedIndices
+            )
+            for chapterIndex in plan {
+                if Task.isCancelled { return }
+                await app.cacheChapter(book: book, chapter: chapters[chapterIndex])
+                await MainActor.run { self?.cachedChapterCount += 1 }
+            }
+            await self?.evictIfNeeded()
+        }
+    }
+
+    func refreshCacheStats() async {
+        cachedChapterCount = await app.store.cachedChapterCount(bookID: book.id)
+    }
+
+    /// Trims the oldest cached bodies once the book exceeds its configured cap.
+    private func evictIfNeeded() async {
+        let limit = app.settings.cache.maxCachedChaptersPerBook
+        guard limit > 0 else { return }
+        let chapters = self.chapters
+        let bookID = book.id
+        let cachedURLs = await app.store.cachedChapterURLs(bookID: bookID)
+        let cachedIndices = chapters.enumerated()
+            .filter { cachedURLs.contains($0.element.url) }
+            .map { $0.offset }
+        let drop = CachePlanner.evictionCandidates(
+            cachedChapterIndices: cachedIndices,
+            currentIndex: currentIndex,
+            limit: limit
+        )
+        for index in drop where chapters.indices.contains(index) {
+            await app.store.deleteContent(bookID: bookID, chapterURL: chapters[index].url)
+        }
+        await refreshCacheStats()
+    }
+
+    /// Downloads every chapter of the book; used by the "缓存全本" action.
+    func cacheWholeBook() async {
+        guard !isCachingBook, !chapters.isEmpty else { return }
+        isCachingBook = true
+        bookCacheProgress = 0
+        defer {
+            isCachingBook = false
+            bookCacheProgress = nil
+        }
+
+        let book = self.book
+        let chapters = self.chapters
+        let app = self.app
+        let cachedURLs = await app.store.cachedChapterURLs(bookID: book.id)
+        let cachedIndices = Set(chapters.enumerated()
+            .filter { cachedURLs.contains($0.element.url) }
+            .map { $0.offset })
+        let plan = CachePlanner.missingForWholeBook(
+            chapterCount: chapters.count,
+            alreadyCached: cachedIndices,
+            excluding: currentIndex
+        )
+        guard !plan.isEmpty else {
+            showToast("全本已缓存")
+            return
+        }
+
+        var done = 0
+        var failures = 0
+        for index in plan {
+            if Task.isCancelled { break }
+            let ok = await app.cacheChapter(book: book, chapter: chapters[index])
+            if ok {
+                done += 1
+            } else {
+                failures += 1
+            }
+            bookCacheProgress = Double(done + failures) / Double(plan.count)
+            await refreshCacheStats()
+        }
+        showToast(failures == 0 ? "全本缓存完成（\(done) 章）" : "缓存完成，\(failures) 章失败")
+    }
+
+    /// Clears every cached body for this book.
+    func clearCache() async {
+        await app.store.clearChapterCache(bookID: book.id)
+        await refreshCacheStats()
+        showToast("本书缓存已清理")
+    }
+
+    /// Re-downloads the current chapter, discarding any cached copy.
+    func redownloadChapter() async {
+        guard let chapter = currentChapter else { return }
+        await app.store.deleteContent(bookID: book.id, chapterURL: chapter.url)
+        await loadChapter(at: currentIndex, offset: pendingOffset)
     }
 
     func goNextChapter() async {
@@ -137,6 +266,29 @@ final class ReaderModel: ObservableObject {
 
     // MARK: - Switching sources
 
+    /// Loads every other source that has this book, without probing the body
+    /// yet, so the sheet can list candidates quickly.
+    func loadSourceCandidates() async {
+        guard !isSearchingSources else { return }
+        isSearchingSources = true
+        defer { isSearchingSources = false }
+
+        let found = await app.alternatives(for: book)
+        sourceCandidates = found.filter { $0.sourceID != book.sourceID }
+        if sourceCandidates.isEmpty {
+            showToast("没有找到其他可用书源")
+        }
+    }
+
+    /// Verifies a candidate really serves the chapter being read before
+    /// switching, and reports the result to the sheet.
+    func canRead(_ candidate: SearchResult) async -> Bool {
+        guard probingSourceID == nil else { return false }
+        probingSourceID = candidate.id
+        defer { probingSourceID = nil }
+        return await app.canReadChapter(candidate, of: book, chapterTitle: currentChapter?.title)
+    }
+
     /// Looks for the same book on the other enabled sources and returns the
     /// first candidate that can actually serve the current chapter.
     func findBetterSource() async -> SearchResult? {
@@ -162,11 +314,19 @@ final class ReaderModel: ObservableObject {
         do {
             let updated = try await app.switchSource(of: book, to: result)
             self.book = updated
+            sourceCandidates = []
             showToast("已切换到「\(updated.sourceName)」")
             await reopenWithUpdatedBook()
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    /// Switch initiated from the picker sheet, where the body was already
+    /// probed by `canRead`.
+    func switchSource(to candidate: SearchResult) async {
+        showSourcePicker = false
+        await applySourceSwitch(candidate)
     }
 
     /// The reader keeps its own `book` copy; reload matching state from the app.
@@ -234,14 +394,17 @@ final class ReaderModel: ObservableObject {
         if wasSpeaking { speech.stop() }
 
         do {
-            let cleaned = try await app.aiClean(content, task: task) { [weak self] progress in
+            let cleaned = try await app.aiClean(
+                content,
+                task: task,
+                format: app.settings.aiOutputFormat
+            ) { [weak self] progress in
                 Task { @MainActor in self?.aiProgress = progress }
             }
             self.content = cleaned
             app.persistContent(cleaned, for: book)
             app.showBanner("AI 整理完成：\(task.title)", isError: false)
             showToast("AI 整理完成：\(task.title)")
-            if pendingOffset == 0 { pendingOffset = 0 }
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -249,7 +412,27 @@ final class ReaderModel: ObservableObject {
         aiProgress = nil
     }
 
+    /// Restores the text exactly as downloaded, undoing a previous AI cleanup.
+    func restoreOriginalText() async {
+        guard let content, content.originalText != nil else {
+            showToast("这一章还没有可还原的原文")
+            return
+        }
+        let restored = content.restored()
+        self.content = restored
+        app.persistContent(restored, for: book)
+        showToast("已还原为站点原文")
+    }
+
     // MARK: - Progress
+
+    /// Stops background work when the reader closes, so prefetch does not keep
+    /// hitting the network after the user leaves the book.
+    func stopBackgroundWork() {
+        prefetchTask?.cancel()
+        prefetchTask = nil
+        speech.stop()
+    }
 
     private func showToast(_ text: String) {
         toast = text

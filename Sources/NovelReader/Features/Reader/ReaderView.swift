@@ -8,6 +8,7 @@ struct ReaderView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var showSettings = false
     @State private var showTOC = false
+    @State private var showCacheSheet = false
 
     init(book: Book, app: AppModel, startIndex: Int? = nil) {
         _model = StateObject(wrappedValue: ReaderModel(book: book, app: app, startIndex: startIndex))
@@ -37,7 +38,8 @@ struct ReaderView: View {
                         theme: theme,
                         onClose: { dismiss() },
                         onShowTOC: { showTOC = true },
-                        onShowSettings: { showSettings = true }
+                        onShowSettings: { showSettings = true },
+                        onShowCache: { showCacheSheet = true }
                     )
                     Spacer()
                     ReaderBottomBar(model: model, theme: theme)
@@ -64,6 +66,14 @@ struct ReaderView: View {
             ReaderSettingsSheet()
                 .presentationDetents([.medium, .large])
         }
+        .sheet(isPresented: $showCacheSheet) {
+            CacheSheet(model: model)
+                .presentationDetents([.medium, .large])
+        }
+        .sheet(isPresented: $model.showSourcePicker) {
+            SourcePickerSheet(model: model)
+                .presentationDetents([.medium, .large])
+        }
         .sheet(isPresented: $showTOC) {
             ChapterListView(
                 book: model.book,
@@ -82,16 +92,15 @@ struct ReaderView: View {
             Button("重试") { Task { await model.retry() } }
             Button("换源") {
                 model.errorMessage = nil
-                Task {
-                    if let replacement = await model.findBetterSource() {
-                        await model.applySourceSwitch(replacement)
-                    }
-                }
+                model.showSourcePicker = true
             }
         } message: {
             Text(model.errorMessage ?? "")
         }
-        .onDisappear { model.stopSpeaking() }
+        .onDisappear {
+            model.stopBackgroundWork()
+            app.saveSettings()
+        }
     }
 }
 
@@ -107,6 +116,26 @@ private struct ReaderContent: View {
     private var paragraphs: [String] {
         guard let text = model.content?.text else { return [] }
         return text.components(separatedBy: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+    }
+
+    /// Body font mirroring `PagedDocument.bodyFont`, so both page-turn modes
+    /// look the same. SwiftUI cannot indent only the first line, so the indent
+    /// is applied with a leading ideographic space in scroll mode.
+    private var bodyFont: Font {
+        let size = reading.fontSize
+        if let family = reading.fontFamily {
+            if family == "-apple-system" {
+                return .system(size: size, weight: .regular)
+            }
+            if UIFont(name: family, size: size) != nil {
+                return .custom(family, size: size)
+            }
+        }
+        return .system(size: size, weight: .regular, design: .serif)
+    }
+
+    private func displayed(_ paragraph: String) -> String {
+        reading.firstLineIndent ? "　　" + paragraph : paragraph
     }
 
     private var currentSentence: String? {
@@ -141,9 +170,10 @@ private struct ReaderContent: View {
                     }
 
                     ForEach(Array(paragraphs.enumerated()), id: \.offset) { index, paragraph in
-                        Text(attributed(paragraph, highlighted: index == highlightIndex))
-                            .font(.system(size: reading.fontSize, weight: .regular, design: .serif))
+                        Text(attributed(displayed(paragraph), highlighted: index == highlightIndex))
+                            .font(bodyFont)
                             .lineSpacing(reading.lineSpacing)
+                            .multilineTextAlignment(.leading)
                             .foregroundStyle(theme.text)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(.bottom, reading.paragraphSpacing)
@@ -254,35 +284,79 @@ private struct ReaderTopBar: View {
     var onClose: () -> Void
     var onShowTOC: () -> Void
     var onShowSettings: () -> Void
+    var onShowCache: () -> Void
     @EnvironmentObject private var app: AppModel
 
     var body: some View {
-        HStack(spacing: 16) {
+        HStack(spacing: 14) {
             Button(action: onClose) {
                 Image(systemName: "chevron.down")
             }
             Spacer()
-            Text(model.book.name)
-                .font(.subheadline.weight(.medium))
-                .lineLimit(1)
+            Button {
+                onShowTOC()
+            } label: {
+                HStack(spacing: 4) {
+                    Text(model.book.name)
+                        .font(.subheadline.weight(.medium))
+                        .lineLimit(1)
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 10, weight: .semibold))
+                }
+            }
+            .buttonStyle(.plain)
             Spacer()
 
             Menu {
-                ForEach(AIPrompt.ChapterTask.allCases) { task in
-                    Button {
-                        Task { await model.runAI(task: task) }
-                    } label: {
-                        Text("\(task.title) — \(task.detail)")
+                SwiftUI.Section("AI 整理") {
+                    ForEach(AIPrompt.ChapterTask.allCases) { task in
+                        Button {
+                            Task { await model.runAI(task: task) }
+                        } label: {
+                            Text("\(task.title) — \(task.detail)")
+                        }
+                    }
+                }
+
+                SwiftUI.Section("格式") {
+                    ForEach(AIPrompt.OutputFormat.allCases) { format in
+                        Button {
+                            app.settings.aiOutputFormat = format
+                            app.saveSettings()
+                        } label: {
+                            if app.settings.aiOutputFormat == format {
+                                Label(format.displayName, systemImage: "checkmark")
+                            } else {
+                                Text(format.displayName)
+                            }
+                        }
+                    }
+                }
+
+                if model.content?.originalText != nil {
+                    SwiftUI.Section {
+                        Button {
+                            Task { await model.restoreOriginalText() }
+                        } label: {
+                            Label("还原为站点原文", systemImage: "arrow.uturn.backward")
+                        }
                     }
                 }
             } label: {
-                Image(systemName: "sparkles")
+                Image(systemName: model.content?.cleaned == true ? "sparkles" : "wand.and.stars")
             }
-            .disabled(!app.settings.ai.isUsable || model.content == nil)
+            .disabled(model.content == nil || (!app.settings.ai.isUsable && model.content?.originalText == nil))
 
-            Button(action: onShowTOC) {
-                Image(systemName: "list.bullet")
+            Button {
+                model.showSourcePicker = true
+            } label: {
+                Image(systemName: "arrow.left.arrow.right")
             }
+
+            Button(action: onShowCache) {
+                Image(systemName: model.cachedChapterCount > 0 ? "arrow.down.circle.fill" : "arrow.down.circle")
+            }
+
             Button(action: onShowSettings) {
                 Image(systemName: "textformat.size")
             }

@@ -120,6 +120,56 @@ public actor LibraryStore {
         return files.filter { $0.lastPathComponent.hasPrefix(bookID.uuidString) && !$0.lastPathComponent.hasSuffix("-toc.json") }.count
     }
 
+    /// Chapter URLs that already have a body on disk, mapped back from the file
+    /// names via the saved table of contents (the file name is only a hash).
+    public func cachedChapterURLs(bookID: UUID) -> Set<String> {
+        let chapters = loadChapters(bookID: bookID) ?? []
+        guard !chapters.isEmpty else { return [] }
+        let folder = directory.appendingPathComponent("chapters", isDirectory: true)
+        guard let files = try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil) else { return [] }
+        let present = Set(files.map { $0.lastPathComponent })
+
+        var result: Set<String> = []
+        for chapter in chapters {
+            let name = "\(bookID.uuidString)-\(StableHash.hex(chapter.url)).json"
+            if present.contains(name) { result.insert(chapter.url) }
+        }
+        return result
+    }
+
+    /// Byte size of one book's cached bodies (table of contents excluded).
+    public func cachedSize(bookID: UUID) -> Int64 {
+        let folder = directory.appendingPathComponent("chapters", isDirectory: true)
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: folder,
+            includingPropertiesForKeys: [.fileSizeKey]
+        ) else { return 0 }
+
+        var total: Int64 = 0
+        for file in files where file.lastPathComponent.hasPrefix(bookID.uuidString)
+            && !file.lastPathComponent.hasSuffix("-toc.json") {
+            let size = (try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+            total += Int64(size)
+        }
+        return total
+    }
+
+    /// Total bytes used by every book's chapter cache.
+    public func totalCachedSize() -> Int64 {
+        let folder = directory.appendingPathComponent("chapters", isDirectory: true)
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: folder,
+            includingPropertiesForKeys: [.fileSizeKey]
+        ) else { return 0 }
+
+        var total: Int64 = 0
+        for file in files where !file.lastPathComponent.hasSuffix("-toc.json") {
+            let size = (try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+            total += Int64(size)
+        }
+        return total
+    }
+
     // MARK: - IO
 
     private func contentPath(bookID: UUID, chapterURL: String) -> String {

@@ -9,6 +9,8 @@ struct SettingsView: View {
     @State private var testing = false
     @State private var testResult: (text: String, isError: Bool)?
     @State private var showAIDocs = false
+    @State private var cachedChapters = 0
+    @State private var cacheSize: Int64 = 0
 
     private var voices: [AVSpeechVoiceOption] {
         SpeechController.availableChineseVoices().map {
@@ -82,6 +84,16 @@ struct SettingsView: View {
 
                 Section {
                     Toggle("启用 AI 整理", isOn: $app.settings.ai.enabled)
+
+                    Picker("整理后格式", selection: $app.settings.aiOutputFormat) {
+                        ForEach(AIPrompt.OutputFormat.allCases) { format in
+                            Text(format.displayName).tag(format)
+                        }
+                    }
+
+                    Text(app.settings.aiOutputFormat.detail)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
 
                     Picker("服务", selection: Binding(
                         get: { app.settings.ai.preset },
@@ -216,6 +228,15 @@ struct SettingsView: View {
                 // MARK: 数据
 
                 Section("数据与缓存") {
+                    LabeledContent("已缓存章节", value: "\(cachedChapters) 章")
+                    LabeledContent("缓存占用", value: CacheSheet.formatted(cacheSize))
+
+                    NavigationLink {
+                        ReaderSettingsSheet(initialSection: .cache)
+                    } label: {
+                        Label("缓存设置", systemImage: "arrow.down.circle")
+                    }
+
                     Button {
                         clearChapterCache()
                     } label: {
@@ -252,8 +273,18 @@ struct SettingsView: View {
             .onChange(of: app.settings) { _, _ in
                 app.saveSettings()
             }
+            .onAppear { Task { await refreshCacheStats() } }
             .onDisappear { app.saveSettings() }
         }
+    }
+
+    private func refreshCacheStats() async {
+        var chapters = 0
+        for book in app.books {
+            chapters += await app.store.cachedChapterCount(bookID: book.id)
+        }
+        cachedChapters = chapters
+        cacheSize = await app.store.totalCachedSize()
     }
 
     private var appVersion: String {
@@ -288,6 +319,7 @@ struct SettingsView: View {
             for book in app.books {
                 await app.store.clearChapterCache(bookID: book.id)
             }
+            await refreshCacheStats()
             app.showBanner("章节缓存已清理，下次阅读会重新下载", isError: false)
         }
     }

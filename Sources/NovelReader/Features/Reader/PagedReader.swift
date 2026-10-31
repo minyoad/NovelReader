@@ -96,6 +96,10 @@ struct PagedReader: View {
         var paragraphSpacing: Double
         var horizontalPadding: Double
         var theme: String
+        var fontFamily: String
+        var firstLineIndent: Bool
+        var alignment: String
+        var showChapterTitle: Bool
     }
 
     private func layoutKey(_ box: CGSize) -> LayoutKey {
@@ -108,7 +112,11 @@ struct PagedReader: View {
             lineSpacing: reading.lineSpacing,
             paragraphSpacing: reading.paragraphSpacing,
             horizontalPadding: reading.horizontalPadding,
-            theme: reading.theme.rawValue
+            theme: reading.theme.rawValue,
+            fontFamily: reading.fontFamily ?? "",
+            firstLineIndent: reading.firstLineIndent,
+            alignment: reading.alignment.rawValue,
+            showChapterTitle: reading.showChapterTitle
         )
     }
 

@@ -51,16 +51,39 @@ public enum PageTurnEffect: String, Codable, CaseIterable, Identifiable, Sendabl
     }
 }
 
+/// Horizontal alignment of body paragraphs. Chinese prose reads best justified;
+/// a ragged-right option helps when a book has mixed Latin text.
+public enum BodyAlignment: String, Codable, CaseIterable, Identifiable, Sendable {
+    case justify
+    case leading
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .justify: return "两端对齐"
+        case .leading: return "左对齐"
+        }
+    }
+}
+
 public struct ReadingSettings: Codable, Hashable, Sendable {
     public var fontSize: Double
     public var lineSpacing: Double
     public var paragraphSpacing: Double
     public var horizontalPadding: Double
     public var theme: ReaderTheme
-    /// `nil` means the system font.
+    /// PostScript / family name of the body font; `nil` means the system serif.
     public var fontFamily: String?
     public var pageTurnMode: PageTurnMode
     public var pageTurnEffect: PageTurnEffect
+    /// Indent the first line of every paragraph by two characters, the usual
+    /// convention for Chinese prose.
+    public var firstLineIndent: Bool
+    public var alignment: BodyAlignment
+    /// Keep the chapter title on the first page only, instead of repeating it
+    /// on every screen (it is drawn once at the top of a chapter anyway).
+    public var showChapterTitle: Bool
 
     public init(
         fontSize: Double = 19,
@@ -70,7 +93,10 @@ public struct ReadingSettings: Codable, Hashable, Sendable {
         theme: ReaderTheme = .paper,
         fontFamily: String? = nil,
         pageTurnMode: PageTurnMode = .page,
-        pageTurnEffect: PageTurnEffect = .slide
+        pageTurnEffect: PageTurnEffect = .slide,
+        firstLineIndent: Bool = true,
+        alignment: BodyAlignment = .justify,
+        showChapterTitle: Bool = true
     ) {
         self.fontSize = fontSize
         self.lineSpacing = lineSpacing
@@ -80,6 +106,9 @@ public struct ReadingSettings: Codable, Hashable, Sendable {
         self.fontFamily = fontFamily
         self.pageTurnMode = pageTurnMode
         self.pageTurnEffect = pageTurnEffect
+        self.firstLineIndent = firstLineIndent
+        self.alignment = alignment
+        self.showChapterTitle = showChapterTitle
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -91,11 +120,14 @@ public struct ReadingSettings: Codable, Hashable, Sendable {
         case fontFamily
         case pageTurnMode
         case pageTurnEffect
+        case firstLineIndent
+        case alignment
+        case showChapterTitle
     }
 
-    /// Tolerant decoding: settings written before pagination existed have no
-    /// page-turn keys, and should keep their values instead of resetting the
-    /// whole `AppSettings` blob.
+    /// Tolerant decoding: settings written before pagination (or before the
+    /// typography options) existed have no such keys, and should keep their
+    /// values instead of resetting the whole `AppSettings` blob.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let defaults = ReadingSettings()
@@ -107,6 +139,9 @@ public struct ReadingSettings: Codable, Hashable, Sendable {
         fontFamily = try container.decodeIfPresent(String.self, forKey: .fontFamily)
         pageTurnMode = try container.decodeIfPresent(PageTurnMode.self, forKey: .pageTurnMode) ?? defaults.pageTurnMode
         pageTurnEffect = try container.decodeIfPresent(PageTurnEffect.self, forKey: .pageTurnEffect) ?? defaults.pageTurnEffect
+        firstLineIndent = try container.decodeIfPresent(Bool.self, forKey: .firstLineIndent) ?? defaults.firstLineIndent
+        alignment = try container.decodeIfPresent(BodyAlignment.self, forKey: .alignment) ?? defaults.alignment
+        showChapterTitle = try container.decodeIfPresent(Bool.self, forKey: .showChapterTitle) ?? defaults.showChapterTitle
     }
 }
 
@@ -259,25 +294,93 @@ public struct AIConfiguration: Codable, Hashable, Sendable {
     }
 }
 
+public struct CacheSettings: Codable, Hashable, Sendable {
+    /// Download the next N chapters in the background while reading, so lines
+    /// keep coming when the network drops.
+    public var prefetchCount: Int
+    /// Cache a whole book when it is added to the shelf.
+    public var autoCacheOnAdd: Bool
+    /// Upper bound on how many cached chapters to keep per book; older ones are
+    /// dropped from the tail of the read position. 0 means "no limit".
+    public var maxCachedChaptersPerBook: Int
+
+    public init(
+        prefetchCount: Int = 5,
+        autoCacheOnAdd: Bool = false,
+        maxCachedChaptersPerBook: Int = 0
+    ) {
+        self.prefetchCount = prefetchCount
+        self.autoCacheOnAdd = autoCacheOnAdd
+        self.maxCachedChaptersPerBook = maxCachedChaptersPerBook
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case prefetchCount
+        case autoCacheOnAdd
+        case maxCachedChaptersPerBook
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let defaults = CacheSettings()
+        prefetchCount = try container.decodeIfPresent(Int.self, forKey: .prefetchCount) ?? defaults.prefetchCount
+        autoCacheOnAdd = try container.decodeIfPresent(Bool.self, forKey: .autoCacheOnAdd) ?? defaults.autoCacheOnAdd
+        maxCachedChaptersPerBook = try container.decodeIfPresent(Int.self, forKey: .maxCachedChaptersPerBook)
+            ?? defaults.maxCachedChaptersPerBook
+    }
+}
+
 public struct AppSettings: Codable, Hashable, Sendable {
     public var reading: ReadingSettings
     public var tts: TTSSettings
     public var network: NetworkSettings
     public var ai: AIConfiguration
+    public var cache: CacheSettings
     /// Search all enabled sources at once; false means "pick one".
     public var searchAllSources: Bool
+    /// Output layout applied after AI cleanup.
+    public var aiOutputFormat: AIPrompt.OutputFormat
 
     public init(
         reading: ReadingSettings = ReadingSettings(),
         tts: TTSSettings = TTSSettings(),
         network: NetworkSettings = NetworkSettings(),
         ai: AIConfiguration = AIConfiguration(),
-        searchAllSources: Bool = true
+        cache: CacheSettings = CacheSettings(),
+        searchAllSources: Bool = true,
+        aiOutputFormat: AIPrompt.OutputFormat = .paragraphs
     ) {
         self.reading = reading
         self.tts = tts
         self.network = network
         self.ai = ai
+        self.cache = cache
         self.searchAllSources = searchAllSources
+        self.aiOutputFormat = aiOutputFormat
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case reading
+        case tts
+        case network
+        case ai
+        case cache
+        case searchAllSources
+        case aiOutputFormat
+    }
+
+    /// Tolerant decoding so adding settings in a new build does not wipe the
+    /// ones the user already has on disk.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let defaults = AppSettings()
+        reading = try container.decodeIfPresent(ReadingSettings.self, forKey: .reading) ?? defaults.reading
+        tts = try container.decodeIfPresent(TTSSettings.self, forKey: .tts) ?? defaults.tts
+        network = try container.decodeIfPresent(NetworkSettings.self, forKey: .network) ?? defaults.network
+        ai = try container.decodeIfPresent(AIConfiguration.self, forKey: .ai) ?? defaults.ai
+        cache = try container.decodeIfPresent(CacheSettings.self, forKey: .cache) ?? defaults.cache
+        searchAllSources = try container.decodeIfPresent(Bool.self, forKey: .searchAllSources) ?? defaults.searchAllSources
+        aiOutputFormat = try container.decodeIfPresent(AIPrompt.OutputFormat.self, forKey: .aiOutputFormat)
+            ?? defaults.aiOutputFormat
     }
 }

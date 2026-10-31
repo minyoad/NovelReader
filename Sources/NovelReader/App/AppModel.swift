@@ -398,11 +398,39 @@ final class AppModel: ObservableObject {
         let snapshot = books
         let chapterSnapshot = chapters
         let bookID = book.id
+        let shouldCacheAll = settings.cache.autoCacheOnAdd && !book.detailURL.hasPrefix("local://")
         Task {
             await store.saveBooks(snapshot)
             await store.saveChapters(chapterSnapshot, bookID: bookID)
         }
+        if shouldCacheAll {
+            // Off the main path: adding to the shelf must stay instant.
+            Task { await self.cacheWholeBookInBackground(book: book, chapters: chapters) }
+        }
         return book
+    }
+
+    /// Caches every chapter of a freshly added book when the user asked for it.
+    private func cacheWholeBookInBackground(book: Book, chapters: [Chapter]) async {
+        let cached = await store.cachedChapterURLs(bookID: book.id)
+        let cachedIndices = Set(chapters.enumerated().filter { cached.contains($0.element.url) }.map { $0.offset })
+        let plan = CachePlanner.missingForWholeBook(chapterCount: chapters.count, alreadyCached: cachedIndices)
+        guard !plan.isEmpty else { return }
+
+        var done = 0
+        var failed = 0
+        for index in plan {
+            if Task.isCancelled { break }
+            if await cacheChapter(book: book, chapter: chapters[index]) {
+                done += 1
+            } else {
+                failed += 1
+            }
+        }
+        showBanner(
+            failed == 0 ? "「\(book.name)」全本缓存完成（\(done) 章）" : "「\(book.name)」缓存完成，\(failed) 章失败",
+            isError: failed > 0
+        )
     }
 
     func removeFromShelf(_ book: Book) {
@@ -473,21 +501,51 @@ final class AppModel: ObservableObject {
         return content
     }
 
-    func aiClean(_ content: ChapterContent, task: AIPrompt.ChapterTask, progress: (@Sendable (Double) -> Void)? = nil) async throws -> ChapterContent {
+    func aiClean(
+        _ content: ChapterContent,
+        task: AIPrompt.ChapterTask,
+        format: AIPrompt.OutputFormat = .paragraphs,
+        progress: (@Sendable (Double) -> Void)? = nil
+    ) async throws -> ChapterContent {
         guard settings.ai.isUsable else { throw AIError.notConfigured }
         let client = AIClient(configuration: settings.ai)
         let cleaned = try await client.cleanChapter(
             content.text,
             instruction: task,
             customInstruction: settings.ai.customInstruction,
+            format: format,
             progress: progress
         )
         let result = ChapterContent(
             chapterURL: content.chapterURL,
             text: TextProcessing.cleanupChapterText(cleaned),
-            cleaned: true
+            cleaned: true,
+            // Keep the downloaded text so a cleanup can be undone without a
+            // network round trip.
+            originalText: content.originalText ?? content.text
         )
         return result
+    }
+
+    /// Fetches one chapter and writes it to disk without touching the reader
+    /// state. Returns false when the chapter could not be cached (offline,
+    /// paywall, deleted source), so callers can count failures.
+    @discardableResult
+    func cacheChapter(book: Book, chapter: Chapter) async -> Bool {
+        if await store.loadContent(bookID: book.id, chapterURL: chapter.url) != nil {
+            return true
+        }
+        if chapter.url.hasPrefix("local://") {
+            return false
+        }
+        guard let source = sources.first(where: { $0.id == book.sourceID }) else { return false }
+        do {
+            let content = try await engine.fetchContent(book: book, chapter: chapter, source: source)
+            await store.saveContent(content, bookID: book.id)
+            return true
+        } catch {
+            return false
+        }
     }
 
     func persistContent(_ content: ChapterContent, for book: Book) {
@@ -557,6 +615,9 @@ final class AppModel: ObservableObject {
                 let index = min(max(book.progress.chapterIndex, 0), chapters.count - 1)
                 target = chapters[index]
             }
+            // Probe only. Caching it would leave an orphan file: `switchSource`
+            // clears the cache anyway, and if the user backs out the URL belongs
+            // to a site this book is not on.
             _ = try await engine.fetchContent(book: detail, chapter: target, source: source)
             return true
         } catch {

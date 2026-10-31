@@ -102,12 +102,34 @@ public struct ChapterContent: Codable, Hashable, Sendable {
     /// True when the text went through an AI cleanup pass.
     public var cleaned: Bool
     public var fetchedAt: Date
+    /// The text as fetched from the site, kept when a cleanup overwrote it so
+    /// the reader can compare or restore the original.
+    public var originalText: String?
 
-    public init(chapterURL: String, text: String, cleaned: Bool = false, fetchedAt: Date = Date()) {
+    public init(
+        chapterURL: String,
+        text: String,
+        cleaned: Bool = false,
+        fetchedAt: Date = Date(),
+        originalText: String? = nil
+    ) {
         self.chapterURL = chapterURL
         self.text = text
         self.cleaned = cleaned
         self.fetchedAt = fetchedAt
+        self.originalText = originalText
+    }
+
+    /// Swaps back to the text as it was downloaded, dropping the cleaned copy.
+    public func restored() -> ChapterContent {
+        guard let originalText else { return self }
+        return ChapterContent(
+            chapterURL: chapterURL,
+            text: originalText,
+            cleaned: false,
+            fetchedAt: fetchedAt,
+            originalText: nil
+        )
     }
 }
 
