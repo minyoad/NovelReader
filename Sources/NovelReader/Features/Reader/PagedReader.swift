@@ -211,7 +211,10 @@ struct PagedReader: View {
     }
 
     private func pageImage(document: PagedDocument, range: NSRange) -> some View {
-        PageImage(attributed: styledPage(document: document, range: range))
+        // `paper` matters beyond the curl: in slide mode the incoming page sits
+        // under the outgoing one, and a clear background would let both sets of
+        // glyphs show through where they overlap.
+        PageImage(attributed: styledPage(document: document, range: range), paper: theme.background)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .clipped()
     }
