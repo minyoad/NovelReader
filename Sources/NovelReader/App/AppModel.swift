@@ -150,14 +150,15 @@ final class AppModel: ObservableObject {
     /// Books added from a preset keep only the source's ID and the detail URL,
     /// so when a preset is swapped for a different site those shelf entries end
     /// up pointing at a dead host. Re-resolve them against the new preset,
-    /// matching by title (and author when known) so progress survives.
+    /// ranking by title with the recorded author as a hint.
     ///
-    /// Runs once per preset generation, in the background: it only touches
-    /// books whose host no longer matches their source.
+    /// The flag is only set once every book has been repointed, so an offline
+    /// launch retries next time instead of leaving books stuck on a dead host.
     private func repairBooksAfterPresetMigration() async {
-        let flag = "presetBooksRepairedV2"
+        let flag = "presetBooksRepairedV3"
         guard !(await store.isFlagSet(flag)) else { return }
 
+        var allFixed = true
         for book in books {
             guard BuiltinContent.isPresetID(book.sourceID),
                   let source = sources.first(where: { $0.id == book.sourceID }),
@@ -165,17 +166,21 @@ final class AppModel: ObservableObject {
                   let sourceHost = URL(string: source.baseURL)?.host,
                   staleHost != sourceHost else { continue }
 
-            let matches = (try? await engine.search(keyword: book.name, source: source)) ?? []
-            guard let hit = matches.first(where: { result in
-                guard result.name == book.name else { return false }
-                guard !book.author.isEmpty, !result.author.isEmpty else { return true }
-                return result.author.contains(book.author) || book.author.contains(result.author)
-            }) else { continue }
-
-            _ = try? await switchSource(of: book, to: hit)
+            let matches = await searchMatches(keyword: book.name, authorHint: book.author, in: [source])
+            guard let hit = matches.first else {
+                allFixed = false
+                continue
+            }
+            do {
+                _ = try await switchSource(of: book, to: hit)
+            } catch {
+                allFixed = false
+            }
         }
 
-        await store.setFlag(flag)
+        if allFixed {
+            await store.setFlag(flag)
+        }
     }
 
     private func seedSampleBook() async {
@@ -443,7 +448,13 @@ final class AppModel: ObservableObject {
 
     func chapterContent(book: Book, chapter: Chapter) async throws -> ChapterContent {
         if let cached = await store.loadContent(bookID: book.id, chapterURL: chapter.url) {
-            return cached
+            // Older builds cached whatever the site returned, including
+            // "内容正在获取中，稍候重试" paywall stubs. Drop those instead of
+            // showing them as prose.
+            if !TextProcessing.isPlaceholderContent(cached.text, chapterTitle: chapter.title) {
+                return cached
+            }
+            await store.deleteContent(bookID: book.id, chapterURL: chapter.url)
         }
         let content: ChapterContent
         if chapter.url.hasPrefix("local://") {
@@ -496,9 +507,20 @@ final class AppModel: ObservableObject {
     /// Searches every other enabled source for the same book, so a chapter that
     /// the current site refuses to serve can be read somewhere else.
     func alternatives(for book: Book) async -> [SearchResult] {
-        let query = book.name
-        guard !query.isEmpty else { return [] }
-        let candidates = sources.filter { $0.enabled && $0.type == .text && $0.canSearch && $0.id != book.sourceID && !$0.isBuiltIn }
+        let candidates = sources.filter {
+            $0.enabled && $0.type == .text && $0.canSearch && $0.id != book.sourceID && !$0.isBuiltIn
+        }
+        return await searchMatches(keyword: book.name, authorHint: book.author, in: candidates)
+    }
+
+    /// Searches `candidates` and ranks the hits by how likely they are the same
+    /// book.
+    ///
+    /// See `SourceMatcher`: author is only a tie-breaker, because mirrors
+    /// routinely mislabel it.
+    func searchMatches(keyword: String, authorHint: String, in candidates: [BookSource]) async -> [SearchResult] {
+        let query = keyword.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty, !candidates.isEmpty else { return [] }
 
         var collected: [SearchResult] = []
         await withTaskGroup(of: [SearchResult].self) { group in
@@ -513,21 +535,7 @@ final class AppModel: ObservableObject {
             }
         }
 
-        // Keep only plausible matches: same title, and the same author when the
-        // current book knows its author.
-        let author = book.author.trimmingCharacters(in: .whitespaces)
-        let matches = collected.filter { result in
-            guard result.name == query || result.name.contains(query) || query.contains(result.name) else { return false }
-            guard !author.isEmpty, !result.author.isEmpty else { return true }
-            return result.author.contains(author) || author.contains(result.author)
-        }
-        // Prefer exact titles, then shorter (less decorated) ones.
-        return matches.sorted { lhs, rhs in
-            let lhsExact = lhs.name == query ? 0 : 1
-            let rhsExact = rhs.name == query ? 0 : 1
-            if lhsExact != rhsExact { return lhsExact < rhsExact }
-            return lhs.name.count < rhs.name.count
-        }
+        return SourceMatcher.rank(collected, wantedTitle: query, wantedAuthor: authorHint)
     }
 
     /// Checks that `result` can really serve the chapter the reader is on.
@@ -597,6 +605,9 @@ final class AppModel: ObservableObject {
         books[index] = updated
         let snapshot = books
         await store.saveBooks(snapshot)
+        // Cached bodies are keyed by the old site's chapter URLs; leaving them
+        // behind wastes space and confuses anything that matches by URL.
+        await store.clearChapterCache(bookID: updated.id)
         await store.saveChapters(chapters, bookID: updated.id)
         return updated
     }
