@@ -189,9 +189,11 @@ final class SpeechController: NSObject, ObservableObject {
 
     /// Names what is being read in the system UI.
     ///
-    /// Provides the book and chapter, not the sentence: the Lock Screen is a
-    /// glance away from the app, and "第三章 风起" is what identifies the
-    /// reading session, while the sentence would change every few seconds.
+    /// The title is the chapter, and the artist line carries the book — the Lock
+    /// Screen is glanced at from a distance, so the identity of the reading
+    /// session matters more than the sentence. The sentence itself goes with
+    /// `update`, because it changes every few seconds and only the system UI
+    /// shows it (the reader shows the highlight instead).
     func describe(bookTitle: String, author: String, chapterTitle: String, artworkURL: String?) {
         trackInfo = NowPlayingCenter.Track(
             title: chapterTitle,
@@ -369,6 +371,10 @@ final class SpeechController: NSObject, ObservableObject {
     /// as a blank Now Playing card, which looks like a bug.
     private func publishNowPlaying() {
         guard !trackInfo.title.isEmpty else { return }
+        // The sentence is only worth showing while it is being read: on the Lock
+        // Screen it is the "now playing" line, and a stale one after stopping
+        // would describe something no longer happening.
+        nowPlaying.setSubtitle(isActive ? (currentSentence ?? "") : "")
         nowPlaying.update(
             elapsed: timeline.elapsed(before: currentIndex, atRate: settings.rate),
             duration: timeline.duration(atRate: settings.rate),

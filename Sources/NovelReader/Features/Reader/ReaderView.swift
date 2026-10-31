@@ -12,9 +12,6 @@ struct ReaderView: View {
     @State private var showSettings = false
     @State private var showTOC = false
     @State private var showCacheSheet = false
-    /// Height of the speech bar, measured so the overlay top bar can start
-    /// below it instead of drawing over its buttons.
-    @State private var speechBarHeight: CGFloat = 0
 
     init(book: Book, app: AppModel, startIndex: Int? = nil) {
         _model = StateObject(wrappedValue: ReaderModel(book: book, app: app, startIndex: startIndex))
@@ -36,27 +33,12 @@ struct ReaderView: View {
             theme.background.ignoresSafeArea()
 
             VStack(spacing: 0) {
-                // The speech bar sits above the page, not below it: while
-                // listening the eye is on the bar, and at the bottom it fought
-                // with the reader's own bottom bar and the home indicator.
-                if model.speech.showsHighlight {
-                    TTSBar(model: model, theme: theme)
-                        .background(
-                            GeometryReader { proxy in
-                                Color.clear.preference(
-                                    key: SpeechBarHeightKey.self,
-                                    value: proxy.size.height
-                                )
-                            }
-                        )
-                }
                 if app.settings.reading.pageTurnMode == .page {
                     PagedReader(model: model, theme: theme)
                 } else {
                     ReaderContent(model: model, theme: theme)
                 }
             }
-            .onPreferenceChange(SpeechBarHeightKey.self) { speechBarHeight = $0 }
 
             if model.showBars {
                 VStack {
@@ -68,11 +50,6 @@ struct ReaderView: View {
                         onShowSettings: { showSettings = true },
                         onShowCache: { showCacheSheet = true }
                     )
-                    // The top bar is an overlay so showing it does not re-flow
-                    // the page, which means it has to step around the speech
-                    // bar explicitly instead of being laid out below it.
-                    .padding(.top, model.speech.showsHighlight ? speechBarHeight : 0)
-
                     Spacer()
                     ReaderBottomBar(model: model, theme: theme)
                 }
@@ -321,15 +298,6 @@ private struct ReaderContent: View {
 
 // MARK: - Bars
 
-/// Carries the speech bar's measured height up to the overlay top bar.
-private struct SpeechBarHeightKey: PreferenceKey {
-    static let defaultValue: CGFloat = 0
-
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = max(value, nextValue())
-    }
-}
-
 private struct ReaderTopBar: View {
     @ObservedObject var model: ReaderModel
     let theme: Theme
@@ -426,193 +394,174 @@ private struct ReaderBottomBar: View {
     let theme: Theme
     @EnvironmentObject private var app: AppModel
 
+    /// Chapter title and position live in one view for both modes.
+    ///
+    /// While speaking this bar is the speech remote; otherwise it is the plain
+    /// reader bar. Keeping one bar instead of stacking two means the page never
+    /// changes height when playback starts, which used to re-flow the
+    /// pagination mid-chapter.
+    private var isSpeaking: Bool { model.speech.showsHighlight }
+
     var body: some View {
         VStack(spacing: 10) {
             ProgressView(value: model.progressFraction)
                 .tint(theme.accent)
-            HStack {
+            HStack(spacing: 10) {
                 Text(model.currentChapter?.title ?? "")
                     .font(.caption)
                     .foregroundStyle(theme.secondaryText)
                     .lineLimit(1)
-                Spacer()
+                Spacer(minLength: 8)
                 Text("\(model.currentIndex + 1)/\(model.chapters.count)")
                     .font(.caption2)
                     .foregroundStyle(theme.secondaryText)
-            }
-            HStack(spacing: 20) {
-                // Big hit areas on purpose: this bar is the one a driver uses,
-                // and the stock toolbar size is unusable at arm's length. The
-                // glyphs stay modest so the bar does not grow past a thumb.
-                Button {
-                    Task { await model.goPreviousChapter() }
-                } label: {
-                    Image(systemName: "backward.end")
-                        .font(.system(size: 22))
-                        .frame(width: 52, height: 52)
-                        .contentShape(Rectangle())
-                }
-                .disabled(model.currentIndex == 0)
-                .opacity(model.currentIndex == 0 ? 0.4 : 1)
+                if isSpeaking {
+                    // Speed and exit live on the title row rather than under the
+                    // buttons: the five transport controls need the full width,
+                    // and an overlay on top of them would steal their taps.
+                    Menu {
+                        ForEach([0.35, 0.45, 0.5, 0.6, 0.75, 0.9, 1.0], id: \.self) { rate in
+                            Button(String(format: "%.2fx", rate)) {
+                                app.settings.tts.rate = rate
+                                app.saveSettings()
+                                model.speech.configure(app.settings.tts)
+                            }
+                        }
+                    } label: {
+                        Text(String(format: "%.2fx", app.settings.tts.rate))
+                            .font(.caption2.monospacedDigit())
+                    }
+                    .foregroundStyle(theme.accent)
 
-                Button {
-                    model.toggleSpeech()
-                } label: {
-                    Image(systemName: model.speech.isActive ? "pause.circle.fill" : "play.circle.fill")
-                        .font(.system(size: 46))
-                        .foregroundStyle(theme.accent)
-                        .frame(width: 64, height: 64)
-                        .contentShape(Circle())
+                    Button { model.stopSpeaking() } label: {
+                        Label("退出", systemImage: "xmark.circle")
+                            .font(.caption2)
+                            .labelStyle(.titleAndIcon)
+                    }
+                    .foregroundStyle(theme.secondaryText)
                 }
-
-                Button {
-                    Task { await model.goNextChapter() }
-                } label: {
-                    Image(systemName: "forward.end")
-                        .font(.system(size: 22))
-                        .frame(width: 52, height: 52)
-                        .contentShape(Rectangle())
-                }
-                .disabled(model.currentIndex + 1 >= model.chapters.count)
-                .opacity(model.currentIndex + 1 >= model.chapters.count ? 0.4 : 1)
             }
-            .foregroundStyle(theme.text)
+
+            if isSpeaking {
+                speechControls
+            } else {
+                readingControls
+            }
         }
         .padding(.horizontal, 20)
         .padding(.top, 12)
         .padding(.bottom, 8)
         .background(.ultraThinMaterial)
     }
-}
 
-private struct TTSBar: View {
-    @ObservedObject var model: ReaderModel
-    let theme: Theme
-    @EnvironmentObject private var app: AppModel
+    // MARK: - Idle controls
 
-    /// Diameter of every button in the bar.
-    ///
-    /// Sized for a glance and a thumb at arm's length — the bar is used with the
-    /// phone in a cradle, where the standard toolbar hit area is far too small.
-    /// 56pt is above Apple's 44pt minimum and stays comfortable on a 6.1" phone
-    /// even with the traffic and a steering wheel in the way.
-    private let buttonSize: CGFloat = 56
+    private var readingControls: some View {
+        HStack(spacing: 20) {
+            // Big hit areas on purpose: this bar is the one a driver uses, and
+            // the stock toolbar size is unusable at arm's length.
+            Button {
+                Task { await model.goPreviousChapter() }
+            } label: {
+                Image(systemName: "backward.end")
+                    .font(.system(size: 22))
+                    .frame(width: 52, height: 52)
+                    .contentShape(Rectangle())
+            }
+            .disabled(model.currentIndex == 0)
+            .opacity(model.currentIndex == 0 ? 0.4 : 1)
 
-    private var sentence: String? {
-        guard model.speech.showsHighlight,
-              model.speech.sentences.indices.contains(model.currentSentenceIndex) else { return nil }
-        return model.speech.sentences[model.currentSentenceIndex]
+            Button {
+                model.toggleSpeech()
+            } label: {
+                Image(systemName: "play.circle.fill")
+                    .font(.system(size: 46))
+                    .foregroundStyle(theme.accent)
+                    .frame(width: 64, height: 64)
+                    .contentShape(Circle())
+            }
+
+            Button {
+                Task { await model.goNextChapter() }
+            } label: {
+                Image(systemName: "forward.end")
+                    .font(.system(size: 22))
+                    .frame(width: 52, height: 52)
+                    .contentShape(Rectangle())
+            }
+            .disabled(model.currentIndex + 1 >= model.chapters.count)
+            .opacity(model.currentIndex + 1 >= model.chapters.count ? 0.4 : 1)
+        }
+        .foregroundStyle(theme.text)
     }
 
-    var body: some View {
-        VStack(spacing: 10) {
-            Text(sentence ?? "")
-                .font(.subheadline)
-                .foregroundStyle(theme.secondaryText)
-                .lineLimit(2)
-                .multilineTextAlignment(.leading)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 4)
-                .padding(.bottom, 2)
+    // MARK: - Speaking controls
 
-            HStack(spacing: 0) {
-                // Two levels of navigation on purpose: the outer pair moves
-                // between chapters — what a listener thinks of as "previous /
-                // next" — and the inner pair nudges by a sentence, which is the
-                // correction you want after a mis-heard line.
-                Button {
-                    Task { await model.goPreviousChapter(autoPlaySpeech: true) }
-                } label: {
-                    Image(systemName: "backward.end.fill")
-                        .font(.system(size: 22))
-                }
-                .buttonStyle(SpeechButtonStyle(theme: theme, diameter: buttonSize))
-                .disabled(model.currentIndex == 0)
-                .opacity(model.currentIndex == 0 ? 0.4 : 1)
-
-                Spacer(minLength: 6)
-
-                // Sentence skips stay smaller on purpose: they are a correction,
-                // and a mis-tap there matters less than a mis-tap on "chapter".
-                Button { model.speech.previous() } label: {
-                    Image(systemName: "backward.frame")
-                        .font(.system(size: 17))
-                }
-                .buttonStyle(SpeechButtonStyle(theme: theme, diameter: 44))
-
-                Spacer(minLength: 8)
-
-                Button { model.speech.toggle() } label: {
-                    if model.speech.isPreparing {
-                        // Remote engines need a moment before the first sound;
-                        // a spinner explains the silence instead of looking
-                        // like the button did nothing.
-                        ProgressView()
-                            .tint(theme.accent)
-                            .frame(width: 28, height: 28)
-                    } else {
-                        Image(systemName: model.speech.isPlaying ? "pause.fill" : "play.fill")
-                            .font(.system(size: 30))
-                    }
-                }
-                .buttonStyle(SpeechButtonStyle(theme: theme, diameter: 68, filled: true))
-
-                Spacer(minLength: 8)
-
-                Button { model.speech.next() } label: {
-                    Image(systemName: "forward.frame")
-                        .font(.system(size: 17))
-                }
-                .buttonStyle(SpeechButtonStyle(theme: theme, diameter: 44))
-
-                Spacer(minLength: 6)
-
-                Button {
-                    Task { await model.goNextChapter(autoPlaySpeech: true) }
-                } label: {
-                    Image(systemName: "forward.end.fill")
-                        .font(.system(size: 22))
-                }
-                .buttonStyle(SpeechButtonStyle(theme: theme, diameter: buttonSize))
-                .disabled(model.currentIndex + 1 >= model.chapters.count)
-                .opacity(model.currentIndex + 1 >= model.chapters.count ? 0.4 : 1)
+    /// Same bar, now driving the speech.
+    ///
+    /// Chapter and sentence are two navigation levels: the outer pair moves
+    /// between chapters — what a listener thinks of as "previous / next" — and
+    /// the inner pair nudges by one sentence, which is the correction you want
+    /// after a mis-heard line. Sizes are generous because this is used with the
+    /// phone in a cradle.
+    private var speechControls: some View {
+        HStack(spacing: 0) {
+            Button {
+                Task { await model.goPreviousChapter(autoPlaySpeech: true) }
+            } label: {
+                Image(systemName: "backward.end.fill")
+                    .font(.system(size: 22))
             }
-            .foregroundStyle(theme.text)
+            .buttonStyle(SpeechButtonStyle(theme: theme, diameter: 56))
+            .disabled(model.currentIndex == 0)
+            .opacity(model.currentIndex == 0 ? 0.4 : 1)
 
-            HStack(spacing: 16) {
-                Menu {
-                    ForEach([0.35, 0.45, 0.5, 0.6, 0.75, 0.9, 1.0], id: \.self) { rate in
-                        Button(String(format: "%.2fx", rate)) {
-                            app.settings.tts.rate = rate
-                            app.saveSettings()
-                            model.speech.configure(app.settings.tts)
-                        }
-                    }
-                } label: {
-                    Label(
-                        String(format: "%.2fx", app.settings.tts.rate),
-                        systemImage: "gauge.with.dots.needle.33percent"
-                    )
-                    .font(.caption.monospacedDigit())
-                }
+            Spacer(minLength: 6)
 
-                Spacer()
+            Button { model.speech.previous() } label: {
+                Image(systemName: "backward.frame")
+                    .font(.system(size: 17))
+            }
+            .buttonStyle(SpeechButtonStyle(theme: theme, diameter: 44))
 
-                Button { model.stopSpeaking() } label: {
-                    Label("退出朗读", systemImage: "xmark.circle")
-                        .font(.caption)
+            Spacer(minLength: 8)
+
+            Button { model.speech.toggle() } label: {
+                if model.speech.isPreparing {
+                    // Remote engines need a moment before the first sound; a
+                    // spinner explains the silence instead of looking like the
+                    // button did nothing.
+                    ProgressView()
+                        .tint(theme.accent)
+                        .frame(width: 28, height: 28)
+                } else {
+                    Image(systemName: model.speech.isPlaying ? "pause.fill" : "play.fill")
+                        .font(.system(size: 30))
                 }
             }
-            .foregroundStyle(theme.secondaryText)
-            .padding(.horizontal, 6)
+            .buttonStyle(SpeechButtonStyle(theme: theme, diameter: 68, filled: true))
+
+            Spacer(minLength: 8)
+
+            Button { model.speech.next() } label: {
+                Image(systemName: "forward.frame")
+                    .font(.system(size: 17))
+            }
+            .buttonStyle(SpeechButtonStyle(theme: theme, diameter: 44))
+
+            Spacer(minLength: 6)
+
+            Button {
+                Task { await model.goNextChapter(autoPlaySpeech: true) }
+            } label: {
+                Image(systemName: "forward.end.fill")
+                    .font(.system(size: 22))
+            }
+            .buttonStyle(SpeechButtonStyle(theme: theme, diameter: 56))
+            .disabled(model.currentIndex + 1 >= model.chapters.count)
+            .opacity(model.currentIndex + 1 >= model.chapters.count ? 0.4 : 1)
         }
-        .padding(.horizontal, 16)
-        .padding(.top, 10)
-        .padding(.bottom, 12)
-        .background(.ultraThinMaterial)
-        .overlay(alignment: .bottom) {
-            Divider().opacity(0.4)
-        }
+        .foregroundStyle(theme.text)
     }
 }
 

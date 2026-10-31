@@ -54,6 +54,8 @@ final class NowPlayingCenter {
     private var elapsed: Double = 0
     private var duration: Double = 0
     private var isPlaying = false
+    /// Current sentence, shown under the title on the Lock Screen.
+    private var subtitle = ""
 
     // MARK: - Registry
 
@@ -156,6 +158,19 @@ final class NowPlayingCenter {
         push()
     }
 
+    /// The sentence currently being read.
+    ///
+    /// Shown as the subtitle on the Lock Screen and in Control Center, which is
+    /// where a glance at the sentence belongs: the reader highlights it in the
+    /// page, so repeating it in the app bar would be redundant. It changes on
+    /// every sentence, which is why it is separate from `setTrack`.
+    func setSubtitle(_ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed != subtitle else { return }
+        subtitle = trimmed
+        push()
+    }
+
     /// Publishes position and state.
     ///
     /// Called on every sentence change: frequent enough that the progress bar
@@ -174,6 +189,7 @@ final class NowPlayingCenter {
         elapsed = 0
         duration = 0
         isPlaying = false
+        subtitle = ""
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
         MPNowPlayingInfoCenter.default().playbackState = .stopped
     }
@@ -184,7 +200,6 @@ final class NowPlayingCenter {
         var info: [String: Any] = [
             MPMediaItemPropertyTitle: track.title,
             MPMediaItemPropertyArtist: track.artist,
-            MPMediaItemPropertyAlbumTitle: track.album,
             // Audio, not music, so the system does not offer Apple Music
             // specific actions in contexts that read this field.
             MPNowPlayingInfoPropertyMediaType: MPNowPlayingInfoMediaType.audio.rawValue,
@@ -195,6 +210,14 @@ final class NowPlayingCenter {
             MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? 1.0 : 0.0,
             MPNowPlayingInfoPropertyDefaultPlaybackRate: 1.0,
         ]
+
+        // The third line is the sentence being read; the album (the book) is
+        // already part of the artist line, so the subtitle is the more useful
+        // use of it. Falls back to the album when nothing is being read.
+        let thirdLine = subtitle.isEmpty ? track.album : subtitle
+        if !thirdLine.isEmpty {
+            info[MPMediaItemPropertyAlbumTitle] = thirdLine
+        }
 
         if let artwork {
             info[MPMediaItemPropertyArtwork] = artwork
