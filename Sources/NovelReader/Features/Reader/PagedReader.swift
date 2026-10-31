@@ -139,56 +139,78 @@ struct PagedReader: View {
 
     @ViewBuilder
     private func pageLayers(box: CGSize) -> some View {
+        if reading.pageTurnEffect == .curl {
+            curlLayers(box: box)
+        } else {
+            ZStack {
+                // Revealed page (or chapter hint) behind the page being dragged.
+                if abs(drag) > 0.5, let document {
+                    let forward = isForward
+                    if let index = neighbor(forward: forward) {
+                        pageImage(document: document, range: pages[index])
+                    } else {
+                        chapterHint(forward: forward, box: box)
+                            .offset(x: forward ? box.width : -box.width)
+                            .offset(x: drag)
+                    }
+                }
+
+                // Page under the finger (or the settled page when no drag).
+                if let document, let currentRange {
+                    pageImage(document: document, range: currentRange)
+                        .offset(x: reading.pageTurnEffect == .slide ? drag : 0)
+                        .opacity(reading.pageTurnEffect == .fade ? Double(1 - dragProgress) : 1)
+                }
+            }
+            .frame(width: box.width, height: box.height)
+        }
+    }
+
+    /// Paper-curl mode. The sheet and the page it reveals are drawn by
+    /// `CurledPage` from the same page images, so the fold never disagrees with
+    /// the finger and the print stays aligned with the paginator's slices.
+    ///
+    /// At a chapter boundary there is no neighbouring page to reveal, so the
+    /// hint card takes over and the current page just slides with the finger —
+    /// curling would have nothing to fold onto.
+    @ViewBuilder
+    private func curlLayers(box: CGSize) -> some View {
+        let forward = isForward
+        let hasNeighbor = neighbor(forward: forward) != nil
+
         ZStack {
-            // Revealed page (or chapter hint) behind the page being dragged.
-            if abs(drag) > 0.5, let document {
-                let forward = isForward
-                if let index = neighbor(forward: forward) {
-                    pageImage(document: document, range: pages[index])
-                } else {
+            if hasNeighbor {
+                if let document, let currentRange {
+                    CurledPage(
+                        settledText: styledPage(document: document, range: currentRange),
+                        neighborText: neighborPageText(document: document, forward: forward),
+                        progress: dragProgress,
+                        forward: forward
+                    )
+                    .frame(width: box.width, height: box.height)
+                }
+            } else {
+                if abs(drag) > 0.5 {
                     chapterHint(forward: forward, box: box)
                         .offset(x: forward ? box.width : -box.width)
                         .offset(x: drag)
                 }
-            }
-
-            // Page under the finger (or the settled page when no drag).
-            if let document, let currentRange {
-                pageImage(document: document, range: currentRange)
-                    .overlay(curlShade)
-                    .offset(x: reading.pageTurnEffect == .slide ? drag : 0)
-                    .opacity(reading.pageTurnEffect == .fade ? Double(1 - dragProgress) : 1)
-                    .rotation3DEffect(
-                        .degrees(reading.pageTurnEffect == .curl ? Double(dragProgress * 80) * (isForward ? 1 : -1) : 0),
-                        axis: (x: 0, y: 1, z: 0),
-                        // The spine is on the left (left-to-right reading), so
-                        // every turning sheet hinges there: forward folds the
-                        // free (right) edge away from the reader, backward
-                        // brings it back toward them. Hinging the forward turn
-                        // on the trailing edge mirrored the motion and made the
-                        // curl run against the finger.
-                        anchor: .leading,
-                        perspective: reading.pageTurnEffect == .curl ? 0.45 : 0
-                    )
+                if let document, let currentRange {
+                    pageImage(document: document, range: currentRange)
+                        .offset(x: drag)
+                }
             }
         }
         .frame(width: box.width, height: box.height)
     }
 
-    @ViewBuilder
-    private var curlShade: some View {
-        if reading.pageTurnEffect == .curl, drag != 0 {
-            LinearGradient(
-                colors: [.black.opacity(0), .black.opacity(Double(dragProgress) * 0.35)],
-                startPoint: isForward ? .leading : .trailing,
-                endPoint: isForward ? .trailing : .leading
-            )
-            .allowsHitTesting(false)
-        }
+    private func neighborPageText(document: PagedDocument, forward: Bool) -> NSAttributedString? {
+        guard let index = neighbor(forward: forward) else { return nil }
+        return styledPage(document: document, range: pages[index])
     }
 
     private func pageImage(document: PagedDocument, range: NSRange) -> some View {
-        PageTextView(text: styledPage(document: document, range: range))
+        PageImage(attributed: styledPage(document: document, range: range))
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .clipped()
     }

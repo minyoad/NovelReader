@@ -107,7 +107,7 @@ struct PagedDocument {
 }
 
 /// Splits an attributed string into page-sized slices using CoreText. The very
-/// same framesetter output is what `PageTextView` draws, so the computed slices
+/// same framesetter output is what `PageImage` draws, so the computed slices
 /// never overflow or leave gaps.
 enum PageLayout {
     static func ranges(of attributed: NSAttributedString, in size: CGSize) -> [NSRange] {
@@ -148,53 +148,6 @@ enum PageLayout {
             return !piece.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
         return meaningful.isEmpty ? ranges : meaningful
-    }
-}
-
-/// Draws one page with CoreText so the glyphs land exactly where the paginator
-/// measured them.
-struct PageTextView: UIViewRepresentable {
-    let text: NSAttributedString
-
-    func makeUIView(context: Context) -> PageTextUIView {
-        let view = PageTextUIView()
-        view.backgroundColor = .clear
-        view.isOpaque = false
-        view.contentMode = .redraw
-        view.text = text
-        return view
-    }
-
-    func updateUIView(_ view: PageTextUIView, context: Context) {
-        view.text = text
-    }
-
-    final class PageTextUIView: UIView {
-        var text: NSAttributedString? {
-            didSet { setNeedsDisplay() }
-        }
-
-        override func draw(_ rect: CGRect) {
-            guard let context = UIGraphicsGetCurrentContext(),
-                  let text,
-                  text.length > 0,
-                  bounds.width > 0,
-                  bounds.height > 0 else { return }
-
-            context.textMatrix = .identity
-            context.translateBy(x: 0, y: bounds.height)
-            context.scaleBy(x: 1, y: -1)
-
-            let path = CGPath(rect: CGRect(origin: .zero, size: bounds.size), transform: nil)
-            let framesetter = CTFramesetterCreateWithAttributedString(text)
-            let frame = CTFramesetterCreateFrame(
-                framesetter,
-                CFRange(location: 0, length: 0),
-                path,
-                nil
-            )
-            CTFrameDraw(frame, context)
-        }
     }
 }
 #endif
