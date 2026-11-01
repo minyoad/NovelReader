@@ -1,0 +1,3 @@
+# Python 字节码（verify-tools.sh 会对 usbmux-bridge.py 跑 py_compile）
+__pycache__/
+*.pyc

@@ -41,4 +41,11 @@ echo "=== build + register + sign + install ==="
 # dev run 自己会构建，不需要先 build --sign。它内部的 signing 会把
 # targetDevice 带进去，这才是设备能进 profile 的原因。
 cd "$REPO_ROOT" || exit 1
-xtool-proxy dev run --udid "$TARGET" "$@"
+
+# --usb 不能省。默认的 --all 会同时枚举 USB 和 Network 设备，而 Network 那条
+# 是本机经 Bonjour 发现的对等连接（响应里带 NetworkAddress 和 IPv6 链路本地
+# 地址），WSL 的 NAT 网络到不了它，xtool 处理到该条目时会抛一个不带信息的
+# "Error: unknown"，整条命令直接失败——即使 USB 那台是好的。
+#
+# 这里只装 USB 上的设备：装机和注册都必须走 USB，任何设备最终都是插线完成的。
+xtool-proxy dev run --udid "$TARGET" --usb "$@"

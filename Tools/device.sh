@@ -20,9 +20,21 @@ DEVICE_COUNT=0
 PMD3_PY="${PMD3_PY:-$HOME/.venv-pmd3/bin/pymobiledevice3}"
 
 # usbmux 走 Windows 上 Apple 服务的转发端口，不设这个环境变量连不上。
-export USBMUXD_SOCKET_ADDRESS="$(
+#
+# 端口是 27016 而不是 Apple 自己的 27015：Apple 的 usbmuxd 只绑 127.0.0.1:27015，
+# 而 WSL 是 NAT 模式（Windows 10 没有镜像网络），必须由 Windows 侧转发进来。
+# 如果转发规则写成 `0.0.0.0:27015 → 127.0.0.1:27015`，监听地址会连同回环一起占掉
+# 27015，Apple 就绑不上，只能退到随机端口；结果是一条自环规则把 usbmuxd 整个打瘫，
+# 表现为「手机插着但 list 为空」外加成千上万条 TIME_WAIT。所以监听端口必须错开。
+#
+# 对应的 Windows 侧配置（管理员 PowerShell）：
+#   netsh interface portproxy add v4tov4 listenaddress=0.0.0.0 listenport=27016 \
+#     connectaddress=127.0.0.1 connectport=27015
+#   New-NetFirewallRule -DisplayName "WSL usbmuxd 27016" -Direction Inbound \
+#     -Action Allow -Protocol TCP -LocalPort 27016 -Profile Any
+export USBMUXD_SOCKET_ADDRESS="${USBMUXD_SOCKET_ADDRESS:-$(
   ip route show default | awk '{print $3; exit}'
-):27015"
+):27016}"
 
 # 已连接的设备，每行：UDID<TAB>名称<TAB>型号<TAB>连接方式
 #
@@ -183,5 +195,14 @@ PY
 # 这个区别决定了补救办法完全不同，所以不能笼统报“需要重新登录”。
 device_registered() {
   local udid="$1"
-  xtool ds devices list 2>/dev/null | grep -qi -- "$udid"
+  local attempt
+  # 这个列表要走 Apple 的接口，偶尔会返回被截断的结果。重试几次再下结论：
+  # 把「已注册」误判成「未注册」的代价是让人去重装、重登录，全都白费功夫。
+  for attempt in 1 2 3; do
+    if xtool ds devices list 2>/dev/null | grep -qi -- "$udid"; then
+      return 0
+    fi
+    [ "$attempt" -lt 3 ] && sleep 2
+  done
+  return 1
 }
