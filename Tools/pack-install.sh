@@ -63,10 +63,19 @@ echo "ipa: $OUT ($(stat -c%s "$OUT") bytes)"
 cd - >/dev/null
 
 echo "=== install ==="
-xtool install --udid "$TARGET" "$OUT" 2>&1 | tail -12
+# --usb 不能省，理由同 dev-run.sh：默认 --all 会去枚举 Network 设备，那条走
+# WSL 到不了的 IPv6 链路本地地址，xtool 处理到它时抛 Error: unknown，安装
+# 直接失败。失败时下面还会打印设备上的旧版本，看起来像装成功了。
+xtool install --udid "$TARGET" --usb "$OUT" 2>&1 | tail -12
 STATUS=${PIPESTATUS[0]}
 
 echo "=== verify ==="
+# 查的是设备上当前安装的版本，用来区分「装上了」和「装的还是上一个版本」。
+# 只有安装本身成功才值得看：安装失败时这里读到的是旧版本，容易被误读成
+# 安装成功。
+if [ "$STATUS" -ne 0 ]; then
+  echo "安装失败（exit $STATUS），下面是设备上残留的旧版本信息：" >&2
+fi
 # xtool 没有 query 子命令，查已安装版本仍走 pymobiledevice3。查不到不算失败：
 # 安装本身已经报告成功，只是版本信息读不出来。
 if [ -n "$BUNDLE_ID" ] && [ -x "$PMD3_PY" ]; then
