@@ -91,17 +91,29 @@ public enum TextDecoding {
         return nil
     }
 
+    /// `<meta charset=...>` / `content="text/html; charset=..."` 的探测。
+    ///
+    /// 匹配与取值都在同一个 `String` 上完成。曾经的写法是
+    /// `let range = head.lowercased().range(of: marker)` 然后 `head[range.upperBound...]`，
+    /// 这等于把 `lower` 的 `String.Index` 拿去索引 `head`。`String.Index` 只在
+    /// 生成它的那个字符串里有效：`head` 来自 `.isoLatin1` 解码（可能由 NSString
+    /// 支撑、按 UTF-16 偏移编码索引），`lowercased()` 的结果则是原生字符串（按
+    /// UTF-8 偏移）。两者一旦存储方式不同，同一个 Index 的数值含义就不同，
+    /// 越界后 `PartialRangeFrom.relative(to:)` 触发 precondition（EXC_BREAKPOINT）。
     private static func sniffMetaCharset(_ head: String) -> String? {
-        let lower = head.lowercased()
-        for marker in ["charset=\"", "charset='", "charset="] {
-            guard let range = lower.range(of: marker) else { continue }
-            let rest = head[range.upperBound...]
-            let terminators = CharacterSet(charactersIn: "\"' >;\r\n")
-            let value = rest.prefix { character in
-                character.unicodeScalars.allSatisfy { !terminators.contains($0) }
-            }
-            let trimmed = value.trimmingCharacters(in: .whitespaces)
-            if !trimmed.isEmpty { return trimmed }
+        guard let regex = RegexHelper.regex(
+            // "charset" [空白] "=" [空白] [引号] 值
+            "charset\\s*=\\s*[\"']?([^\"' >;\\r\\n]+)",
+            options: [.caseInsensitive]
+        ) else { return nil }
+
+        let source = head as NSString
+        let full = NSRange(location: 0, length: source.length)
+        for match in regex.matches(in: head, range: full) {
+            guard match.numberOfRanges > 1, match.range(at: 1).location != NSNotFound else { continue }
+            let value = source.substring(with: match.range(at: 1))
+                .trimmingCharacters(in: .whitespaces)
+            if !value.isEmpty { return value }
         }
         return nil
     }
