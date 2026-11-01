@@ -21,7 +21,21 @@ struct BookPreviewView: View {
     @State private var showAllIntro = false
     @State private var errorMessage: String?
 
+    /// Open while the user tries the book out.
+    @State private var showTrial = false
+    /// Set when a trial read ends, which is when the "keep it?" question is
+    /// asked. Asking before the trial would be asking blind, and asking inside
+    /// the reader would put a modal over a page that is closing anyway.
+    @State private var askToKeep = false
+    @State private var trialIndex = 0
+
     private var onShelf: Book? { app.bookOnShelf(for: result) }
+
+    /// A trial read opens a chapter, so it needs a TOC that has arrived.
+    private var canTrial: Bool {
+        guard let preview else { return false }
+        return !preview.chapters.isEmpty
+    }
 
     /// Shown while the network works, so the header is readable immediately
     /// instead of a spinner on an empty page.
@@ -99,14 +113,59 @@ struct BookPreviewView: View {
         .task {
             await load()
         }
-        .alert("出错了", isPresented: Binding(
-            get: { errorMessage != nil },
-            set: { if !$0 { errorMessage = nil } }
-        )) {
-            Button("知道了", role: .cancel) { errorMessage = nil }
-        } message: {
-            Text(errorMessage ?? "")
+        .fullScreenCover(isPresented: $showTrial, onDismiss: {
+            // The trial has closed: now ask. Doing it here rather than inside
+            // the reader means the question lands on the page the user came
+            // back to, over a screen that is staying put.
+            askToKeep = onShelf == nil
+        }) {
+            if let preview, !preview.chapters.isEmpty {
+                ReaderView(
+                    book: preview.book,
+                    app: app,
+                    startIndex: trialIndex,
+                    // Handing over the TOC marks this as a trial read: the
+                    // reader then skips progress saving and chapter caching.
+                    previewChapters: preview.chapters
+                )
+            }
         }
+        // One alert slot, two jobs. Two `.alert` modifiers on the same view do
+        // not both work: the later one replaces the earlier, and the "keep this
+        // book?" question — the whole point of the trial — would silently never
+        // appear.
+        .alert(alertTitle, isPresented: alertBinding) {
+            if askToKeep {
+                Button("加入书架") { Task { await add() } }
+                Button("先不要", role: .cancel) {}
+            } else {
+                Button("知道了", role: .cancel) { errorMessage = nil }
+            }
+        } message: {
+            Text(alertMessage)
+        }
+    }
+
+    // MARK: - Alerts
+
+    private var alertBinding: Binding<Bool> {
+        Binding(
+            get: { askToKeep || errorMessage != nil },
+            set: { showing in
+                guard !showing else { return }
+                askToKeep = false
+                errorMessage = nil
+            }
+        )
+    }
+
+    private var alertTitle: String {
+        askToKeep ? "要加入书架吗？" : "出错了"
+    }
+
+    private var alertMessage: String {
+        guard askToKeep else { return errorMessage ?? "" }
+        return "《\(displayed.name)》读到这里还不错的话，加入书架就能记住进度。"
     }
 
     // MARK: - Sections
@@ -209,17 +268,29 @@ struct BookPreviewView: View {
                 Spacer()
             }
             ForEach(chapters.prefix(3)) { chapter in
-                HStack {
-                    Text(chapter.title)
-                        .font(.subheadline)
-                        .lineLimit(1)
-                    Spacer()
-                    if chapter.isVIP {
-                        Image(systemName: "lock.fill")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
+                Button {
+                    // Tapping a chapter is the most direct way to judge a book:
+                    // try that one rather than opening the first page again.
+                    trialIndex = chapters.firstIndex(of: chapter) ?? 0
+                    showTrial = true
+                } label: {
+                    HStack {
+                        Text(chapter.title)
+                            .font(.subheadline)
+                            .lineLimit(1)
+                        Spacer()
+                        if chapter.isVIP {
+                            Image(systemName: "lock.fill")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                        Image(systemName: "play.circle")
+                            .font(.caption)
+                            .foregroundStyle(Palette.accent)
                     }
+                    .contentShape(Rectangle())
                 }
+                .buttonStyle(.plain)
                 Divider()
             }
             if chapters.count > 3 {
@@ -249,20 +320,38 @@ struct BookPreviewView: View {
             .padding(.vertical, 10)
             .background(.bar)
         } else {
-            Button {
-                Task { await add() }
-            } label: {
-                if isAdding {
-                    ProgressView()
-                        .frame(maxWidth: .infinity)
-                } else {
-                    Label("加入书架", systemImage: "plus.circle.fill")
+            HStack(spacing: 10) {
+                // Trial first, on the left, where the smaller of the two
+                // actions belongs: trying is a way of deciding, and joining is
+                // the decision.
+                Button {
+                    trialIndex = 0
+                    showTrial = true
+                } label: {
+                    Label("试读", systemImage: "book")
                         .frame(maxWidth: .infinity)
                 }
+                .buttonStyle(.bordered)
+                // A trial needs a body to open on: without a table of contents
+                // there is no first chapter, so offering the button would only
+                // lead to an empty reader.
+                .disabled(!canTrial)
+
+                Button {
+                    Task { await add() }
+                } label: {
+                    if isAdding {
+                        ProgressView()
+                            .frame(maxWidth: .infinity)
+                    } else {
+                        Label("加入书架", systemImage: "plus.circle.fill")
+                            .frame(maxWidth: .infinity)
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(Palette.accent)
+                .disabled(isAdding)
             }
-            .buttonStyle(.borderedProminent)
-            .tint(Palette.accent)
-            .disabled(isAdding)
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
             .background(.bar)
@@ -284,6 +373,8 @@ struct BookPreviewView: View {
         do {
             let book = try await app.addToShelf(result, preview: preview)
             app.showBanner("已加入书架：\(book.name)", isError: false)
+            // Staying on the preview would now show "已在书架" with no way
+            // forward but back, so leave with the book that was just saved.
             dismiss()
         } catch {
             errorMessage = error.localizedDescription

@@ -40,6 +40,14 @@ final class ReaderModel: ObservableObject {
     @Published var isCachingBook = false
     @Published var bookCacheProgress: Double?
     private let startIndexOverride: Int?
+    /// Chapters handed over by a preview screen.
+    ///
+    /// Non-nil means this reader is a trial read of a book that is not on the
+    /// shelf yet; see `ReadingMode` for what that forbids.
+    private let previewChapters: [Chapter]?
+
+    /// What this session may write back to the library.
+    let mode: ReadingMode
     private var prefetchTask: Task<Void, Never>?
     /// Keeps `ReaderModel` translating the speech controller's state changes.
     ///
@@ -50,12 +58,14 @@ final class ReaderModel: ObservableObject {
     /// changed and SwiftUI never redrew.
     private var speechObserver: AnyCancellable?
 
-    init(book: Book, app: AppModel, startIndex: Int? = nil) {
+    init(book: Book, app: AppModel, startIndex: Int? = nil, previewChapters: [Chapter]? = nil) {
         self.book = book
         self.app = app
         self.currentIndex = startIndex ?? book.progress.chapterIndex
         self.pendingOffset = startIndex == nil ? book.progress.characterOffset : 0
         self.startIndexOverride = startIndex
+        self.previewChapters = previewChapters
+        self.mode = ReadingMode(previewChapters: previewChapters)
 
         speech.attach(store: app.store)
         speech.configure(app.settings.tts)
@@ -115,7 +125,7 @@ final class ReaderModel: ObservableObject {
         isLoading = true
         defer { isLoading = false }
         do {
-            chapters = try await app.chapters(for: book)
+            chapters = try await loadChapterList()
             let preferred = startIndexOverride ?? book.progress.chapterIndex
             let startIndex = min(max(preferred, 0), max(chapters.count - 1, 0))
             currentIndex = startIndex
@@ -126,7 +136,21 @@ final class ReaderModel: ObservableObject {
         }
     }
 
+    /// The table of contents for this reader.
+    ///
+    /// A preview already fetched it, and it must not be written into the
+    /// library: the book is not on the shelf, so `chapters/<id>-toc.json` would
+    /// be a file nothing ever reads or cleans up.
+    private func loadChapterList() async throws -> [Chapter] {
+        if let previewChapters { return previewChapters }
+        return try await app.chapters(for: book)
+    }
+
     func reloadChapters() async {
+        guard mode.cachesChapters else {
+            showToast("试读时不能刷新目录，先加入书架")
+            return
+        }
         do {
             let fetched = try await app.chapters(for: book, forceReload: true)
             chapters = fetched
@@ -161,9 +185,18 @@ final class ReaderModel: ObservableObject {
 
         let chapter = chapters[index]
         do {
-            let fetched = try await app.chapterContent(book: book, chapter: chapter)
+            let fetched = try await app.chapterContent(
+                book: book,
+                chapter: chapter,
+                cache: mode.cachesChapters
+            )
             content = fetched
-            app.updateProgress(bookID: book.id, chapterIndex: index, chapterTitle: chapter.title, characterOffset: offset)
+            // A trial read has no shelf entry to record progress against: the
+            // book may never be added, and writing here would also bump
+            // `lastReadAt` and so change which book the app resumes.
+            if mode.recordsProgress {
+                app.updateProgress(bookID: book.id, chapterIndex: index, chapterTitle: chapter.title, characterOffset: offset)
+            }
             if shouldSpeak {
                 // Name the chapter before playback starts, so the Lock Screen
                 // never shows the previous one even for a moment.
@@ -174,7 +207,9 @@ final class ReaderModel: ObservableObject {
                 // pausing.
                 startSpeaking(autoPlay: !wasPaused)
             }
-            schedulePrefetch()
+            // Nothing to prefetch for a trial read: those downloads would be
+            // cached files belonging to a book that is not on the shelf.
+            if mode.cachesChapters { schedulePrefetch() }
         } catch {
             content = nil
             errorMessage = error.localizedDescription
@@ -221,6 +256,13 @@ final class ReaderModel: ObservableObject {
     }
 
     func refreshCacheStats() async {
+        // Everything cache-related is keyed by book id, and a trial read has no
+        // shelf entry to key it on: reporting counts here would show whatever
+        // happens to share that id, which is nothing.
+        guard mode.cachesChapters else {
+            cachedChapterCount = 0
+            return
+        }
         cachedChapterCount = await app.store.cachedChapterCount(bookID: book.id)
     }
 
@@ -248,6 +290,10 @@ final class ReaderModel: ObservableObject {
     /// Downloads every chapter of the book; used by the "缓存全本" action.
     func cacheWholeBook() async {
         guard !isCachingBook, !chapters.isEmpty else { return }
+        guard mode.cachesChapters else {
+            showToast("试读时不能缓存，先加入书架")
+            return
+        }
         isCachingBook = true
         bookCacheProgress = 0
         defer {
@@ -298,7 +344,9 @@ final class ReaderModel: ObservableObject {
     /// Re-downloads the current chapter, discarding any cached copy.
     func redownloadChapter() async {
         guard let chapter = currentChapter else { return }
-        await app.store.deleteContent(bookID: book.id, chapterURL: chapter.url)
+        if mode.cachesChapters {
+            await app.store.deleteContent(bookID: book.id, chapterURL: chapter.url)
+        }
         await loadChapter(at: currentIndex, offset: pendingOffset)
     }
 
@@ -343,6 +391,10 @@ final class ReaderModel: ObservableObject {
     /// Loads every other source that has this book, without probing the body
     /// yet, so the sheet can list candidates quickly.
     func loadSourceCandidates() async {
+        guard mode.canSwitchSource else {
+            showToast("试读时不能换源，先加入书架")
+            return
+        }
         guard !isSearchingSources else { return }
         isSearchingSources = true
         defer { isSearchingSources = false }
@@ -383,6 +435,10 @@ final class ReaderModel: ObservableObject {
 
     /// Applies a source switch, reopens the same chapter and retries loading.
     func applySourceSwitch(_ result: SearchResult) async {
+        guard mode.canSwitchSource else {
+            showToast("试读时不能换源，先加入书架")
+            return
+        }
         isLoading = true
         defer { isLoading = false }
         do {
@@ -486,6 +542,7 @@ final class ReaderModel: ObservableObject {
     }
 
     private func saveProgressFromSpeech() {
+        guard mode.recordsProgress else { return }
         guard let text = content?.text else { return }
         let offset = speech.characterOffset(ofSentence: currentSentenceIndex, in: text)
         app.updateProgress(bookID: book.id, chapterIndex: currentIndex, chapterTitle: currentChapter?.title ?? "", characterOffset: offset)
@@ -513,7 +570,11 @@ final class ReaderModel: ObservableObject {
                 Task { @MainActor in self?.aiProgress = progress }
             }
             self.content = cleaned
-            app.persistContent(cleaned, for: book)
+            // A trial read keeps the cleanup in memory only: writing it would
+            // create a chapter file for a book the library does not know about.
+            if mode.cachesChapters {
+                app.persistContent(cleaned, for: book)
+            }
             app.showBanner("AI 整理完成：\(task.title)", isError: false)
             showToast("AI 整理完成：\(task.title)")
         } catch {
@@ -531,7 +592,9 @@ final class ReaderModel: ObservableObject {
         }
         let restored = content.restored()
         self.content = restored
-        app.persistContent(restored, for: book)
+        if mode.cachesChapters {
+            app.persistContent(restored, for: book)
+        }
         showToast("已还原为站点原文")
     }
 
@@ -554,6 +617,9 @@ final class ReaderModel: ObservableObject {
     }
 
     func saveProgress(characterOffset: Int = 0) {
+        // A trial read records nothing: there is no shelf entry, and progress
+        // written against a book that was never added is invisible forever.
+        guard mode.recordsProgress else { return }
         guard let chapter = currentChapter else { return }
         app.updateProgress(
             bookID: book.id,

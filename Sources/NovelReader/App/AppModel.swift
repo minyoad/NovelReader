@@ -599,8 +599,13 @@ final class AppModel: ObservableObject {
         return chapters
     }
 
-    func chapterContent(book: Book, chapter: Chapter) async throws -> ChapterContent {
-        if let cached = await store.loadContent(bookID: book.id, chapterURL: chapter.url) {
+    /// Fetches one chapter body.
+    ///
+    /// `cache: false` is what a trial read passes: the book is not on the shelf,
+    /// so writing the body to disk would leave a chapter file for a book the
+    /// library does not know about, and nothing would ever expire it.
+    func chapterContent(book: Book, chapter: Chapter, cache: Bool = true) async throws -> ChapterContent {
+        if cache, let cached = await store.loadContent(bookID: book.id, chapterURL: chapter.url) {
             // Older builds cached whatever the site returned, including
             // "内容正在获取中，稍候重试" paywall stubs. Drop those instead of
             // showing them as prose.
@@ -622,7 +627,9 @@ final class AppModel: ObservableObject {
             }
             content = try await engine.fetchContent(book: book, chapter: chapter, source: source)
         }
-        await store.saveContent(content, bookID: book.id)
+        if cache {
+            await store.saveContent(content, bookID: book.id)
+        }
         return content
     }
 

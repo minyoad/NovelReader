@@ -25,8 +25,21 @@ struct ReaderView: View {
     /// title on the single line at the top.
     @State private var pageIndicator = ""
 
-    init(book: Book, app: AppModel, startIndex: Int? = nil) {
-        _model = StateObject(wrappedValue: ReaderModel(book: book, app: app, startIndex: startIndex))
+    /// - Parameter previewChapters: the table of contents a preview already
+    ///   fetched. Passing it turns this into a trial read of a book that is not
+    ///   on the shelf: see `ReadingMode`.
+    init(
+        book: Book,
+        app: AppModel,
+        startIndex: Int? = nil,
+        previewChapters: [Chapter]? = nil
+    ) {
+        _model = StateObject(wrappedValue: ReaderModel(
+            book: book,
+            app: app,
+            startIndex: startIndex,
+            previewChapters: previewChapters
+        ))
     }
 
     private var theme: Theme {
@@ -70,7 +83,7 @@ struct ReaderView: View {
                         ReaderTopBar(
                             model: model,
                             theme: theme,
-                            onClose: { dismiss() },
+                            onClose: leaveBook,
                             onShowTOC: { showTOC = true },
                             onShowSettings: { showSettings = true },
                             onShowCache: { showCacheSheet = true }
@@ -79,6 +92,7 @@ struct ReaderView: View {
                         ChapterHeaderTitle(
                             title: model.currentChapter?.title,
                             pageIndicator: pageIndicator,
+                            isPreview: model.mode == .preview,
                             theme: theme,
                             horizontalPadding: app.settings.reading.horizontalPadding
                         )
@@ -123,6 +137,25 @@ struct ReaderView: View {
                         .padding(.bottom, 120)
                         .transition(.opacity)
                 }
+            }
+
+            // The back gesture lives in its own strip rather than on the whole
+            // view: a drag gesture laid over the content competes with the
+            // scroll view and the page-turn gesture underneath it, and losing
+            // that competition fails silently. A narrow strip on the left edge
+            // exists only while the bars are up, which is exactly when the
+            // gesture is meant to work — and it cannot steal a page turn,
+            // because `PagedReader` already ignores edge drags in that state.
+            if model.showBars {
+                HStack(spacing: 0) {
+                    Color.clear
+                        .frame(width: ReaderSwipe.edgeWidth)
+                        .contentShape(Rectangle())
+                        .gesture(swipeBackGesture)
+                    Spacer(minLength: 0)
+                }
+                .ignoresSafeArea()
+                .transition(.opacity)
             }
         }
         .statusBarHidden(!model.showBars)
@@ -178,6 +211,26 @@ struct ReaderView: View {
             model.stopBackgroundWork()
             app.saveSettings()
         }
+    }
+
+    /// Reading leaves through the same door as the close button, including when
+    /// playback is running: dismissing the reader without stopping the audio
+    /// would keep talking over the shelf.
+    private func leaveBook() {
+        model.stopBackgroundWork()
+        dismiss()
+    }
+
+    private var swipeBackGesture: some Gesture {
+        DragGesture(minimumDistance: ReaderSwipe.minimumDistance, coordinateSpace: .local)
+            .onEnded { value in
+                guard ReaderSwipe.isBackSwipe(
+                    startX: value.startLocation.x,
+                    translation: value.translation,
+                    barsVisible: model.showBars
+                ) else { return }
+                leaveBook()
+            }
     }
 }
 
@@ -362,6 +415,10 @@ private struct ChapterHeaderTitle: View {
     let title: String?
     /// `3/12` within the chapter, empty in scroll mode where there are no pages.
     let pageIndicator: String
+    /// Trial reads are labelled here: the page is otherwise identical to a
+    /// shelf book's, and "was this saved?" is the one thing a reader needs to
+    /// know while deciding.
+    var isPreview: Bool = false
     let theme: Theme
     /// Lines the title up with the body text instead of centring it: a centred
     /// line above a left-aligned page reads as a label, not as part of the page.
@@ -376,6 +433,13 @@ private struct ChapterHeaderTitle: View {
                 .truncationMode(.middle)
 
             Spacer(minLength: 8)
+
+            if isPreview {
+                Text("试读")
+                    .font(.caption2)
+                    .foregroundStyle(theme.accent)
+                    .fixedSize()
+            }
 
             if !pageIndicator.isEmpty {
                 Text(pageIndicator)
@@ -421,6 +485,13 @@ private struct ReaderTopBar: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .layoutPriority(1)
 
+            if model.mode == .preview {
+                Text("试读")
+                    .font(.caption2)
+                    .foregroundStyle(theme.accent)
+                    .fixedSize()
+            }
+
             Menu {
                 Button {
                     onShowTOC()
@@ -433,6 +504,7 @@ private struct ReaderTopBar: View {
                 } label: {
                     Label("换源", systemImage: "arrow.left.arrow.right")
                 }
+                .disabled(model.mode != .shelf)
 
                 Button {
                     onShowCache()
@@ -442,6 +514,7 @@ private struct ReaderTopBar: View {
                         systemImage: "arrow.down.circle"
                     )
                 }
+                .disabled(model.mode != .shelf)
 
                 SwiftUI.Section("AI 整理") {
                     ForEach(AIPrompt.ChapterTask.allCases) { task in
@@ -601,6 +674,8 @@ private struct ReaderBottomBar: View {
             ) {
                 onShowCache()
             }
+            .disabled(model.mode != .shelf)
+            .opacity(model.mode == .preview ? 0.35 : 1)
 
             ReaderBarButton(title: "下一章", systemImage: "forward.end", theme: theme) {
                 Task { await model.goNextChapter() }

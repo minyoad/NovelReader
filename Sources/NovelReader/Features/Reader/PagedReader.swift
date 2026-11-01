@@ -259,10 +259,23 @@ struct PagedReader: View {
 
     // MARK: - Gesture
 
+    /// True when a drag starting at `x` is the reader's back gesture rather than
+    /// a page turn, so page turning keeps its hands off it.
+    ///
+    /// Only while the bars are visible: in full-screen reading an edge drag is
+    /// just a page turn, and stealing it would make the first page of every
+    /// chapter impossible to swipe away from.
+    private func isBackSwipeOrigin(_ x: CGFloat) -> Bool {
+        ReaderSwipe.claimsEdge(startX: x, barsVisible: model.showBars)
+    }
+
     private func turnGesture(box: CGSize) -> some Gesture {
         DragGesture(minimumDistance: 8)
             .onChanged { value in
                 guard !isAnimating, !pages.isEmpty, box.width > 20 else { return }
+                // An edge drag while the bars are up is leaving the book; turning
+                // a page underneath it would move the reader before it vanished.
+                guard !isBackSwipeOrigin(value.startLocation.x) else { return }
                 pagesWidth = box.width
                 let dx = value.translation.width
                 guard abs(dx) > abs(value.translation.height) else { return }
@@ -271,6 +284,7 @@ struct PagedReader: View {
             }
             .onEnded { value in
                 guard !isAnimating, box.width > 20 else { return }
+                guard !isBackSwipeOrigin(value.startLocation.x) else { return }
                 let width = box.width
                 let dx = value.translation.width
                 let progress = abs(drag) / width
