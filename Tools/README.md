@@ -83,17 +83,25 @@ bash Tools/verify-tools.sh     # 桥接、xtool 视角、账号注册、profile 
 | --- | --- |
 | `Tools/device.sh` | 设备发现（`list_devices`）、选择（`select_udid`）、bundle id 读取、`profile_covers`、`device_registered` |
 | `Tools/pack-install.sh` | 把已签名的 `.app` 打成 ipa 并安装（设备须已注册且 profile 已含它） |
-| `Tools/deploy.sh` | 安装 xtool 暂存目录里现成的 `app.ipa` |
+| `Tools/deploy.sh` | 安装 xtool 暂存目录里现成的 `app.ipa`（已签名走 pymobiledevice3，未签名走 xtool） |
 | `Tools/dev-run.sh` | **新设备用这个**：注册 + 签名 + 安装一条命令 |
 | `Tools/login-apple.sh` | 交互式 Apple 登录（只刷新 token，不会注册设备） |
 | `Tools/fix-device-link.sh` | 重建 WSL→Windows 的 usbmuxd 通道并验证 |
 | `Tools/usbmux-bridge.py` | unix socket → TCP 的双向转发，由上一个脚本启动 |
 | `Tools/verify-tools.sh` | 不装机的自检 |
 
-设备枚举用 `pymobiledevice3 usbmux list` 的 JSON，不解析 `xtool devices` 的表格文本：JSON 字段有名字，xtool 改排版也不会静默匹配不到设备。安装本身用 xtool 自带的 `xtool install --udid`。
+设备枚举用 `pymobiledevice3 usbmux list` 的 JSON，不解析 `xtool devices` 的表格文本：JSON 字段有名字，xtool 改排版也不会静默匹配不到设备。安装走哪条路取决于包有没有签过名，见下面第一条。
 
 ## 几个容易踩的点
 
+- **已签名的包不能走 `xtool install`**。它会对传入的包再签一次，签名产物本来就带团队前缀，于是叠成两层并当作一个全新应用安装：
+
+  ```
+  XTL-4JBQYZ7D5X.com.yang.NovelReader                  ← 本来那个
+  XTL-4JBQYZ7D5X.XTL-4JBQYZ7D5X.com.yang.NovelReader   ← xtool install 造出来的
+  ```
+
+  两个 App 的容器各自独立，桌面却是同名图标，卸掉任何一个都会丢书。所以 `pack-install.sh` 和 `deploy.sh` 对已签名的包一律改用 `pymobiledevice3 apps install`（走 installation_proxy，原样交给设备，同 id 就地替换、容器保留）。未签名的包反过来必须交给 xtool，签名是它负责的。这也是 `pack-install.sh` 开头会拦住双层前缀产物的原因。
 - **`--usb` 不能省**。`xtool devices` / `dev run` 默认 `--all`，会同时枚举 USB 和 Network 设备。Network 那条是 Bonjour 发现的对等连接，响应里带 `NetworkAddress` 和 IPv6 链路本地地址，WSL 的 NAT 到不了，xtool 处理到该条目时抛一个不带任何信息的 `Error: unknown`，整条命令失败——哪怕 USB 那台是好的。表现极具误导性：`xtool devices --usb` 正常，不加参数就报错。
 - **27015 不能直接转发**。`netsh portproxy` 把 `0.0.0.0:27015` 转到 `127.0.0.1:27015` 会把回环地址一起占掉，Apple 的 usbmuxd 绑不上 27015，只能退到随机端口，整条通道静默失效。残留证据是 27015 上堆着上万条 TIME_WAIT，而 `AppleMobileDeviceProcess` 不监听任何 TCP 端口。监听端口必须错开（这里用 27016）。这个故障重启电脑能暂时绕过，但规则还在，下次 Apple 服务重启就会复发。
 - **WSL 自带的 usbmuxd 必须让位**。它占着 `/var/run/usbmuxd`，但看不到任何 USB 设备。不停掉它，桥接就起不来。

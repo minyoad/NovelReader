@@ -26,6 +26,25 @@ BUNDLE_ID=$(app_bundle_id "$APP")
 echo "=== device ==="
 echo "$TARGET"
 
+# 已签名的产物再走一次 `xtool install`，会在这个前缀之上再叠一层，
+# 变成一个「新」应用：
+#
+#   XTL-4JBQYZ7D5X.com.yang.NovelReader            ← 正常
+#   XTL-4JBQYZ7D5X.XTL-4JBQYZ7D5X.com.yang.NovelReader  ← 二次前缀
+#
+# 两者的数据显示不同步：新装的那个是空容器，老的那个还在，桌面上于是
+# 出现两个同名「夜读」，各自有各自的书架和进度。卸掉任何一个都丢数据。
+# 这里提前挡住：前缀出现两次就说明产物不是 --sign 的直出物。
+case "$BUNDLE_ID" in
+  *XTL-*XTL-*)
+    echo "产物 bundle id 带了两层团队前缀：$BUNDLE_ID" >&2
+    echo "这说明它被签名过一次之后又拿去 install 了一次，装上去会变成第二个 App。" >&2
+    echo "重新从干净产物构建：" >&2
+    echo "  cd $REPO_ROOT && xtool-proxy dev build --sign" >&2
+    exit 4
+    ;;
+esac
+
 # 授权文件不包含这台设备时，安装一定会失败，而且报错看不出原因。提前说清楚，
 # 并给出补救步骤。
 profile_covers "$TARGET" "$APP"
@@ -63,10 +82,22 @@ echo "ipa: $OUT ($(stat -c%s "$OUT") bytes)"
 cd - >/dev/null
 
 echo "=== install ==="
-# --usb 不能省，理由同 dev-run.sh：默认 --all 会去枚举 Network 设备，那条走
-# WSL 到不了的 IPv6 链路本地地址，xtool 处理到它时抛 Error: unknown，安装
-# 直接失败。失败时下面还会打印设备上的旧版本，看起来像装成功了。
-xtool install --udid "$TARGET" --usb "$OUT" 2>&1 | tail -12
+# 不用 `xtool install`：它会对传入的包再做一次签名，而 --sign 出来的产物
+# bundle id 已经带团队前缀，于是被加上第二层前缀，变成一个「新」应用独立安装：
+#
+#   XTL-4JBQYZ7D5X.com.yang.NovelReader                 ← 本来那个
+#   XTL-4JBQYZ7D5X.XTL-4JBQYZ7D5X.com.yang.NovelReader  ← xtool install 造出来的
+#
+# 两个 App 容器各自独立，桌面上却是同名图标，卸掉任何一个都会丢书。
+#
+# pymobiledevice3 走 installation_proxy，只把包原样交给设备，不做签名，
+# 同一 bundle id 就地替换，容器保留。签名仍由 `dev build --sign` 负责。
+if [ ! -x "$PMD3_PY" ]; then
+  echo "找不到 pymobiledevice3：$PMD3_PY" >&2
+  echo "装包要用它（xtool install 会给已签名产物叠第二层前缀，见上面的注释）。" >&2
+  exit 5
+fi
+"$PMD3_PY" apps install --udid "$TARGET" "$OUT" 2>&1 | tail -12
 STATUS=${PIPESTATUS[0]}
 
 echo "=== verify ==="
@@ -81,6 +112,30 @@ fi
 if [ -n "$BUNDLE_ID" ] && [ -x "$PMD3_PY" ]; then
   "$PMD3_PY" apps query --udid "$TARGET" "$BUNDLE_ID" 2>/dev/null \
     | grep -E 'CFBundleDisplayName|CFBundleIdentifier|CFBundleVersion' | head -5
+fi
+
+if [ "$STATUS" -eq 0 ] && [ -x "$PMD3_PY" ]; then
+  # 设备上同时存在多个 NovelReader 时，安装只会更新与 bundle id 完全相同的
+  # 那一个，另一个继续留在桌面上。两个同名图标各自有独立容器，数据不同步，
+  # 用户很难看出点的是哪一个，所以装完就报出来。
+  DUPES=$("$PMD3_PY" apps list --udid "$TARGET" 2>/dev/null | python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+ids = [b for b in data if "NovelReader" in b]
+if len(ids) > 1:
+    for b in sorted(ids):
+        print("  " + b)
+' 2>/dev/null)
+
+  if [ -n "$DUPES" ]; then
+    echo
+    echo "注意：设备上有多个夜读，桌面会显示成同名图标，各自数据独立：" >&2
+    echo "$DUPES" >&2
+    echo "只保留一个：$PMD3_PY apps uninstall <不要的那个 bundle id>" >&2
+  fi
 fi
 
 exit "$STATUS"

@@ -64,3 +64,30 @@ if picked=$(select_udid); then
 else
   echo "没有唯一设备可测"
 fi
+
+echo
+echo "=== 装机路径 ==="
+# pack-install.sh 装的是 --sign 直出物，必须走 pymobiledevice3：交给 xtool install
+# 会被再签一次，前缀叠成两层，装出第二个同名 App。
+if grep -qE '^[[:space:]]*xtool[[:space:]].*install' pack-install.sh; then
+  echo "pack-install.sh 里有会被执行的 xtool install → 会叠第二层前缀，应改用 pymobiledevice3"
+else
+  echo "pack-install.sh 走 pymobiledevice3 ok"
+fi
+
+if [ -x "$PMD3_PY" ] && [ -n "${picked:-}" ]; then
+  dupes=$("$PMD3_PY" apps list --udid "$picked" 2>/dev/null | python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+ids = [b for b in data if "NovelReader" in b]
+print(len(ids))
+if len(ids) > 1:
+    for b in sorted(ids):
+        print("  " + b)
+')
+  echo "设备上的夜读数量: $(printf '%s\n' "$dupes" | head -1)"
+  printf '%s\n' "$dupes" | tail -n +2
+fi
