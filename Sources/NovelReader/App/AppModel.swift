@@ -235,51 +235,37 @@ final class AppModel: ObservableObject {
 
     @discardableResult
     func importSources(fromJSON text: String) -> (added: Int, warnings: [String]) {
-        do {
-            let result = try LegadoImporter.importSources(fromJSON: text)
-            var existingURLs = Set(sources.map { $0.baseURL })
-            var added = 0
-            for var source in result.sources {
-                if existingURLs.contains(source.baseURL) {
-                    // Refresh the existing entry instead of duplicating the site.
-                    if let index = sources.firstIndex(where: { $0.baseURL == source.baseURL }) {
-                        source.id = sources[index].id
-                        source.isBuiltIn = sources[index].isBuiltIn
-                        sources[index] = source
-                    }
-                } else {
-                    sources.append(source)
-                    existingURLs.insert(source.baseURL)
-                    added += 1
-                }
-            }
-            persistSources()
-            return (added, result.warnings)
-        } catch {
-            return (0, [error.localizedDescription])
+        guard let data = text.data(using: .utf8) else {
+            return (0, ["书源文本编码无法识别"])
         }
+        return importSources(from: data)
     }
 
+    /// Imports a legado bundle and merges it into the shelf.
+    ///
+    /// Sources are matched by `baseURL`, so re-importing the same collection
+    /// refreshes the rules in place instead of piling up duplicates — that
+    /// matters here because collections are re-downloaded whenever the site
+    /// re-verifies them.
     @discardableResult
     func importSources(from data: Data) -> (added: Int, warnings: [String]) {
         do {
             let result = try LegadoImporter.importSources(from: data)
-            var existingURLs = Set(sources.map { $0.baseURL })
             var added = 0
             for var source in result.sources {
-                if existingURLs.contains(source.baseURL) {
-                    if let index = sources.firstIndex(where: { $0.baseURL == source.baseURL }) {
-                        source.id = sources[index].id
-                        source.isBuiltIn = sources[index].isBuiltIn
-                        sources[index] = source
-                    }
+                if let index = sources.firstIndex(where: { $0.baseURL == source.baseURL }) {
+                    // Refresh in place: keep the identity (books point at it)
+                    // and whatever the user chose about enabling it.
+                    source.id = sources[index].id
+                    source.isBuiltIn = sources[index].isBuiltIn
+                    source.enabled = sources[index].enabled
+                    sources[index] = source
                 } else {
                     sources.append(source)
-                    existingURLs.insert(source.baseURL)
                     added += 1
                 }
             }
-            persistSources()
+            if added > 0 { persistSources() }
             return (added, result.warnings)
         } catch {
             return (0, [error.localizedDescription])
@@ -313,6 +299,16 @@ final class AppModel: ObservableObject {
 
     func source(for book: Book) -> BookSource? {
         sources.first { $0.id == book.sourceID }
+    }
+
+    // MARK: - Collections
+
+    /// Browse the online 书源合集 list.
+    ///
+    /// Kept here rather than in the view so the network client (with its cookie
+    /// jar and timeout settings) stays the app's single entry point.
+    func collectionClient() -> SourceCollectionClient {
+        SourceCollectionClient(client: client)
     }
 
     // MARK: - Search

@@ -10,6 +10,7 @@ struct SourcesView: View {
 
     @State private var showImport = false
     @State private var showURLImport = false
+    @State private var showCollections = false
     @State private var editingSource: BookSource?
     @State private var lastWarnings: [String] = []
     @State private var showWarnings = false
@@ -68,6 +69,11 @@ struct SourcesView: View {
 
                 Section {
                     Button {
+                        showCollections = true
+                    } label: {
+                        Label("浏览在线书源合集", systemImage: "square.grid.2x2")
+                    }
+                    Button {
                         showImport = true
                     } label: {
                         Label("粘贴书源 JSON", systemImage: "doc.on.clipboard")
@@ -110,6 +116,9 @@ struct SourcesView: View {
                     report(result)
                     return result
                 }
+            }
+            .sheet(isPresented: $showCollections) {
+                SourceCollectionsView()
             }
             .sheet(isPresented: $showURLImport) {
                 ImportFromURLSheet { data in
