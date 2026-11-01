@@ -189,17 +189,16 @@ final class SpeechController: NSObject, ObservableObject {
 
     /// Names what is being read in the system UI.
     ///
-    /// The system card shows the book and the sentence, not the chapter: the
-    /// reader itself already shows the chapter title above the text, so the
-    /// locked-screen glance is better spent on "what book" and "what line" than
-    /// on repeating the heading. The sentence arrives separately through
-    /// `setSubtitle` because it changes every few seconds.
+    /// The card shows the book on the title line and, once playback starts, the
+    /// sentence on the second line. The author is carried but yields that line
+    /// to the sentence — see `NowPlayingCenter.push()`. The sentence arrives
+    /// separately through `setSubtitle` because it changes every few seconds.
     func describe(bookTitle: String, author: String, artworkURL: String?) {
         trackInfo = NowPlayingCenter.Track(
             title: bookTitle,
             artist: author,
-            // The third line is reserved for the sentence, so it deliberately
-            // starts empty rather than falling back to the chapter title.
+            // Unused by the system card; kept empty rather than overloaded
+            // with the chapter title, which nothing would display.
             album: "",
             artworkURL: artworkURL
         )
@@ -373,9 +372,10 @@ final class SpeechController: NSObject, ObservableObject {
     /// as a blank Now Playing card, which looks like a bug.
     private func publishNowPlaying() {
         guard !trackInfo.title.isEmpty else { return }
-        // The sentence is only worth showing while it is being read: on the Lock
-        // Screen it is the "now playing" line, and a stale one after stopping
-        // would describe something no longer happening.
+        // The sentence takes the second line only while it is being read: on
+        // the Lock Screen that line is the "now playing" detail, and a stale
+        // one after stopping would describe something no longer happening. When
+        // it is empty the line falls back to the author.
         nowPlaying.setSubtitle(isActive ? (currentSentence ?? "") : "")
         nowPlaying.update(
             elapsed: timeline.elapsed(before: currentIndex, atRate: settings.rate),

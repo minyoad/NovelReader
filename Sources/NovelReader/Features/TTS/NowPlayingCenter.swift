@@ -20,6 +20,11 @@ final class NowPlayingCenter {
     struct Track: Equatable {
         var title: String
         var artist: String
+        /// Not rendered by the system Now Playing card.
+        ///
+        /// The card draws only the title and the artist/subtitle lines. This
+        /// field exists for completeness and for anything that reads the full
+        /// media item; do not put information here expecting it to be seen.
         var album: String
         var artworkURL: String?
 
@@ -160,10 +165,12 @@ final class NowPlayingCenter {
 
     /// The sentence currently being read.
     ///
-    /// Shown as the subtitle on the Lock Screen and in Control Center, which is
-    /// where a glance at the sentence belongs: the reader highlights it in the
-    /// page, so repeating it in the app bar would be redundant. It changes on
-    /// every sentence, which is why it is separate from `setTrack`.
+    /// Becomes the second line of the system card, replacing the author while
+    /// reading. That line is the only one the card gives up for detail, so it
+    /// goes to the sentence: the reader already shows the chapter heading and
+    /// highlights the sentence in the page, but neither is visible on a locked
+    /// screen. Changes on every sentence, which is why it is separate from
+    /// `setTrack`.
     func setSubtitle(_ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed != subtitle else { return }
@@ -199,7 +206,6 @@ final class NowPlayingCenter {
     private func push() {
         var info: [String: Any] = [
             MPMediaItemPropertyTitle: track.title,
-            MPMediaItemPropertyArtist: track.artist,
             // Audio, not music, so the system does not offer Apple Music
             // specific actions in contexts that read this field.
             MPNowPlayingInfoPropertyMediaType: MPNowPlayingInfoMediaType.audio.rawValue,
@@ -211,12 +217,23 @@ final class NowPlayingCenter {
             MPNowPlayingInfoPropertyDefaultPlaybackRate: 1.0,
         ]
 
-        // The third line is the sentence being read; the album (the book) is
-        // already part of the artist line, so the subtitle is the more useful
-        // use of it. Falls back to the album when nothing is being read.
-        let thirdLine = subtitle.isEmpty ? track.album : subtitle
-        if !thirdLine.isEmpty {
-            info[MPMediaItemPropertyAlbumTitle] = thirdLine
+        // The system Now Playing card renders exactly two lines of text: the
+        // title and the artist/subtitle. Album is *not* drawn there — it only
+        // surfaces in apps like Music that read it themselves — so putting the
+        // sentence in `MPMediaItemPropertyAlbumTitle` publishes it to a field
+        // nobody displays, and the Lock Screen shows the book and author with
+        // no indication of what is being read.
+        //
+        // So the two rendered lines are spent on: what book, and what is being
+        // read right now. The author moves to the album field, where it does
+        // not cost one of the visible lines, and takes the second line back
+        // when nothing is being read.
+        let secondLine = subtitle.isEmpty ? track.artist : subtitle
+        if !secondLine.isEmpty {
+            info[MPMediaItemPropertyArtist] = secondLine
+        }
+        if !track.artist.isEmpty {
+            info[MPMediaItemPropertyAlbumTitle] = track.artist
         }
 
         if let artwork {
