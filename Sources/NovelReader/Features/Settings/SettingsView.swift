@@ -401,7 +401,7 @@ private struct RuleDocsView: View {
         ("正则替换", "规则##\\\\s+##"),
         ("变量", "搜索地址里的 {{key}}、{{page}}"),
         ("正文", "规则配上 @html 可以保留段落结构"),
-        ("不支持", "@js: 与 <js> 规则会被跳过"),
+        ("不支持", "@js: 与 <js> 不执行；影响范围会标在书源列表里"),
     ]
 
     var body: some View {

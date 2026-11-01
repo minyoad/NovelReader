@@ -51,19 +51,17 @@ struct SearchView: View {
                             .foregroundStyle(.tertiary)
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                case .finished(let count, let failed):
+                case .finished(let count, let failed, let skipped):
                     if app.searchResults.isEmpty {
                         VStack(spacing: 10) {
                             EmptyStateView(
                                 title: "没有找到结果",
-                                message: failed.isEmpty
-                                    ? "换个关键词试试，或者先在「书源」里添加更多书源。"
-                                    : "这些书源搜索失败：\(failed.joined(separator: "、"))",
+                                message: emptyResultMessage(failed: failed, skipped: skipped),
                                 systemImage: "questionmark.folder"
                             )
                         }
                     } else {
-                        resultsList(failed: failed, count: count)
+                        resultsList(failed: failed, skipped: skipped, count: count)
                     }
                 case .failed(let message):
                     EmptyStateView(title: "搜索失败", message: message, systemImage: "wifi.exclamationmark")
@@ -118,7 +116,26 @@ struct SearchView: View {
         return "将在 \(activeSources.count) 个书源中搜索。试试「长夜灯下」。"
     }
 
-    private func resultsList(failed: [String], count: Int) -> some View {
+    /// What to say when nothing came back.
+    ///
+    /// `skipped` is called out separately from `failed`: a JavaScript-only
+    /// search rule is permanent, so telling the user their network might be
+    /// flaky would be actively misleading.
+    private func emptyResultMessage(failed: [String], skipped: [String]) -> String {
+        var parts: [String] = []
+        if !skipped.isEmpty {
+            parts.append("\(skipped.joined(separator: "、")) 的搜索规则是纯 JavaScript，本应用无法执行。")
+        }
+        if !failed.isEmpty {
+            parts.append("这些书源搜索失败：\(failed.joined(separator: "、"))。")
+        }
+        if parts.isEmpty {
+            return "换个关键词试试，或者先在「书源」里添加更多书源。"
+        }
+        return parts.joined(separator: "\n")
+    }
+
+    private func resultsList(failed: [String], skipped: [String], count: Int) -> some View {
         List {
             Section {
                 ForEach(app.searchResults) { result in
@@ -132,6 +149,14 @@ struct SearchView: View {
                         Text("\(failed.count) 个书源失败")
                             .foregroundStyle(.orange)
                     }
+                }
+            } footer: {
+                if !skipped.isEmpty {
+                    // Shown with the results, not only when the search comes up
+                    // empty: this is why one of the sources returned nothing, and
+                    // it stays true for every future search.
+                    Text("\(skipped.joined(separator: "、")) 的搜索规则是纯 JavaScript，本应用无法执行，已在「书源」里标出。")
+                        .font(.caption2)
                 }
             }
         }

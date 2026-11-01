@@ -61,7 +61,14 @@ enum Keychain {
 enum SearchState: Equatable {
     case idle
     case searching(String)
-    case finished(count: Int, failed: [String])
+    /// - Parameters:
+    ///   - failed: sources that errored (network, site changed, …). Worth
+    ///     retrying later.
+    ///   - skipped: sources that cannot work in this build at all because their
+    ///     search rule is JavaScript. Retrying will never help, so they are not
+    ///     lumped in with the failures — that list would train the user to
+    ///     ignore a permanent problem.
+    case finished(count: Int, failed: [String], skipped: [String])
     case failed(String)
 }
 
@@ -353,6 +360,7 @@ final class AppModel: ObservableObject {
 
         var collected: [SearchResult] = []
         var failures: [String] = []
+        var skipped: [String] = []
 
         await withTaskGroup(of: (String, Result<[SearchResult], Error>).self) { group in
             for source in active {
@@ -390,6 +398,13 @@ final class AppModel: ObservableObject {
             }
         }
 
+        // A source whose search rule is JavaScript-only is not a transient
+        // failure; say so once, up front, instead of listing it as "失败".
+        for source in active where source.compatibility.blockingRoles.contains("搜索列表") {
+            skipped.append(source.name)
+        }
+        failures.removeAll { name in skipped.contains(name) }
+
         // Prefer exact / prefix title matches.
         collected.sort { lhs, rhs in
             let lhsExact = lhs.name == query ? 0 : (lhs.name.contains(query) ? 1 : 2)
@@ -398,7 +413,7 @@ final class AppModel: ObservableObject {
             return lhs.name < rhs.name
         }
         searchResults = collected
-        searchState = .finished(count: collected.count, failed: failures)
+        searchState = .finished(count: collected.count, failed: failures, skipped: skipped)
     }
 
     // MARK: - Shelf

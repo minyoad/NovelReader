@@ -51,6 +51,10 @@ public struct SourceEngine {
         let engine = makeEngine(variables: ["key": keyword, "page": "1"], baseURL: page.finalURL)
         let items = engine.scopes(for: source.search.bookList, in: root)
         if items.isEmpty {
+            // A JS-only search list never matches, whatever the site returns.
+            if source.compatibility.blockingRoles.contains("搜索列表") {
+                throw SourceError.noResults("这个书源的搜索规则是纯 JavaScript，本应用无法执行，请换一个书源")
+            }
             // Fall back to the explore rule when it shares the same shape.
             if source.explore.bookList.isEmpty {
                 throw SourceError.noResults("没有解析到搜索结果，书源规则可能已失效")
@@ -140,6 +144,13 @@ public struct SourceEngine {
 
             let items = engine.scopes(for: source.toc.chapterList, in: root)
             if items.isEmpty && chapters.isEmpty {
+                // Say which kind of failure this is. A source whose chapter
+                // list is JavaScript-only will never match, no matter what the
+                // site returns, so "规则可能已失效" would send the user looking
+                // for a page change that never happened.
+                if source.compatibility.blockingRoles.contains("目录") {
+                    throw SourceError.notFound("这个书源的目录规则是纯 JavaScript，本应用无法执行，请换一个书源")
+                }
                 throw SourceError.notFound("没有解析到目录，书源规则可能已失效")
             }
 

@@ -97,7 +97,7 @@ struct SourcesView: View {
                 } header: {
                     Text("导入")
                 } footer: {
-                    Text("支持 legado 规则子集：CSS、XPath、JSONPath、@@ 回退、## 正则替换。JavaScript 规则会被跳过并在导入时提示。")
+                    Text("支持 legado 规则子集：CSS、XPath、JSONPath、@@ 回退、## 正则替换。用到 JavaScript 的书源会标出影响范围。")
                 }
             }
             .navigationTitle("书源")
@@ -187,6 +187,10 @@ private struct SourceRow: View {
     let source: BookSource
     var onToggle: () -> Void
 
+    /// Computed once per render from the parsed rules. Cheap (14 string scans)
+    /// and it cannot go stale, unlike a value cached at import time.
+    private var compatibility: SourceCompatibility { source.compatibility }
+
     var body: some View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 3) {
@@ -200,6 +204,14 @@ private struct SourceRow: View {
                             .padding(.horizontal, 5)
                             .padding(.vertical, 2)
                             .background(Color.secondary.opacity(0.15), in: Capsule())
+                    }
+                    if let badge = compatibility.badge {
+                        Text(badge.title)
+                            .font(.system(size: 9, weight: .semibold))
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 2)
+                            .foregroundStyle(badge.color)
+                            .background(badge.color.opacity(0.15), in: Capsule())
                     }
                 }
                 Text(source.host)
@@ -218,6 +230,15 @@ private struct SourceRow: View {
                 }
                 .font(.system(size: 10))
                 .foregroundStyle(source.canSearch ? Color.secondary : Color.orange)
+                if let note = compatibility.shortNote {
+                    // Says what is missing rather than just that JS is involved:
+                    // "封面用 JS" and "目录用 JS" need very different decisions,
+                    // and only the second one means "pick another source".
+                    Text(note)
+                        .font(.system(size: 10))
+                        .foregroundStyle(compatibility.level == .unreadable ? Color.orange : Color.secondary)
+                        .lineLimit(2)
+                }
             }
             Spacer()
             Toggle("", isOn: Binding(
@@ -228,6 +249,61 @@ private struct SourceRow: View {
         }
         .padding(.vertical, 2)
         .opacity(source.enabled ? 1 : 0.55)
+    }
+}
+
+// MARK: - Compatibility presentation
+
+/// How a compatibility level looks in the list.
+///
+/// Kept in the view layer: `SourceCompatibility` lives in `NovelKit`, which also
+/// builds on Linux where there is no SwiftUI to give it colours.
+private struct CompatibilityBadge {
+    var title: String
+    var color: Color
+}
+
+private extension SourceCompatibility {
+    var badge: CompatibilityBadge? {
+        switch level {
+        case .supported:
+            return nil
+        case .degraded:
+            // Names the cause, not the symptom: "部分" alone would read as
+            // "this source is half-broken", when in fact it reads fine and only
+            // loses some metadata.
+            return CompatibilityBadge(title: "JS 已跳过", color: .secondary)
+        case .unreadable:
+            return CompatibilityBadge(title: "JS 必需", color: .orange)
+        }
+    }
+
+    /// One line naming what is lost, or `nil` when nothing is.
+    var shortNote: String? {
+        guard hasJavaScript else { return nil }
+        if !blockingRoles.isEmpty {
+            return "\(blockingRoles.joined(separator: "、"))规则必须用 JS，无法读取"
+        }
+        return "\(roles.joined(separator: "、"))用到 JS，已跳过，不影响阅读"
+    }
+
+    /// The full explanation shown on the source's detail page.
+    var detail: String {
+        var lines: [String] = []
+        if !blockingRoles.isEmpty {
+            lines.append("\(blockingRoles.joined(separator: "、"))的规则是纯 JavaScript，本应用不能执行，所以这个书源读不出章节。换一个书源即可。")
+        }
+        let soft = roles.filter { !blockingRoles.contains($0) }
+        if !soft.isEmpty {
+            lines.append("\(soft.joined(separator: "、"))的规则里带 JavaScript，已跳过。这些字段会缺失或保持原文，不影响阅读。")
+        }
+        if usesNetwork || usesDOM {
+            var needs: [String] = []
+            if usesDOM { needs.append("解析页面结构") }
+            if usesNetwork { needs.append("再次请求页面") }
+            lines.append("其中的 JavaScript 还需要\(needs.joined(separator: "、"))，执行环境更复杂。")
+        }
+        return lines.joined(separator: "\n\n")
     }
 }
 
@@ -408,6 +484,26 @@ private struct SourceEditorView: View {
 
     var body: some View {
         Form {
+            let compatibility = draft.compatibility
+            if compatibility.hasJavaScript {
+                Section {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(spacing: 6) {
+                            Image(systemName: compatibility.level == .unreadable
+                                  ? "exclamationmark.triangle.fill"
+                                  : "info.circle")
+                                .foregroundStyle(compatibility.level == .unreadable ? Color.orange : Color.secondary)
+                            Text(compatibility.level == .unreadable ? "这个书源无法读取" : "部分规则已跳过")
+                                .font(.footnote.weight(.medium))
+                        }
+                        Text(compatibility.detail)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.vertical, 2)
+                }
+            }
+
             Section("基本信息") {
                 LabeledContent("名称") {
                     TextField("书源名称", text: $draft.name)
