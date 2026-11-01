@@ -222,6 +222,22 @@ final class PipelineTests: XCTestCase {
         XCTAssertTrue(persisted)
     }
 
+    /// A fresh install must not look like an upgrade: the appearance migration
+    /// is driven by "settings already exist on disk".
+    func testSettingsOnDiskDistinguishesFreshInstall() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("NovelReaderTests-\(UUID().uuidString)")
+        let store = LibraryStore(directory: dir)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        var exists = await store.hasSettingsOnDisk()
+        XCTAssertFalse(exists, "全新安装不应被当成需要迁移的旧安装")
+
+        await store.saveSettings(AppSettings())
+        exists = await store.hasSettingsOnDisk()
+        XCTAssertTrue(exists)
+    }
+
     /// Upgrading must swap the preset generation without touching user sources.
     func testPresetMigrationReplacesStalePresets() async throws {
         let dir = FileManager.default.temporaryDirectory

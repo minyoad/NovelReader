@@ -69,6 +69,14 @@ public actor LibraryStore {
         read(AppSettings.self, from: "settings.json") ?? AppSettings()
     }
 
+    /// Whether a settings file exists, as opposed to defaults being returned.
+    ///
+    /// Distinguishes "fresh install" from "user has settings this build may need
+    /// to migrate" without exposing the directory to callers outside the actor.
+    public func hasSettingsOnDisk() -> Bool {
+        FileManager.default.fileExists(atPath: directory.appendingPathComponent("settings.json").path)
+    }
+
     public func saveSettings(_ settings: AppSettings) {
         write(settings, to: "settings.json")
     }

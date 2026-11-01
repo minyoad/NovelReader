@@ -107,6 +107,7 @@ final class AppModel: ObservableObject {
         var loaded = await store.loadSettings()
         loaded.ai.apiKey = Keychain.get("ai.apiKey") ?? ""
         loaded.tts.remote.apiKey = Keychain.get("tts.apiKey") ?? ""
+        loaded = await adoptSystemAppearanceIfNeeded(loaded)
         settings = loaded
         client = HTTPClient(settings: loaded.network)
         books = await store.loadBooks()
@@ -135,6 +136,34 @@ final class AppModel: ObservableObject {
             await seedSampleBook()
         }
         Task { await repairBooksAfterPresetMigration() }
+    }
+
+    /// Turns on "follow system" exactly once for existing installs.
+    ///
+    /// `followSystemAppearance` used to default to off, so every install made
+    /// before this build has it stored as `false` — and stored values win over
+    /// the new default. Without this, those readers would keep a permanently
+    /// white page at night and reasonably call it a bug.
+    ///
+    /// Guarded by a flag rather than by the stored value: once someone has
+    /// deliberately switched the toggle off, it stays off.
+    private func adoptSystemAppearanceIfNeeded(_ loaded: AppSettings) async -> AppSettings {
+        let flag = "systemAppearanceAdopted"
+        let alreadyAdopted = await store.isFlagSet(flag)
+
+        var updated = loaded
+        // A brand new install has nothing stored yet, so there is nothing to
+        // migrate — the new default already applies.
+        let hasStoredSettings = await store.hasSettingsOnDisk()
+        if hasStoredSettings, updated.reading.adoptSystemAppearance(hasMigrated: alreadyAdopted) {
+            // Persist right away: a crash before the next `saveSettings` would
+            // otherwise redo the migration with the same result, which is fine,
+            // but writing here keeps disk and memory in step. `strippingSecrets`
+            // matters — the in-memory settings hold the Keychain values.
+            await store.saveSettings(updated.strippingSecrets)
+        }
+        if !alreadyAdopted { await store.setFlag(flag) }
+        return updated
     }
 
     /// Presets are replaced when the bundled set changes (for example when a
@@ -211,11 +240,6 @@ final class AppModel: ObservableObject {
     // MARK: - Settings
 
     func saveSettings() {
-        var persisted = settings
-        persisted.ai.apiKey = ""
-        // The TTS endpoint may need a key too, and it is just as sensitive as
-        // the AI one: keep it out of the plain JSON settings blob.
-        persisted.tts.remote.apiKey = ""
         if settings.ai.apiKey.isEmpty {
             Keychain.delete("ai.apiKey")
         } else {
@@ -226,7 +250,7 @@ final class AppModel: ObservableObject {
         } else {
             Keychain.set(settings.tts.remote.apiKey, for: "tts.apiKey")
         }
-        let snapshot = persisted
+        let snapshot = settings.strippingSecrets
         Task { await store.saveSettings(snapshot) }
         client.update(settings: settings.network)
     }

@@ -75,6 +75,8 @@ struct ReadingSettingsTests {
         #expect(reading.firstLineIndent)
         #expect(reading.alignment == .justify)
         #expect(reading.resumeLastReading)
+        // Default on: the app must go dark at night without being configured.
+        #expect(reading.followSystemAppearance)
     }
 
     @Test("old settings JSON still decodes and keeps its values")
@@ -147,6 +149,78 @@ struct ReadingSettingsTests {
         let reading = ReadingSettings(theme: .sepia, followSystemAppearance: false)
         #expect(reading.resolvedTheme(systemIsDark: true) == .sepia)
         #expect(reading.resolvedTheme(systemIsDark: false) == .sepia)
+    }
+
+    @Test("a dark theme under a light system still draws dark paper")
+    func darkThemeStaysDarkWhenResolved() throws {
+        // Regression: the reader pinned the system appearance to the *resolved*
+        // theme. With follow-system on, a light system resolved 纯黑 to 纸白, so
+        // the page was white but SwiftUI still rendered it as dark — text
+        // nearly invisible. The resolved theme is what gets drawn, so it has to
+        // agree with the colours.
+        let reading = ReadingSettings(theme: .black)
+        let daylight = reading.resolvedTheme(systemIsDark: false)
+        #expect(daylight == .paper)
+        #expect(!daylight.isDark)
+    }
+
+    @Test("every theme has a defined counterpart in both appearances")
+    func counterpartsCoverAllThemes() {
+        // Each light paper maps to 深灰 after dark, and each dark one comes back
+        // to 纸白 by day — the settings row promises exactly this.
+        #expect(ReaderTheme.paper.darkCounterpart == .night)
+        #expect(ReaderTheme.sepia.darkCounterpart == .night)
+        #expect(ReaderTheme.night.darkCounterpart == .night)
+        #expect(ReaderTheme.black.darkCounterpart == .black)
+
+        #expect(ReaderTheme.paper.lightCounterpart == .paper)
+        #expect(ReaderTheme.sepia.lightCounterpart == .sepia)
+        #expect(ReaderTheme.night.lightCounterpart == .paper)
+        #expect(ReaderTheme.black.lightCounterpart == .paper)
+
+        // The mapping is a projection: applying it twice changes nothing, so a
+        // phase change cannot drift the theme.
+        for theme in ReaderTheme.allCases {
+            #expect(theme.darkCounterpart.darkCounterpart == theme.darkCounterpart)
+            #expect(theme.lightCounterpart.lightCounterpart == theme.lightCounterpart)
+        }
+    }
+
+    @Test("old installs adopt follow-system once, and keep a later opt-out")
+    func systemAppearanceMigration() {
+        // What an install from before this build has on disk.
+        var legacy = ReadingSettings(theme: .paper, followSystemAppearance: false)
+        let adopted = legacy.adoptSystemAppearance(hasMigrated: false)
+        #expect(adopted)
+        #expect(legacy.followSystemAppearance)
+
+        // Idempotent: running bootstrap again must not report a change.
+        let again = legacy.adoptSystemAppearance(hasMigrated: true)
+        #expect(!again)
+
+        // Someone who switches it back off afterwards keeps that choice: the
+        // flag, not the stored value, is what makes the migration one-shot.
+        var optedOut = ReadingSettings(theme: .black, followSystemAppearance: false)
+        let flipped = optedOut.adoptSystemAppearance(hasMigrated: true)
+        #expect(!flipped)
+        #expect(!optedOut.followSystemAppearance)
+    }
+
+    @Test("persisted settings never carry API keys")
+    func strippingSecrets() throws {
+        var settings = AppSettings()
+        settings.ai.apiKey = "sk-ai-secret"
+        settings.tts.remote.apiKey = "tts-secret"
+
+        let data = try JSONEncoder().encode(settings.strippingSecrets)
+        let json = try #require(String(data: data, encoding: .utf8))
+        #expect(!json.contains("sk-ai-secret"))
+        #expect(!json.contains("tts-secret"))
+
+        // Everything else survives the round-trip.
+        let decoded = try JSONDecoder().decode(AppSettings.self, from: data)
+        #expect(decoded.reading == settings.reading)
+        #expect(decoded.ai.model == settings.ai.model)
     }
 }
 

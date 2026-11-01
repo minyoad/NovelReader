@@ -30,7 +30,12 @@ struct ReaderView: View {
     }
 
     private var theme: Theme {
-        Theme.of(app.settings.reading, systemIsDark: systemScheme == .dark)
+        Theme.of(resolvedTheme)
+    }
+
+    /// The paper actually on screen, after "follow system" is resolved.
+    private var resolvedTheme: ReaderTheme {
+        app.settings.reading.resolvedTheme(systemIsDark: systemScheme == .dark)
     }
 
     /// The appearance the reader is *displaying*, which is what sheets and the
@@ -38,7 +43,17 @@ struct ReaderView: View {
     ///
     /// While "follow system" is on these are the same thing, but when it is off
     /// the phone may be in light mode while the reader is on 纯黑.
-    private var isDark: Bool { theme.resolved.isDark }
+    private var isDark: Bool { resolvedTheme.isDark }
+
+    /// The scheme to pin the reader to, or `nil` to leave it to the system.
+    ///
+    /// Forcing a scheme is only needed when the theme is independent of the
+    /// phone. Applying it while following the system would pin the whole
+    /// presentation to one appearance — `systemScheme` would then never see the
+    /// phone's sunset switch, and the reader would stay white all night.
+    private var forcedScheme: ColorScheme? {
+        app.settings.reading.followSystemAppearance ? nil : (isDark ? .dark : .light)
+    }
 
     var body: some View {
         ZStack {
@@ -89,6 +104,7 @@ struct ReaderView: View {
                     ReaderBottomBar(
                         model: model,
                         theme: theme,
+                        forcedScheme: forcedScheme,
                         onShowTOC: { showTOC = true },
                         onShowCache: { showCacheSheet = true }
                     )
@@ -110,28 +126,29 @@ struct ReaderView: View {
             }
         }
         .statusBarHidden(!model.showBars)
-        // The reader paints its own paper, so the system appearance has to be
-        // driven by the chosen theme rather than by the phone's setting. Without
-        // this, picking 深灰/纯黑 left a light status bar, light sheets and
-        // light toolbar material on a dark page.
-        .preferredColorScheme(isDark ? .dark : .light)
+        // The reader paints its own paper, so when the theme is independent of
+        // the phone the system appearance has to follow it: otherwise picking
+        // 深灰/纯黑 leaves a light status bar, light sheets and a light toolbar
+        // material on a dark page. `forcedScheme` is nil while following the
+        // system, so that mode keeps reacting to the phone.
+        .preferredColorScheme(forcedScheme)
         .task { await model.start() }
         .sheet(isPresented: $showSettings) {
             ReaderSettingsSheet()
                 .presentationDetents([.medium, .large])
                 // Sheets are hosted apart from the presenting view, so
                 // `preferredColorScheme` above does not reach them.
-                .preferredColorScheme(isDark ? .dark : .light)
+                .preferredColorScheme(forcedScheme)
         }
         .sheet(isPresented: $showCacheSheet) {
             CacheSheet(model: model)
                 .presentationDetents([.medium, .large])
-                .preferredColorScheme(isDark ? .dark : .light)
+                .preferredColorScheme(forcedScheme)
         }
         .sheet(isPresented: $model.showSourcePicker) {
             SourcePickerSheet(model: model)
                 .presentationDetents([.medium, .large])
-                .preferredColorScheme(isDark ? .dark : .light)
+                .preferredColorScheme(forcedScheme)
         }
         .sheet(isPresented: $showTOC) {
             ChapterListView(
@@ -142,7 +159,7 @@ struct ReaderView: View {
                 Task { await model.loadChapter(at: index) }
             }
             .presentationDetents([.medium, .large])
-            .preferredColorScheme(isDark ? .dark : .light)
+            .preferredColorScheme(forcedScheme)
         }
         .alert("出错了", isPresented: Binding(
             get: { model.errorMessage != nil },
@@ -481,6 +498,8 @@ private struct ReaderTopBar: View {
 private struct ReaderBottomBar: View {
     @ObservedObject var model: ReaderModel
     let theme: Theme
+    /// Pinned appearance for this bar's own sheet; see `ReaderView.forcedScheme`.
+    let forcedScheme: ColorScheme?
     var onShowTOC: () -> Void
     var onShowCache: () -> Void
     @State private var showSpeechSettings = false
@@ -530,7 +549,7 @@ private struct ReaderBottomBar: View {
                 .presentationDetents([.medium, .large])
                 // The sheet is hosted apart from the reader, so the reader's
                 // own color scheme does not reach it.
-                .preferredColorScheme(theme.resolved.isDark ? .dark : .light)
+                .preferredColorScheme(forcedScheme)
         }
     }
 

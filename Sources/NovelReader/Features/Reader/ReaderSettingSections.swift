@@ -103,6 +103,12 @@ enum ReaderSettingSections {
             }
         }
         .pickerStyle(.segmented)
+
+        if reading.wrappedValue.followSystemAppearance {
+            Text("系统为浅色时用 \(reading.wrappedValue.theme.displayName)，深色时自动换成\(reading.wrappedValue.theme.darkCounterpart.displayName)。")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
     }
 
     // MARK: - Startup

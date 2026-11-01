@@ -9,23 +9,13 @@ struct Theme {
     let text: Color
     let secondaryText: Color
     let accent: Color
-    /// The theme actually in effect, after resolving "follow system".
-    ///
-    /// Kept alongside the colours so callers can key caches and layout on the
-    /// resolved choice rather than on the stored one.
+    /// The theme actually in effect. Callers resolve "follow system" first
+    /// (`ReadingSettings.resolvedTheme(systemIsDark:)`) and pass the result, so
+    /// the colours and `resolved` can never disagree — which is how a white
+    /// page ended up rendered as dark text.
     let resolved: ReaderTheme
 
-    /// Resolves the reader's paper against the phone's appearance.
-    ///
-    /// `systemIsDark` has to come from the view's own `colorScheme`; reading
-    /// `UITraitCollection` here would not invalidate when the user toggles
-    /// appearance while the app is in the foreground.
-    static func of(_ reading: ReadingSettings, systemIsDark: Bool) -> Theme {
-        of(reading.resolvedTheme(systemIsDark: systemIsDark))
-    }
-
     static func of(_ theme: ReaderTheme) -> Theme {
-        let theme = theme
         switch theme {
         case .paper:
             return Theme(

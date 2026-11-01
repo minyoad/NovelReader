@@ -29,6 +29,19 @@ public enum ReaderTheme: String, Codable, CaseIterable, Identifiable, Sendable {
         case .night, .black: return true
         }
     }
+
+    /// This theme's twin in the other appearance family.
+    ///
+    /// Used by "follow system": the phone's light/dark switch picks the family
+    /// while the user's choice picks the variant within it. Defined once here
+    /// so the resolver and the settings row that explains it cannot drift.
+    public var darkCounterpart: ReaderTheme {
+        isDark ? self : .night
+    }
+
+    public var lightCounterpart: ReaderTheme {
+        isDark ? .paper : self
+    }
 }
 
 /// How the reader advances: continuous scrolling, or discrete pages swiped
@@ -96,8 +109,9 @@ public struct ReadingSettings: Codable, Hashable, Sendable {
     public var alignment: BodyAlignment
     /// Follow the phone's light/dark switch instead of using `theme`.
     ///
-    /// `theme` is kept so switching this off returns to the paper the user
-    /// picked, rather than to a default.
+    /// On by default: a reader who never opens the settings still expects the
+    /// app to go dark at night. `theme` is kept so switching this off returns to
+    /// the paper the user picked, rather than to a default.
     public var followSystemAppearance: Bool
     /// Reopen the last book at its saved position on launch.
     ///
@@ -116,7 +130,7 @@ public struct ReadingSettings: Codable, Hashable, Sendable {
         pageTurnEffect: PageTurnEffect = .slide,
         firstLineIndent: Bool = true,
         alignment: BodyAlignment = .justify,
-        followSystemAppearance: Bool = false,
+        followSystemAppearance: Bool = true,
         resumeLastReading: Bool = true
     ) {
         self.fontSize = fontSize
@@ -178,10 +192,23 @@ public struct ReadingSettings: Codable, Hashable, Sendable {
     /// of a system toggle silently overriding their contrast choice.
     public func resolvedTheme(systemIsDark: Bool) -> ReaderTheme {
         guard followSystemAppearance else { return theme }
-        if systemIsDark {
-            return theme.isDark ? theme : .night
-        }
-        return theme.isDark ? .paper : theme
+        return systemIsDark ? theme.darkCounterpart : theme.lightCounterpart
+    }
+
+    /// One-time migration for installs created while "follow system" defaulted
+    /// to off: those users never saw the reader go dark, and had every reason
+    /// to assume it was broken rather than switched off.
+    ///
+    /// `hasMigrated` is the caller's persisted flag. Guarding on a flag rather
+    /// than on the stored value is what makes this safe: a reader who switches
+    /// the toggle off afterwards keeps it off, because the migration never runs
+    /// again. Returns `true` when it flipped the value, so the caller can
+    /// persist the change.
+    @discardableResult
+    public mutating func adoptSystemAppearance(hasMigrated: Bool) -> Bool {
+        guard !hasMigrated, !followSystemAppearance else { return false }
+        followSystemAppearance = true
+        return true
     }
 }
 
@@ -484,5 +511,18 @@ public struct AppSettings: Codable, Hashable, Sendable {
         searchAllSources = try container.decodeIfPresent(Bool.self, forKey: .searchAllSources) ?? defaults.searchAllSources
         aiOutputFormat = try container.decodeIfPresent(AIPrompt.OutputFormat.self, forKey: .aiOutputFormat)
             ?? defaults.aiOutputFormat
+    }
+
+    /// A copy safe to write as plain JSON: API keys live in the Keychain, never
+    /// in `settings.json`.
+    ///
+    /// Any code path that persists settings has to go through this, not just
+    /// the explicit "save" action — a migration writing the in-memory settings
+    /// would otherwise quietly spill both keys onto disk.
+    public var strippingSecrets: AppSettings {
+        var copy = self
+        copy.ai.apiKey = ""
+        copy.tts.remote.apiKey = ""
+        return copy
     }
 }
