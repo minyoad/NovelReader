@@ -5,9 +5,26 @@ import NovelKit
 struct SearchView: View {
     @EnvironmentObject private var app: AppModel
     @State private var query = ""
-    @State private var pendingResultID: String?
-    @State private var addingResultID: String?
     @State private var errorMessage: String?
+
+    /// Where a tapped row leads: the full preview for a book that is not on the
+    /// shelf yet (it needs a deliberate "加入书架"), or the library detail page
+    /// for one that already is.
+    private enum Destination: Hashable {
+        case preview(SearchResult)
+        case shelf(UUID)
+
+        /// `SearchResult` is not `Identifiable`-stable across re-renders, so a
+        /// string key is what the navigation stack remembers.
+        var id: String {
+            switch self {
+            case .preview(let result): return "preview|\(result.id)"
+            case .shelf(let id): return "shelf|\(id.uuidString)"
+            }
+        }
+    }
+
+    @State private var destination: Destination?
 
     private var activeSources: [BookSource] {
         app.sources.filter { $0.enabled && $0.type == .text && $0.canSearch }
@@ -53,11 +70,16 @@ struct SearchView: View {
                 }
             }
             .navigationTitle("找书")
-            .navigationDestination(item: $pendingResultID) { id in
-                if let book = app.books.first(where: { $0.id.uuidString == id }) {
-                    BookDetailView(book: book)
-                } else {
-                    EmptyStateView(title: "书不见了", message: "它可能已经被移出书架。", systemImage: "book.closed")
+            .navigationDestination(item: $destination) { target in
+                switch target {
+                case .preview(let result):
+                    BookPreviewView(result: result)
+                case .shelf(let id):
+                    if let book = app.books.first(where: { $0.id == id }) {
+                        BookDetailView(book: book)
+                    } else {
+                        EmptyStateView(title: "书不见了", message: "它可能已经被移出书架。", systemImage: "book.closed")
+                    }
                 }
             }
             .searchable(text: $query, prompt: "书名或作者")
@@ -127,6 +149,14 @@ struct SearchView: View {
                 Text(result.author.isEmpty ? "佚名" : result.author)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                if !result.intro.isEmpty {
+                    // A line of blurb is what lets the user skip obvious
+                    // wrong editions without opening every row.
+                    Text(result.intro)
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(2)
+                }
                 if !result.lastChapterTitle.isEmpty {
                     Text("最新：\(result.lastChapterTitle)")
                         .font(.caption2)
@@ -140,46 +170,22 @@ struct SearchView: View {
 
             Spacer(minLength: 0)
 
-            if let book = app.bookOnShelf(for: result) {
-                Button {
-                    pendingResultID = book.id.uuidString
-                } label: {
-                    Text("已收藏")
-                        .font(.caption)
-                }
-                .buttonStyle(.bordered)
-                .tint(Palette.accent)
-            } else {
-                Button {
-                    Task { await add(result) }
-                } label: {
-                    if addingResultID == result.id {
-                        ProgressView().controlSize(.small)
-                    } else {
-                        Image(systemName: "plus")
-                    }
-                }
-                .buttonStyle(.bordered)
-                .disabled(addingResultID != nil)
-            }
+            Image(systemName: app.bookOnShelf(for: result) == nil ? "chevron.right" : "books.vertical.fill")
+                .font(.caption)
+                .foregroundStyle(
+                    app.bookOnShelf(for: result) == nil
+                        ? AnyShapeStyle(.tertiary)
+                        : AnyShapeStyle(Palette.accent)
+                )
         }
         .padding(.vertical, 4)
         .contentShape(Rectangle())
+        // Tapping a result never adds it: it opens the preview, which is where
+        // the blurb and the chapter count live and where "加入书架" is the only
+        // way in. A one-tap `+` here was too easy to hit by accident.
         .onTapGesture {
-            if let book = app.bookOnShelf(for: result) {
-                pendingResultID = book.id.uuidString
-            }
-        }
-    }
-
-    private func add(_ result: SearchResult) async {
-        addingResultID = result.id
-        defer { addingResultID = nil }
-        do {
-            let book = try await app.addToShelf(result)
-            app.showBanner("已加入书架：\(book.name)", isError: false)
-        } catch {
-            errorMessage = error.localizedDescription
+            destination = app.bookOnShelf(for: result)
+                .map { .shelf($0.id) } ?? .preview(result)
         }
     }
 }

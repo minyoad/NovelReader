@@ -387,7 +387,92 @@ final class AppModel: ObservableObject {
         books.first { $0.sourceID == result.sourceID && $0.detailURL == result.detailURL }
     }
 
-    func addToShelf(_ result: SearchResult) async throws -> Book {
+    /// Everything needed to decide whether a search result is worth keeping.
+    ///
+    /// Reading the detail page and the TOC is the only way to answer the two
+    /// questions a search result cannot: how long the book is and whether the
+    /// chapters actually load. Nothing here touches the shelf or the disk, so
+    /// browsing results does not leave empty books behind.
+    struct BookPreview {
+        var result: SearchResult
+        var book: Book
+        var chapters: [Chapter]
+        /// True when the detail page failed but the search row still had enough
+        /// to show; the page then reads as a degraded preview instead of an error.
+        var isPartial: Bool
+        var error: String?
+    }
+
+    func preview(for result: SearchResult) async -> BookPreview {
+        guard let source = sources.first(where: { $0.id == result.sourceID }) else {
+            return BookPreview(
+                result: result,
+                book: Self.placeholderBook(from: result),
+                chapters: [],
+                isPartial: true,
+                error: "找不到对应的书源"
+            )
+        }
+        if source.isBuiltIn {
+            return BookPreview(
+                result: result,
+                book: BuiltinContent.sampleBook,
+                chapters: BuiltinContent.sampleChapters,
+                isPartial: false,
+                error: nil
+            )
+        }
+
+        var book = Self.placeholderBook(from: result)
+        var detailError: String?
+        do {
+            book = try await engine.fetchBookDetail(result, source: source)
+        } catch {
+            // The search row already carries name/author/cover, which is enough
+            // for the preview header, so a failed detail page degrades to a
+            // partial preview instead of an error screen. The TOC below may
+            // still work, because many sites serve it on the detail URL anyway.
+            detailError = error.localizedDescription
+        }
+
+        do {
+            let chapters = try await engine.fetchChapters(book: book, source: source)
+            return BookPreview(
+                result: result,
+                book: book,
+                chapters: chapters,
+                isPartial: detailError != nil,
+                error: detailError
+            )
+        } catch {
+            return BookPreview(
+                result: result,
+                book: book,
+                chapters: [],
+                isPartial: true,
+                error: detailError ?? error.localizedDescription
+            )
+        }
+    }
+
+    /// A `Book` built only from what the search result knew, used when the
+    /// detail page is unreachable or before the network answers.
+    private static func placeholderBook(from result: SearchResult) -> Book {
+        Book(
+            sourceID: result.sourceID,
+            sourceName: result.sourceName,
+            detailURL: result.detailURL,
+            name: result.name,
+            author: result.author,
+            intro: result.intro,
+            kind: result.kind,
+            coverURL: result.coverURL,
+            lastChapterTitle: result.lastChapterTitle,
+            updateTime: result.updateTime
+        )
+    }
+
+    func addToShelf(_ result: SearchResult, preview: BookPreview? = nil) async throws -> Book {
         if let existing = bookOnShelf(for: result) { return existing }
         guard let source = sources.first(where: { $0.id == result.sourceID }) else {
             throw SourceError.notFound("找不到对应的书源")
@@ -399,6 +484,12 @@ final class AppModel: ObservableObject {
         if source.isBuiltIn {
             book = BuiltinContent.sampleBook
             chapters = BuiltinContent.sampleChapters
+        } else if let preview, !preview.chapters.isEmpty {
+            // The preview screen already paid for these two requests; repeating
+            // them here made "加入书架" sit on a spinner for seconds after the
+            // user had just read the same data.
+            book = preview.book
+            chapters = preview.chapters
         } else {
             book = try await engine.fetchBookDetail(result, source: source)
             chapters = try await engine.fetchChapters(book: book, source: source)
