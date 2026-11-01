@@ -28,12 +28,28 @@ echo "$TARGET"
 
 # 授权文件不包含这台设备时，安装一定会失败，而且报错看不出原因。提前说清楚，
 # 并给出补救步骤。
-if ! profile_covers "$TARGET" "$APP"; then
+profile_covers "$TARGET" "$APP"
+PROFILE_STATE=$?
+if [ "$PROFILE_STATE" -ne 0 ]; then
   echo
-  echo "这台设备不在当前签名授权里，装了也会失败。" >&2
-  echo "现有 profile 只授权了旧设备。需要重新登录 xtool 刷新 profile：" >&2
-  echo "  bash $TOOLS_DIR/login-apple.sh" >&2
-  echo "（登录后 xtool-proxy dev build --sign 会把当前设备加进授权列表）" >&2
+  if device_registered "$TARGET"; then
+    # 已注册，只是 profile 还是旧的：重新签名即可。
+    echo "这台设备已注册，但当前签名 profile 还没带上它。重新签名一次就好：" >&2
+    echo "  xtool-proxy dev build --sign" >&2
+    echo "  bash $TOOLS_DIR/pack-install.sh" >&2
+  else
+    # 未注册：重新登录没有用，--sign 也不会注册，只有 install 路径会。
+    echo "这台设备还没注册到 Apple 开发者账号（UDID $TARGET）。" >&2
+    echo "重新登录或重新签名都不会把它加进去：" >&2
+    echo "  'xtool dev build --sign' 调用 signInPlace(app:) 时不传 targetDevice，" >&2
+    echo "  而注册设备那一步在没有 targetDevice 时直接返回，等于跳过。" >&2
+    echo "只有带设备上下文的安装路径会注册它，也就是 'xtool dev run'：" >&2
+    echo "  bash $TOOLS_DIR/dev-run.sh" >&2
+  fi
+  if [ "$PROFILE_STATE" -eq 2 ]; then
+    echo
+    echo "（当前没有可读的 embedded.mobileprovision，所以先按未签名处理。）" >&2
+  fi
   exit 3
 fi
 

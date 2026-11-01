@@ -143,12 +143,16 @@ PY
 #
 # 免费 Apple ID 的授权文件把设备 UDID 写死在里面。新手机没登录刷新过 profile 时，
 # 装机会失败在签名阶段之前且报错很含糊，所以先在这里说清楚。
+#
+# 只有“profile 存在且是写死设备列表的类型”才能回答这个问题。文件不存在、或
+# 解析不出设备列表（企业证书），一律返回“无法判定”（2），让调用方按未通过处理，
+# 而不是把“不知道”当成“可以装”。
 profile_covers() {
   local udid="$1"
   local app="${2:-$HOME/ios/NovelReader/xtool/NovelReader.app}"
 
   if [ ! -f "$app/embedded.mobileprovision" ]; then
-    return 0
+    return 2
   fi
 
   python3 - "$app/embedded.mobileprovision" "$udid" <<'PY'
@@ -159,14 +163,25 @@ raw = open(path, "rb").read()
 start = raw.find(b"<?xml")
 end = raw.rfind(b"</plist>")
 if start < 0 or end < 0:
-    sys.exit(0)
+    sys.exit(2)
 
 plist = plistlib.loads(raw[start:end + len(b"</plist>")])
 devices = plist.get("ProvisionedDevices")
 if devices is None:
-    # 企业/个人证书不写设备列表，不做判断。
-    sys.exit(0)
+    # 不写设备列表的证书类型，无法判定。
+    sys.exit(2)
 
 sys.exit(0 if udid in devices else 1)
 PY
+}
+
+# 这台设备是否已经注册到 Apple 开发者账号里。
+#
+# 和 `profile_covers` 是两件事，且必须分开看：
+#   未注册 → profile 一定不含它，而且重新登录/重新签名都不会让它出现。
+#   已注册 → profile 只是旧的，重新 --sign 就能拉进来。
+# 这个区别决定了补救办法完全不同，所以不能笼统报“需要重新登录”。
+device_registered() {
+  local udid="$1"
+  xtool ds devices list 2>/dev/null | grep -qi -- "$udid"
 }

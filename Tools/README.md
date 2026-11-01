@@ -2,7 +2,7 @@
 
 部署脚本不再写死设备 UDID，插上哪台就装哪台。
 
-## 日常用法
+## 日常用法（设备已经在账号里）
 
 ```bash
 cd ~/ios/NovelReader
@@ -27,36 +27,55 @@ USB 优先：旧手机留在 Wi-Fi 上时会一直出现在列表里，按「总
 UDID=00008150-000C42C20E61401C bash Tools/pack-install.sh
 ```
 
-## 换新手机：必须先刷新签名授权
+## 换新手机：要用 `dev-run.sh`
 
-**免费 Apple ID 的授权文件把能装的设备 UDID 写死在里面**，最多 3 台，7 天过期。新手机没被加进去时，安装一定失败，而且报错信息看不出原因。
+免费 Apple ID 的授权文件把能装的设备 UDID 写死在里面，最多 3 台，7 天过期。新手机要先**注册到开发者账号**，否则 profile 里永远没有它。
 
-`pack-install.sh` 会在打包前读 `xtool/NovelReader.app/embedded.mobileprovision`，发现目标设备不在列表里就直接停下（退出码 3），并指路：
+**关键点：`xtool dev build --sign` 不会注册设备。** 不是配置问题，是 xtool 的结构：
 
-```bash
-bash Tools/login-apple.sh      # 重新登录，xtool 刷新 profile 时带上当前设备
+```swift
+// DeveloperServicesAddDeviceOperation.swift 第一行
+guard let targetDevice = context.targetDevice else { return }
 ```
 
-登录后重新签名，授权文件就会包含新设备。检查当前覆盖了哪些设备：
+注册这一步在 `DeveloperServicesProvisioningOperation` 里排第一，但：
+
+| 调用路径 | 是否传 `targetDevice` | 结果 |
+| --- | --- | --- |
+| `dev build --sign` → `signInPlace(app:)` | 否 | **跳过注册**，profile 只按账号已有设备生成 |
+| `dev run` → `install(app:udid:...)` | 是 | 先注册，再签、再装 |
+
+所以换了新手机时，**重新登录没用、重新签名也没用**——两条路都不会把新 UDID 加进账号。正确做法：
 
 ```bash
-# 装机前的完整自检：设备发现、选择、授权覆盖、语法
-bash Tools/verify-tools.sh
+bash Tools/dev-run.sh
+```
+
+它会选设备、检查登录状态，然后跑 `xtool-proxy dev run --udid <目标>`，由 xtool 内部完成注册 → 重签 → 安装。
+
+检查当前状态：
+
+```bash
+bash Tools/verify-tools.sh     # 设备、账号注册、profile 覆盖、语法
 ```
 
 ## 脚本
 
 | 文件 | 作用 |
 | --- | --- |
-| `Tools/device.sh` | 共享的设备发现（`list_devices`）、选择（`select_udid`）、bundle id 读取、授权覆盖检查 |
-| `Tools/pack-install.sh` | 把已签名的 `.app` 打成 ipa 并安装 |
+| `Tools/device.sh` | 设备发现（`list_devices`）、选择（`select_udid`）、bundle id 读取、`profile_covers`、`device_registered` |
+| `Tools/pack-install.sh` | 把已签名的 `.app` 打成 ipa 并安装（设备须已注册且 profile 已含它） |
 | `Tools/deploy.sh` | 安装 xtool 暂存目录里现成的 `app.ipa` |
-| `Tools/login-apple.sh` | 交互式 Apple 登录，刷新签名授权 |
+| `Tools/dev-run.sh` | **新设备用这个**：注册 + 签名 + 安装一条命令 |
+| `Tools/login-apple.sh` | 交互式 Apple 登录（只刷新 token，不会注册设备） |
 | `Tools/verify-tools.sh` | 不装机的自检 |
 
 设备枚举用 `pymobiledevice3 usbmux list` 的 JSON，不解析 `xtool devices` 的表格文本：JSON 字段有名字，xtool 改排版也不会静默匹配不到设备。安装本身用 xtool 自带的 `xtool install --udid`。
 
-## 两个容易踩的点
+## 几个容易踩的点
 
+- **三个概念要分清**：`device_registered`（在账号里）、`profile_covers`（在授权文件里）、以及 App 有没有签名。未注册时前两者都已注册不了，必须走 `dev-run.sh`。
+- `profile_covers` 是**三态**：0 覆盖、1 不覆盖、2 无法判定（文件不存在或证书不写设备列表）。无法判定按未通过处理——把「不知道」当「可以装」会让错误出现在装机中途，更难查。
 - 签名后 Info.plist 里的 bundle id 会多一个团队前缀（`XTL-4JBQYZ7D5X.com.yang.NovelReader`），拿 `xtool.yml` 里的原值查已安装应用会查不到。`app_bundle_id` 从产物里读。
 - `xtool` 没有 `query` 子命令，查已安装版本仍要用 `pymobiledevice3 apps query`。
+- `xtool ds devices` 只有 `list`，没有 register 子命令；注册只能经由 `dev run` 的安装路径。
