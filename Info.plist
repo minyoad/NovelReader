@@ -29,6 +29,26 @@
         <string>UIInterfaceOrientationLandscapeLeft</string>
         <string>UIInterfaceOrientationLandscapeRight</string>
     </array>
+    <!-- Reading aloud on CarPlay.
+         The app has no CarPlay screen of its own; what the car shows is the
+         system player built from NowPlayingCenter's published information, and
+         the buttons the car sends arrive through MPRemoteCommandCenter. Without
+         this scene the app never appears on a head unit at all. -->
+    <key>UIApplicationSceneManifest</key>
+    <dict>
+        <key>UISceneConfigurations</key>
+        <dict>
+            <key>CPTemplateApplicationSceneSessionRoleApplication</key>
+            <array>
+                <dict>
+                    <key>UISceneConfigurationName</key>
+                    <string>CarPlay</string>
+                    <key>UISceneDelegateClassName</key>
+                    <string>$(PRODUCT_MODULE_NAME).CarPlaySceneDelegate</string>
+                </dict>
+            </array>
+        </dict>
+    </dict>
     <key>ITSAppUsesNonExemptEncryption</key>
     <false/>
     <!-- Many Chinese novel sites still serve plain HTTP. -->
