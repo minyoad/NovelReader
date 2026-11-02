@@ -82,4 +82,45 @@ struct PaginationTests {
         #expect(paginated.bodyOffset(forOriginal: 5) == 0)
         #expect(paginated.originalOffset(forBody: 5) == 0)
     }
+
+    @Test("only paragraph starts are reported as such")
+    func startsParagraph() {
+        let paginated = PaginatedText(rawText: raw)
+        // Body is: 这是第一段，有一些内容。\n这是第二段，也有内容。\n这是第四段。
+        #expect(paginated.body == "这是第一段，有一些内容。\n这是第二段，也有内容。\n这是第四段。")
+
+        // Page top: a real paragraph start, keeps the indent.
+        #expect(paginated.startsParagraph(atBody: 0))
+
+        // Mid-paragraph: pages cut here must drop the indent.
+        #expect(!paginated.startsParagraph(atBody: 1))
+        #expect(!paginated.startsParagraph(atBody: 5))
+
+        // Right after the separator is the next paragraph's first character.
+        let second = paginated.bodyOffset(forOriginal: paginated.paragraphs[1].originalStart)
+        #expect(second == paginated.paragraphs[0].text.count + 1)
+        #expect(paginated.startsParagraph(atBody: second))
+
+        let third = paginated.bodyOffset(forOriginal: paginated.paragraphs[2].originalStart)
+        #expect(paginated.startsParagraph(atBody: third))
+    }
+
+    @Test("startsParagraph survives emoji before the cut")
+    func startsParagraphWithEmoji() {
+        // Two UTF-16 units per emoji: the check must read characters, not
+        // UTF-16 units, or an offset inside a surrogate pair would misfire.
+        let paginated = PaginatedText(rawText: "😀😀第一段\n第二段")
+        let body = paginated.body
+        #expect(body == "😀😀第一段\n第二段")
+        #expect(paginated.startsParagraph(atBody: 0))
+        #expect(!paginated.startsParagraph(atBody: 1))
+        #expect(!paginated.startsParagraph(atBody: 2))
+
+        // The cut the layout actually reports is a UTF-16 offset; mid-emoji it
+        // must round back to the emoji's own character, never to the newline.
+        let secondParagraph = body.firstIndex(of: "\n").map { body.distance(from: body.startIndex, to: $0) + 1 } ?? 0
+        #expect(paginated.startsParagraph(atBody: secondParagraph))
+        let firstParagraphEndUTF16 = paginated.utf16Offset(forBodyCharacter: secondParagraph - 1)
+        #expect(paginated.startsParagraph(atBody: paginated.bodyCharacterOffset(forUTF16: firstParagraphEndUTF16 + 1)))
+    }
 }

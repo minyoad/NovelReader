@@ -15,7 +15,7 @@ struct PagedReader: View {
     @EnvironmentObject private var app: AppModel
 
     @State private var document: PagedDocument?
-    @State private var pages: [NSRange] = []
+    @State private var pages: [ReaderPage] = []
     @State private var pageIndex = 0
     @State private var drag: CGFloat = 0
     @State private var isAnimating = false
@@ -121,7 +121,7 @@ struct PagedReader: View {
 
     // MARK: - Pages
 
-    private var currentRange: NSRange? {
+    private var currentPage: ReaderPage? {
         pages.indices.contains(pageIndex) ? pages[pageIndex] : nil
     }
 
@@ -146,7 +146,7 @@ struct PagedReader: View {
                 if abs(drag) > 0.5, let document {
                     let forward = isForward
                     if let index = neighbor(forward: forward) {
-                        pageImage(document: document, range: pages[index])
+                        pageImage(document: document, page: pages[index])
                     } else {
                         chapterHint(forward: forward, box: box)
                             .offset(x: forward ? box.width : -box.width)
@@ -155,8 +155,8 @@ struct PagedReader: View {
                 }
 
                 // Page under the finger (or the settled page when no drag).
-                if let document, let currentRange {
-                    pageImage(document: document, range: currentRange)
+                if let document, let currentPage {
+                    pageImage(document: document, page: currentPage)
                         .offset(x: reading.pageTurnEffect == .slide ? drag : 0)
                         .opacity(reading.pageTurnEffect == .fade ? Double(1 - dragProgress) : 1)
                 }
@@ -179,9 +179,9 @@ struct PagedReader: View {
 
         ZStack {
             if hasNeighbor {
-                if let document, let currentRange {
+                if let document, let currentPage {
                     CurledPage(
-                        settledText: styledPage(document: document, range: currentRange),
+                        settledText: styledPage(document: document, page: currentPage),
                         neighborText: neighborPageText(document: document, forward: forward),
                         progress: dragProgress,
                         forward: forward,
@@ -195,8 +195,8 @@ struct PagedReader: View {
                         .offset(x: forward ? box.width : -box.width)
                         .offset(x: drag)
                 }
-                if let document, let currentRange {
-                    pageImage(document: document, range: currentRange)
+                if let document, let currentPage {
+                    pageImage(document: document, page: currentPage)
                         .offset(x: drag)
                 }
             }
@@ -206,14 +206,14 @@ struct PagedReader: View {
 
     private func neighborPageText(document: PagedDocument, forward: Bool) -> NSAttributedString? {
         guard let index = neighbor(forward: forward) else { return nil }
-        return styledPage(document: document, range: pages[index])
+        return styledPage(document: document, page: pages[index])
     }
 
-    private func pageImage(document: PagedDocument, range: NSRange) -> some View {
+    private func pageImage(document: PagedDocument, page: ReaderPage) -> some View {
         // `paper` matters beyond the curl: in slide mode the incoming page sits
         // under the outgoing one, and a clear background would let both sets of
         // glyphs show through where they overlap.
-        PageImage(attributed: styledPage(document: document, range: range), paper: theme.background)
+        PageImage(attributed: styledPage(document: document, page: page), paper: theme.background)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .clipped()
     }
@@ -317,17 +317,25 @@ struct PagedReader: View {
                 saveProgress()
             }
         } else {
-            // End of chapter: spring back, then load the neighbouring chapter.
+            // End of chapter: no page to turn to, so hand the swipe straight to
+            // the chapter switch. The page never springs back on its own — the
+            // new chapter's content replaces this one and pagination resets
+            // `drag`, which reads as the page sliding away rather than bouncing.
+            guard !isAnimating else { return }
             isAnimating = true
-            withAnimation(.easeOut(duration: 0.18)) { drag = 0 }
+            // Keep the rubber-band offset as the leaving edge, then fade the
+            // current page out while the next chapter loads.
+            withAnimation(.easeOut(duration: 0.12)) {
+                drag = forward ? -box.width * 0.12 : box.width * 0.12
+            }
             Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 190_000_000)
-                isAnimating = false
                 if forward {
                     await model.goNextChapter()
                 } else {
                     await model.goPreviousChapter()
                 }
+                drag = 0
+                isAnimating = false
             }
         }
     }
@@ -342,22 +350,31 @@ struct PagedReader: View {
             return
         }
 
+        // While a chapter switch is in flight `currentIndex` has already moved on
+        // but `content` still holds the previous chapter. Laying that text out
+        // under the new chapter's URL would repaginate the old chapter and show
+        // it for one frame; keep the page that is on screen instead and wait for
+        // the matching content.
+        if model.isLoading, let current = document, current.chapterURL != content.chapterURL {
+            return
+        }
+
         let doc = PagedDocument.make(content: content, reading: reading, theme: theme)
-        let ranges = PageLayout.ranges(of: doc.attributed, in: box)
+        let layout = PageLayout.ranges(of: doc.attributed, text: doc.text, in: box)
         document = doc
-        pages = ranges
+        pages = layout
         pagesWidth = box.width
 
         let offset = model.speech.hasContent
             ? model.speech.characterOffset(ofSentence: model.currentSentenceIndex, in: content.text)
             : model.pendingOffset
-        pageIndex = ranges.isEmpty ? 0 : pageIndex(forOriginalOffset: offset, document: doc)
+        pageIndex = layout.isEmpty ? 0 : pageIndex(forOriginalOffset: offset, document: doc)
         drag = 0
         syncPageIndicator()
 
         // Remember where the visible page starts so changing font size / line
         // spacing reopens on the same passage instead of the cached old offset.
-        if let range = currentRange {
+        if let range = currentPage?.range {
             model.pendingOffset = doc.characterOffset(atAttributed: range.location)
         }
     }
@@ -366,14 +383,14 @@ struct PagedReader: View {
         guard !pages.isEmpty else { return 0 }
         let location = document.attributedLocation(forOriginal: offset)
         var result = 0
-        for (index, range) in pages.enumerated() {
-            if range.location <= location { result = index } else { break }
+        for (index, page) in pages.enumerated() {
+            if page.range.location <= location { result = index } else { break }
         }
         return result
     }
 
     private func saveProgress() {
-        guard let document, let range = currentRange else { return }
+        guard let document, let range = currentPage?.range else { return }
         let offset = document.characterOffset(atAttributed: range.location)
         model.pendingOffset = offset
         model.saveProgress(characterOffset: offset)
@@ -390,10 +407,11 @@ struct PagedReader: View {
 
     // MARK: - Styling
 
-    /// Applies the TTS highlight to the current page slice. Background colour
-    /// does not affect layout, so pages never need to be re-measured for it.
-    private func styledPage(document: PagedDocument, range: NSRange) -> NSAttributedString {
-        let slice = document.attributed.attributedSubstring(from: range)
+    /// Applies the TTS highlight to one page slice. Background colour does not
+    /// affect layout, so pages never need to be re-measured for it.
+    private func styledPage(document: PagedDocument, page: ReaderPage) -> NSAttributedString {
+        let slice = page.drawable(from: document.attributed)
+        let range = page.range
         guard let highlight = highlightRange(in: document) else { return slice }
         let overlap = NSIntersectionRange(range, highlight)
         guard overlap.length > 0 else { return slice }

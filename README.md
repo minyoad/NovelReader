@@ -64,14 +64,200 @@ xtool devices
 xtool dev
 ```
 
-首次构建或改依赖后，如果 SwiftPM 需要联网：
+SwiftPM 会读 `http_proxy` / `https_proxy`，首次拉 SwiftSoup 前先设好代理即可。注意 xtool 自身**不读**这两个变量，它在 `xtool sdk install` 阶段要单独能联网（见下）。
+
+> 真机安装需要 Apple 账号签名，先跑 `xtool setup` 完成登录。
+
+### 在这台机器上配置 xtool 环境（WSL2 / Ubuntu 24.04）
+
+已配置完成，记录关键点以便复现或换机：
+
+| 组件 | 版本 / 位置 |
+| --- | --- |
+| Swift | 6.4.1，由 swiftly 管理，`~/.local/share/swiftly/toolchains/6.4.1` |
+| xtool | 1.24.0，`/usr/local/bin/xtool` |
+| Darwin SDK | Xcode 27.1，`~/.swiftpm/swift-sdks/darwin.artifactbundle`（`swift sdk list` 显示 `darwin`） |
+| usbmuxd / ideviceinfo | 已装（真机连接用） |
+
+WSL 是 **mirrored 网络模式**，两个坑：
+
+1. **DNS**：WSL 自带的 DNS 隧道（`10.255.255.254`）不可用，只有本地网关 `192.168.53.1` 能解析。
+   已在 `/etc/wsl.conf` 里关掉 `generateResolvConf`，并把 `/etc/resolv.conf` 固定为
+   `nameserver 192.168.53.1` / `192.168.53.157`。换网络后要改成新的网关 IP。
+2. **代理**：Windows 侧代理（`127.0.0.1:10809`）在 mirrored 模式下 WSL 可直接访问，
+   `autoProxy=true` 会把 Windows 系统代理注入成环境变量。
+
+`xtool sdk install` 需要从 GitHub 拉 `toolset` 和 `OpenAppleMacros` 两个 tarball，走代理极慢且会卡住。
+绕过办法是先在 Windows 侧直连下载（直连比走代理快得多），再用环境变量指向本地文件：
 
 ```bash
-xtool-proxy dev build
+# Windows（直连，约 20 秒）
+curl -fL -o toolset-x86_64.tar.gz \
+  https://github.com/xtool-org/darwin-tools-linux-llvm/releases/download/v1.1.0/toolset-x86_64.tar.gz
+curl -fL -o OpenAppleMacrosServer-x86_64.tar.gz \
+  https://github.com/xtool-org/OpenAppleMacros/releases/download/v1.4.1/OpenAppleMacrosServer-x86_64.tar.gz
+
+# WSL
+export XTL_TOOLSET_TARBALL=/mnt/e/.../toolset-x86_64.tar.gz
+export XTL_OAM_TARBALL=/mnt/e/.../OpenAppleMacrosServer-x86_64.tar.gz
+xtool sdk install ~/xcode/Xcode.xip
 ```
 
-> xtool 不读 `http_proxy`，联网操作请走 `xtool-proxy`。
-> 真机安装需要 Apple 账号签名，先跑 `xtool setup` 完成登录。
+> 解压 2GB 的 XIP 要几分钟，**中途别打断**——被中断会留下残缺的 `Xcode.app`，
+> 之后构建会报 `unable to find platform for 'iphoneos'`（因为缺 `SDKSettings.json`），
+> 这时只能删掉 `~/.swiftpm/swift-sdks/darwin.artifactbundle*` 重跑。
+> 建议用 `Start-Process wsl.exe ...` 从 Windows 侧起一个独立进程，避免 shell 超时把安装杀掉。
+
+### 真机连接
+
+**首选：中转 Windows 的 usbmuxd**（快，一条命令）
+
+```bash
+bash Tools/connect-iphone.sh
+```
+
+它做的事：确认 Windows 侧的 `127.0.0.1:27015` 可达 → 断开 usbip → 停掉 WSL 自带的
+usbmuxd → 在 `/var/run/usbmuxd` 上架桥转发到 Windows → 验证设备。
+
+前提是 Windows 装了 Apple Mobile Device Support（`Apple Devices` 或 iTunes 都带）：
+
+```powershell
+winget install --id Apple.AppleMobileDeviceSupport --exact
+Get-Service "Apple Mobile Device Service"      # 应显示 Running
+```
+
+**为什么不走 usbip**：usbip 要把 USB 整个搬进 WSL，数据经过 vhci 虚拟总线再被
+WSL 自己的 usbmuxd 解包一遍，装 13MB 的 ipa 要十几分钟，而且跑到最后
+`[Connecting] 100%` 时容易超时。中转方式只转发 usbmuxd 协议本身，`xtool devices`
+从 10 秒级降到 300ms 以内。
+
+之所以能直连 `127.0.0.1:27015`，是因为这台机器的 WSL 是 **mirrored 网络模式**，
+Windows 的监听端口在 WSL 里同样位于回环地址。NAT 模式则需要一条
+`netsh interface portproxy`，见 `Tools/fix-device-link.sh` 里的说明。
+
+插好手机后：
+
+```bash
+xtool devices --usb          # 应列出 "My iPhone 17 [usb]: <UDID>"
+xtool dev --usb              # 构建 + 安装 + 启动
+```
+
+> `xtool devices` 默认走 `--all`，会去枚举 Network 设备，那条链路在 WSL 里到不了，
+> 抛一个不带信息的 `Error: unknown`。**显式加 `--usb`**。
+
+#### 备选：usbipd 直通
+
+如果 Windows 上不想装 Apple 的软件，也可以用 **usbipd-win** 把 USB 转进 WSL。
+能编译能装，就是慢。
+
+```powershell
+# Windows（管理员）：绑一次就够，之后一直记着
+usbipd bind --busid 3-6
+```
+
+```bash
+# WSL：每次重新插拔后都要跑
+sudo modprobe vhci-hcd                       # WSL 内核自带，但这步不能省
+sudo usbip attach -r 127.0.0.1 -b 3-6
+sudo systemctl start usbmuxd
+idevice_id -l                                # 应输出设备 UDID
+```
+
+几个坑：
+
+- **`usbipd attach --wsl` 用不了**。它读的是管理员账户的 `HKCU`，而这个 Ubuntu 是用户级安装，
+  管理员上下文里看不到，会报 `There are no WSL distributions installed`。
+  所以只做 `bind`，attach 交给 WSL 侧的 `usbip` 主动连 `127.0.0.1:3240`。
+- **Ubuntu 24.04 没有独立的 `usbip` 包**，装在 `linux-tools-generic` 里。
+  `apt` 装完后 `/usr/bin/usbip` 是个包装脚本，会因为内核版本（6.18）对不上 6.8 的工具目录而报
+  `usbip not found for kernel`。直接指向真实二进制即可：
+
+  ```bash
+  sudo ln -sf /usr/lib/linux-tools/6.8.0-147-generic/usbip /usr/local/bin/usbip
+  ```
+- **`vhci_hcd` 加载失败是静默的**。`sudo` 没拿到密码时 `modprobe` 直接失败但不报错，
+  之后 `usbip attach` 会报 `open vhci_driver (is vhci_hcd loaded?)`。
+  跑完 `ls /sys/devices/platform/vhci_hcd*` 确认一下。
+- **attach 会掉**。手机锁屏休眠、拔插一次都会断，`vhci` 端口回到空闲（`sta 004`）。
+  报 `usbip: Device not found` 说明是 Windows 侧设备不在了，重插手机再 `usbipd bind`。
+- 跑中转方式前**必须先 detach**，两条路同时开会抢设备。
+
+
+> `xtool devices` 默认走 `--all`，会去枚举 Network 设备，那条链路在 WSL 里到不了，
+> 抛一个不带信息的 `Error: unknown`。**显式加 `--usb`**。
+
+首次装机可能会要求吊销一张已有的 `Apple Development` 证书（免费帐号每个 Team 只允许有限张）。
+提示是 `Continue? (yes/no):`，**要输入完整的 `yes`**，输 `y` 会被当作取消。
+而且它只在 pty 上提问，管道里塞 `yes y` 不会被读到，得走 `script`：
+
+```bash
+( sleep 60; echo yes ) | script -q -c "xtool dev --usb" /dev/null
+```
+
+#### 不要让 xtool 吊销证书
+
+xtool 有时会要求吊销一张早先的 `Apple Development` 证书（比如显示名是别的名字）。
+**先别答应**——那张证书很可能就是你自己另一台电脑装的，吊销会让那台机器上的 App 立刻失效。
+
+判断方法：`xtool ds certificates list` 看那张证书的 `common name` / `team id`
+是不是你这个 Apple ID 和 Team。如果是同一 Team，本地 `~/.config/xtool/data/<TEAMID>`
+里通常已经存着配对的私钥和证书，可以验证：
+
+```bash
+python3 - <<'PY'
+import plistlib, os, subprocess, tempfile
+d = plistlib.load(open(os.path.expanduser("~/.config/xtool/data/4JBQYZ7D5X"), "rb"))
+k = tempfile.mktemp(suffix=".pem"); open(k, "wb").write(d["privateKey"]["data"])
+c = tempfile.mktemp(suffix=".der")
+cert = d["certificate"]
+open(c, "wb").write(cert.encode("latin-1") if isinstance(cert, str) else cert)
+priv = subprocess.run(["openssl","rsa","-in",k,"-pubout"],capture_output=True,text=True).stdout
+pub  = subprocess.run(["openssl","x509","-inform","DER","-in",c,"-noout","-pubkey"],capture_output=True,text=True).stdout
+print("配对:", priv.strip() == pub.strip())
+PY
+```
+
+如果配对成功、`xtool ds profiles list` 里也有状态 `ACTIVE` 且包含当前设备的描述文件，
+那就**不需要吊销**：xtool 之前某次运行已经把签名好的 ipa 留在
+`~/.cache/xtool/pid-*/dir-staging-*/staging/app.ipa`，直接装它就行：
+
+```bash
+xtool install --usb ~/.cache/xtool/pid-*/dir-staging-*/staging/app.ipa
+```
+
+（`xtool install` 报 `LockdownClient.Error.muxError` 时先 `sudo systemctl restart usbmuxd`。）
+
+描述文件 7 天后过期，到期后还是得让 xtool 重新签 — 那时它会复用已有的证书，
+前提是**别删掉 `~/.config/xtool/data/<TEAMID>`**。
+
+### bundleID 要写全，否则手机上会出现两个 App
+
+`xtool.yml` 里的 `bundleID` 必须写成**最终的完整值**，包括 xtool 自己加的 `XTL-<TEAMID>` 前缀：
+
+```yaml
+bundleID: XTL-4JBQYZ7D5X.com.yang.NovelReader
+```
+
+只写 `com.yang.NovelReader` 时，xtool 会去 Apple 后台找一个叫 `XTL-4JBQYZ7D5X.com.yang.NovelReader`
+的 App ID。如果那个 ID 已经存在（比如别的电脑先用过），它不会复用，而是**再套一层前缀**
+建一个 `XTL-4JBQYZ7D5X.XTL-4JBQYZ7D5X.com.yang.NovelReader`。两个 bundle ID 在 iOS 眼里是两个 App，
+手机上就会并排出现两个同名图标，书架和阅读进度互不相通。
+
+确认当前解析出的 ID：
+
+```bash
+xtool dev build
+python3 -c "import plistlib;print(plistlib.load(open('xtool/NovelReader.app/Info.plist','rb'))['CFBundleIdentifier'])"
+```
+
+卸载多出来的那个：
+
+```bash
+ideviceinstaller -U XTL-4JBQYZ7D5X.XTL-4JBQYZ7D5X.com.yang.NovelReader
+```
+
+> `xtool ds identifiers` 只有 `list`，没有删除。多出来的 App ID 和它的描述文件要去
+> Apple 开发者后台手动删，留着不影响构建。
 
 ### App 图标
 

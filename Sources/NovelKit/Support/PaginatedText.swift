@@ -40,6 +40,20 @@ public struct PaginatedText: Hashable, Sendable {
         self.body = paragraphs.map(\.text).joined(separator: "\n")
     }
 
+    /// True when `offset` (a character offset into `body`) sits at the start of
+    /// a paragraph, so a page beginning there should show the first-line indent.
+    ///
+    /// Pagination cuts pages wherever the frame runs out, which is usually
+    /// mid-paragraph. CoreText indents the first line of every frame, so the
+    /// layout needs to know which pages open a paragraph and which merely
+    /// continue one.
+    public func startsParagraph(atBody offset: Int) -> Bool {
+        guard offset > 0 else { return true }
+        guard offset <= body.count else { return false }
+        let index = body.index(body.startIndex, offsetBy: offset - 1)
+        return body[index] == "\n"
+    }
+
     /// Maps a character offset in the raw chapter text to an offset in `body`.
     public func bodyOffset(forOriginal offset: Int) -> Int {
         guard let first = paragraphs.first else { return 0 }
