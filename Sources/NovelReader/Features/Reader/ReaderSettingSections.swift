@@ -164,8 +164,14 @@ enum ReaderSettingSections {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
                 Text(title)
+                    // Bare `Text` inside a `Form` falls back to the body size,
+                    // which renders larger than the labels of the `Toggle` and
+                    // `Picker` rows around it. Match the caption-sized labels
+                    // the rest of the settings screen already uses.
+                    .font(.caption)
                 Spacer()
                 Text(format(value.wrappedValue))
+                    .font(.caption)
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
             }

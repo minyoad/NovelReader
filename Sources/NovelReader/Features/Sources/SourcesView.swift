@@ -43,13 +43,11 @@ struct SourcesView: View {
                 ForEach(grouped, id: \.0) { group, sources in
                     Section(group) {
                         ForEach(sources) { source in
-                            SourceRow(source: source) {
-                                app.toggleSourceEnabled(source)
-                            }
-                            .contentShape(Rectangle())
-                            .onTapGesture {
-                                editingSource = source
-                            }
+                            SourceRow(
+                                source: source,
+                                onToggle: { app.toggleSourceEnabled(source) },
+                                onOpen: { editingSource = source }
+                            )
                             .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                                 Button(role: .destructive) {
                                     pendingDelete = source
@@ -186,6 +184,10 @@ struct SourcesView: View {
 private struct SourceRow: View {
     let source: BookSource
     var onToggle: () -> Void
+    /// Opens the source's detail screen. Deliberately bound to the text block
+    /// rather than the whole row: a row-wide gesture also fires when the switch
+    /// is tapped, which would open the editor on every enable/disable.
+    var onOpen: () -> Void
 
     /// Computed once per render from the parsed rules. Cheap (14 string scans)
     /// and it cannot go stale, unlike a value cached at import time.
@@ -240,12 +242,18 @@ private struct SourceRow: View {
                         .lineLimit(2)
                 }
             }
-            Spacer()
+            // The whole text column is the "open details" target, gaps included,
+            // while the switch beside it keeps its own taps.
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+            .onTapGesture(perform: onOpen)
             Toggle("", isOn: Binding(
                 get: { source.enabled },
                 set: { _ in onToggle() }
             ))
             .labelsHidden()
+            .contentShape(Rectangle())
+            .onTapGesture {}
         }
         .padding(.vertical, 2)
         .opacity(source.enabled ? 1 : 0.55)
