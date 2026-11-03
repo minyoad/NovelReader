@@ -245,6 +245,14 @@ struct PagedReader: View {
     private func syncPageIndicator() {
         let text = pageIndicatorText ?? ""
         if pageIndicator != text { pageIndicator = text }
+        // The bottom bar's progress bar is the chapter's, so it needs the page
+        // count; it has no other way to learn how long this chapter is.
+        let progress = pages.isEmpty
+            ? 0
+            : Double(min(pageIndex + 1, pages.count)) / Double(pages.count)
+        if abs(model.chapterProgress - progress) > 0.0001 {
+            model.chapterProgress = progress
+        }
     }
 
     private func chapterHint(forward: Bool, box: CGSize) -> some View {
@@ -384,9 +392,15 @@ struct PagedReader: View {
 
         let doc = PagedDocument.make(content: content, reading: reading, theme: theme)
         let layout = PageLayout.ranges(of: doc.attributed, text: doc.text, in: box)
+        // A different chapter starts at its own beginning; showing the old
+        // chapter's position for a frame is worse than showing nothing.
+        let isNewChapter = document?.chapterURL != content.chapterURL
         document = doc
         pages = layout
         pagesWidth = box.width
+        if isNewChapter {
+            model.chapterProgress = 0
+        }
 
         // While reading, the page on screen is already the one being spoken —
         // `followSpeech` keeps it there — so repagination (a font change, say)

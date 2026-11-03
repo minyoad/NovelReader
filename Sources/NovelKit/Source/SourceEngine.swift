@@ -88,6 +88,160 @@ public struct SourceEngine {
         return results
     }
 
+    // MARK: - Explore (discover page)
+
+    /// One page of a source's discover category.
+    ///
+    /// Reuses the `explore` rules, which describe the same list shape the
+    /// search rules do: a container selector plus per-item name/author/cover.
+    /// A category may carry its own option block, and real sources use it to
+    /// override the parsing rules for that one category — so those win over
+    /// the source-level rules.
+    public func explore(
+        category: ExploreCategory,
+        page: Int,
+        source: BookSource
+    ) async throws -> [SearchResult] {
+        logSource(source, category: category, page: page)
+
+        guard source.canExplore else {
+            log("REJECT 书源不可探索 name=\(source.name) enabledExplore=\(source.enabledExplore) exploreURL空=\(source.exploreURL.isEmpty)")
+            throw SourceError.unsupported("书源「\(source.name)」没有配置发现页")
+        }
+
+        // The page number must be substituted before the address is resolved:
+        // categories are written as `/list/{{page}}.html`, and `{{` is not
+        // valid in a URL, so resolving first leaves the token in place.
+        let pagedURL = ExploreParser.url(for: category, page: page)
+        let base = TextProcessing.normalizedBaseURL(source.baseURL)
+        let resolved = TextProcessing.resolveURL(pagedURL, base: base) ?? pagedURL
+        var variables = ["page": String(max(page, 1)), "key": ""]
+        var options = category.options
+        if let body = ExploreParser.body(for: category, page: page) {
+            options["body"] = .string(body)
+            variables["key"] = body
+        }
+        log("REQUEST url=\(resolved) method=\(options["method"]?.stringValue ?? "GET") body=\(options["body"]?.stringValue ?? "-")")
+        let fetched = try await client.fetch(
+            try makeRequest(
+                url: resolved,
+                options: options,
+                source: source,
+                referer: source.baseURL,
+                variables: variables
+            ),
+            referer: source.baseURL
+        )
+        log("RESPONSE finalURL=\(fetched.finalURL.absoluteString) status=\(fetched.statusCode) bytes=\(fetched.text.count)")
+        ExploreLog.block("HTML_HEAD", String(fetched.text.prefix(600)))
+
+        let root = try scope(for: fetched, source: source)
+        let engine = makeEngine(variables: variables, baseURL: fetched.finalURL)
+        let rules = Self.exploreRules(for: category, source: source)
+        log("RULES 来源=\(Self.exploreRuleOrigin(for: category, source: source)) bookList=\(rules.bookList) name=\(rules.name) bookURL=\(rules.bookURL)")
+        if rules.bookList.isEmpty {
+            log("REJECT 列表规则为空")
+            throw SourceError.unsupported("书源「\(source.name)」的分类「\(category.name)」没有配置列表规则")
+        }
+        let items = engine.scopes(for: rules.bookList, in: root)
+        log("MATCH bookList 命中=\(items.count)")
+        guard !items.isEmpty else {
+            // The page loaded but the selector matched nothing. Saying so
+            // separately from a network failure is what tells us whether to
+            // chase the address or the rule.
+            throw SourceError.noResults(
+                "页面能打开，但列表规则「\(rules.bookList)」没匹配到内容（\(category.url)）"
+            )
+        }
+        if rules.name.isEmpty || rules.bookURL.isEmpty {
+            throw SourceError.unsupported(
+                "分类「\(category.name)」匹配到 \(items.count) 条，但缺少书名或链接规则"
+            )
+        }
+
+        var results: [SearchResult] = []
+        var dropped = 0
+        for item in items {
+            guard let name = engine.value(rules.name, in: item), !name.isEmpty else { dropped += 1; continue }
+            guard let detail = engine.value(rules.bookURL, in: item),
+                  let detailURL = TextProcessing.resolveURL(detail, base: fetched.finalURL) else { dropped += 1; continue }
+            let cover = engine.value(rules.coverURL, in: item)
+            results.append(SearchResult(
+                sourceID: source.id,
+                sourceName: source.name,
+                name: name,
+                author: engine.value(rules.author, in: item) ?? "",
+                kind: engine.value(rules.kind, in: item) ?? "",
+                lastChapterTitle: engine.value(rules.lastChapter, in: item) ?? "",
+                updateTime: engine.value(rules.updateTime, in: item) ?? "",
+                intro: engine.value(rules.intro, in: item) ?? "",
+                coverURL: cover.flatMap { TextProcessing.resolveURL($0, base: fetched.finalURL) },
+                detailURL: detailURL
+            ))
+        }
+        log("RESULT 解析成功=\(results.count) 丢弃(缺书名或链接)=\(dropped)")
+        return results
+    }
+
+    private func log(_ message: String) {
+        ExploreLog.line(message)
+    }
+
+    /// Dumps everything the discover page needs to explain itself.
+    private func logSource(_ source: BookSource, category: ExploreCategory, page: Int) {
+        log("=== OPEN source=\(source.name) id=\(source.id) page=\(page) ===")
+        log("baseURL=\(source.baseURL) enabled=\(source.enabled) enabledExplore=\(source.enabledExplore) canExplore=\(source.canExplore)")
+        ExploreLog.block("EXPLORE_URL", source.exploreURL)
+        log("SOURCE_RULES bookList=\(source.explore.bookList) name=\(source.explore.name) bookURL=\(source.explore.bookURL) author=\(source.explore.author) coverURL=\(source.explore.coverURL)")
+        log("CATEGORY name=\(category.name) url=\(category.url) hasOwnRules=\(category.hasRules)")
+        ExploreLog.block("CATEGORY_OPTIONS", category.optionsJson)
+        let categories = ExploreParser.categories(from: source.exploreURL)
+        log("CATEGORIES total=\(categories.count) openable=\(source.openableExploreCategories.count)")
+        for item in categories {
+            log("  - name=\(item.name) url=\(item.url) own=\(item.hasRules) openable=\(item.canOpen(exploreRules: source.fallbackExploreRule))")
+        }
+    }
+
+    /// Legado's per-category `ruleExplore` uses the same field names as
+    /// `ruleSearch`, so the importer's mapping applies unchanged.
+    ///
+    /// Resolution order: the category's own block, then the source's
+    /// `ruleExplore`, then `ruleSearch`. The last step matters because a great
+    /// many sources ship `"ruleExplore": {}` next to a long `exploreUrl` — the
+    /// author relied on the listing page using the same markup as search.
+    static func exploreRules(for category: ExploreCategory, source: BookSource) -> SearchRule {
+        if let own = category.options["ruleExplore"]?.objectValue.map(Self.searchRule(from:)),
+           !own.bookList.isEmpty {
+            return own
+        }
+        return source.fallbackExploreRule
+    }
+
+    static func exploreRuleOrigin(for category: ExploreCategory, source: BookSource) -> String {
+        if let own = category.options["ruleExplore"]?.objectValue.map(Self.searchRule(from:)),
+           !own.bookList.isEmpty {
+            return "分类自带"
+        }
+        return source.explore.bookList.isEmpty ? "回退到搜索规则" : "书源级"
+    }
+
+    static func searchRule(from object: [String: JSONValue]) -> SearchRule {
+        func text(_ key: String) -> String { object[key]?.stringValue ?? "" }
+        return SearchRule(
+            bookList: text("bookList"),
+            name: text("name"),
+            author: text("author"),
+            intro: text("intro"),
+            kind: text("kind"),
+            lastChapter: text("lastChapter"),
+            updateTime: text("updateTime"),
+            bookURL: text("bookUrl"),
+            coverURL: text("coverUrl"),
+            wordCount: text("wordCount"),
+            checkKeyWord: object["checkKeyWord"]?.stringValue
+        )
+    }
+
     // MARK: - Book detail
 
     public func fetchBookDetail(_ result: SearchResult, source: BookSource) async throws -> Book {

@@ -6,6 +6,15 @@
     <string>夜读</string>
     <key>CFBundleName</key>
     <string>NovelReader</string>
+    <!-- The UI is Chinese only. Without this the system-supplied strings —
+         the search field's Cancel button, share sheets, text-selection menus —
+         fall back to the development region and appear in English. -->
+    <key>CFBundleDevelopmentRegion</key>
+    <string>zh-Hans</string>
+    <key>CFBundleLocalizations</key>
+    <array>
+        <string>zh-Hans</string>
+    </array>
     <key>CFBundleShortVersionString</key>
     <string>1.0</string>
     <key>CFBundleVersion</key>

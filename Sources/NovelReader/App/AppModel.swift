@@ -60,7 +60,16 @@ enum Keychain {
 
 enum SearchState: Equatable {
     case idle
-    case searching(String)
+    /// - Parameters:
+    ///   - query: what is being searched for.
+    ///   - done: sources that have answered so far.
+    ///   - total: sources taking part.
+    ///
+    /// Results stream in one source at a time, so the count is what tells the
+    /// user the search is still working rather than stuck — waiting for the
+    /// slowest source before showing anything made a 20-source search feel
+    /// broken even when most had already answered.
+    case searching(String, done: Int = 0, total: Int = 0)
     /// - Parameters:
     ///   - failed: sources that errored (network, site changed, …). Worth
     ///     retrying later.
@@ -70,6 +79,44 @@ enum SearchState: Equatable {
     ///     ignore a permanent problem.
     case finished(count: Int, failed: [String], skipped: [String])
     case failed(String)
+
+    /// A search is in flight, so the UI shows progress rather than empty states.
+    var isSearching: Bool {
+        if case .searching = self { return true }
+        return false
+    }
+}
+
+/// The tabs in the bottom bar, in display order.
+///
+/// Search is deliberately absent: it is presented over the discover page, so
+/// it gets no slot. A case without a matching `.tabItem` still leaves a dead
+/// gap in the bar, which is why this list matches the bar one-for-one.
+enum AppTab: Hashable {
+    case library
+    case explore
+    case sources
+    case settings
+}
+
+/// A source's discover page: categories, then the books in one of them.
+enum ExploreState: Equatable {
+    case idle
+    case loading
+    /// - Parameter more: whether another page may exist. Sources rarely say,
+    ///   so the page asks until a page comes back empty.
+    case loaded([SearchResult], page: Int, more: Bool)
+    case failed(String)
+
+    var isLoading: Bool {
+        if case .loading = self { return true }
+        return false
+    }
+
+    var results: [SearchResult] {
+        if case .loaded(let results, _, _) = self { return results }
+        return []
+    }
 }
 
 @MainActor
@@ -79,6 +126,24 @@ final class AppModel: ObservableObject {
     @Published var sources: [BookSource] = []
     @Published var searchState: SearchState = .idle
     @Published var searchResults: [SearchResult] = []
+    /// State of the discover page. Separate from `searchState` so switching
+    /// tabs never disturbs a search the user left running.
+    @Published var exploreState: ExploreState = .idle
+    /// Which discover categories the current source offers.
+    @Published var exploreCategories: [ExploreCategory] = []
+    /// The book source whose discover page is showing.
+    @Published var exploreSourceID: UUID?
+    /// Whether the search screen is presented over the discover page.
+    ///
+    /// Search used to be a tab of its own. It is now opened from the discover
+    /// page, so this is a presentation flag rather than a tab selection.
+    @Published var isSearching = false
+    /// Identifies the search currently allowed to write results.
+    ///
+    /// Searching again while an older one is still in flight (or cancelling)
+    /// invalidates the old ticket, so a late reply cannot overwrite whatever
+    /// the user is looking at now.
+    private var activeSearchTicket: UUID?
     @Published var banner: (text: String, isError: Bool)?
 
     let store: LibraryStore
@@ -348,7 +413,12 @@ final class AppModel: ObservableObject {
         let query = keyword.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { return }
 
-        searchState = .searching(query)
+        // A newer search supersedes any older one still running; the older
+        // task checks this before writing so its results never land on top of
+        // a search the user has moved on from.
+        let ticket = UUID()
+        activeSearchTicket = ticket
+
         searchResults = []
 
         let available = sources.filter { $0.enabled && $0.type == .text && ($0.canSearch || $0.isBuiltIn) }
@@ -358,9 +428,11 @@ final class AppModel: ObservableObject {
             return
         }
 
+        searchState = .searching(query, done: 0, total: active.count)
+
         var collected: [SearchResult] = []
         var failures: [String] = []
-        var skipped: [String] = []
+        var done = 0
 
         await withTaskGroup(of: (String, Result<[SearchResult], Error>).self) { group in
             for source in active {
@@ -390,30 +462,142 @@ final class AppModel: ObservableObject {
                 }
             }
 
+            // Publish after every answer rather than once at the end. The
+            // slowest source used to hold back everything the fast ones had
+            // already returned, which is what made a many-source search feel
+            // like it had hung.
+            var remembered = false
             for await (name, result) in group {
+                guard activeSearchTicket == ticket else { return }
+                done += 1
                 switch result {
                 case .success(let results): collected.append(contentsOf: results)
                 case .failure: failures.append(name)
                 }
+                let sorted = Self.rankResults(collected, for: query)
+                searchResults = sorted
+                searchState = .searching(query, done: done, total: active.count)
+                // Record the keyword the moment anything is found, not at the
+                // end. Cancelling while the slow sources are still running
+                // returns early, and a search that did produce results is
+                // exactly the one worth repeating.
+                if !remembered, !collected.isEmpty {
+                    remembered = true
+                    rememberSearch(query)
+                }
             }
         }
 
+        guard activeSearchTicket == ticket else { return }
+
         // A source whose search rule is JavaScript-only is not a transient
         // failure; say so once, up front, instead of listing it as "失败".
+        var skipped: [String] = []
         for source in active where source.compatibility.blockingRoles.contains("搜索列表") {
             skipped.append(source.name)
         }
         failures.removeAll { name in skipped.contains(name) }
 
-        // Prefer exact / prefix title matches.
-        collected.sort { lhs, rhs in
+        searchResults = Self.rankResults(collected, for: query)
+        searchState = .finished(count: collected.count, failed: failures, skipped: skipped)
+    }
+
+    /// Drops results of an in-flight search and returns to the empty state.
+    ///
+    /// Cancelling used to leave the previous results on screen, so the list no
+    /// longer matched what was typed in the field.
+    func cancelSearch() {
+        activeSearchTicket = nil
+        searchState = .idle
+        searchResults = []
+    }
+
+    /// Records a successful search so it can be tapped again later.
+    ///
+    /// Only results-bearing searches are kept: remembering every abandoned
+    /// keystroke would fill the list with typos nobody wants to revisit.
+    func rememberSearch(_ keyword: String) {
+        let query = keyword.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return }
+        var history = settings.searchHistory.filter { $0 != query }
+        history.insert(query, at: 0)
+        settings.searchHistory = Array(history.prefix(Self.searchHistoryLimit))
+        saveSettings()
+    }
+
+    func removeSearchHistory(_ keyword: String) {
+        settings.searchHistory.removeAll { $0 == keyword }
+        saveSettings()
+    }
+
+    func clearSearchHistory() {
+        guard !settings.searchHistory.isEmpty else { return }
+        settings.searchHistory = []
+        saveSettings()
+    }
+
+    /// Enough to cover a session's worth of looking things up, short enough to
+    /// read at a glance.
+    static let searchHistoryLimit = 12
+
+    // MARK: - Explore
+
+    /// Sources whose discover page can actually be opened.
+    var explorableSources: [BookSource] {
+        sources.filter { $0.enabled && $0.type == .text && $0.canExplore }
+    }
+
+    /// Loads the first page of a source's discover page.
+    ///
+    /// Only categories the source can actually read are offered: a tab that is
+    /// guaranteed to fail is worse than no tab at all.
+    func startExplore(source: BookSource) async {
+        exploreSourceID = source.id
+        exploreCategories = source.openableExploreCategories
+        guard let first = exploreCategories.first else {
+            exploreState = .failed("这个书源的发现页没有配置可用的分类规则")
+            return
+        }
+        await loadExplore(category: first, source: source, page: 1)
+    }
+
+    func loadExplore(category: ExploreCategory, source: BookSource, page: Int) async {
+        exploreState = .loading
+        do {
+            let results = try await engine.explore(category: category, page: page, source: source)
+            ExploreLog.line("UI OK source=\(source.name) category=\(category.name) page=\(page) 结果=\(results.count)")
+            exploreState = .loaded(results, page: page, more: !results.isEmpty)
+        } catch {
+            ExploreLog.line("UI FAIL source=\(source.name) category=\(category.name) error=\(error.localizedDescription)")
+            exploreState = .failed(error.localizedDescription)
+        }
+    }
+
+    /// Appends the next page of the category already on screen.
+    func loadMoreExplore(category: ExploreCategory, source: BookSource) async {
+        guard case .loaded(let existing, let page, true) = exploreState else { return }
+        do {
+            let next = try await engine.explore(category: category, page: page + 1, source: source)
+            if next.isEmpty {
+                exploreState = .loaded(existing, page: page, more: false)
+            } else {
+                exploreState = .loaded(existing + next, page: page + 1, more: true)
+            }
+        } catch {
+            // Keep what is on screen: losing a loaded page because the next one
+            // failed is worse than simply not having more.
+            exploreState = .loaded(existing, page: page, more: false)
+        }
+    }
+
+    /// Exact title first, then titles containing the query, then the rest.
+    static func rankResults(_ results: [SearchResult], for query: String) -> [SearchResult] {
+        results.sorted { lhs, rhs in
             let lhsExact = lhs.name == query ? 0 : (lhs.name.contains(query) ? 1 : 2)
             let rhsExact = rhs.name == query ? 0 : (rhs.name.contains(query) ? 1 : 2)
             if lhsExact != rhsExact { return lhsExact < rhsExact }
             return lhs.name < rhs.name
         }
-        searchResults = collected
-        searchState = .finished(count: collected.count, failed: failures, skipped: skipped)
     }
 
     // MARK: - Shelf

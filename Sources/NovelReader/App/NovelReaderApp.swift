@@ -16,7 +16,9 @@ struct NovelReaderApp: App {
 
 struct RootView: View {
     @EnvironmentObject private var app: AppModel
-    @State private var selection: Tab = .library
+    /// Which tab the bar shows. Local to the bar, not shared: search is no
+    /// longer a tab, so nothing outside needs to change it.
+    @State private var tab: AppTab = .library
     /// The book to reopen, once the shelf and settings are on screen.
     ///
     /// Held separately from the launch task so that closing the reader leaves
@@ -26,30 +28,29 @@ struct RootView: View {
     /// is rebuilt, and reopening the reader mid-session would be hostile.
     @State private var didResume = false
 
-    enum Tab: Hashable {
-        case library
-        case search
-        case sources
-        case settings
-    }
-
     var body: some View {
-        TabView(selection: $selection) {
+        TabView(selection: $tab) {
             LibraryView()
                 .tabItem { Label("书架", systemImage: "books.vertical") }
-                .tag(Tab.library)
+                .tag(AppTab.library)
 
-            SearchView()
-                .tabItem { Label("找书", systemImage: "magnifyingglass") }
-                .tag(Tab.search)
+            ExploreView()
+                .tabItem { Label("发现", systemImage: "safari") }
+                .tag(AppTab.explore)
 
             SourcesView()
                 .tabItem { Label("书源", systemImage: "antenna.radiowaves.left.and.right") }
-                .tag(Tab.sources)
+                .tag(AppTab.sources)
 
             SettingsView()
                 .tabItem { Label("设置", systemImage: "gearshape") }
-                .tag(Tab.settings)
+                .tag(AppTab.settings)
+        }
+        // Search is reached from the discover page rather than from the bar.
+        // It has to be outside `TabView`: a child without `.tabItem` still
+        // reserves a blank slot, which leaves a dead gap in the bar.
+        .sheet(isPresented: $app.isSearching) {
+            SearchView()
         }
         .overlay(alignment: .bottom) {
             if let banner = app.banner {

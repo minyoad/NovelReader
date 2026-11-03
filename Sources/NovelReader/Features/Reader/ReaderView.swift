@@ -592,22 +592,22 @@ private struct ReaderBottomBar: View {
         VStack(spacing: 6) {
             // Progress row: the bar reads as a status line first, controls second.
             HStack(spacing: 10) {
-                ProgressView(value: model.progressFraction)
+                // The bar follows the chapter, because that is the span a reader
+                // can still judge by eye — how much of *this* chapter is left.
+                // Whole-book position goes beside it as a number, where an
+                // approximation is all it needs to be.
+                ProgressView(value: model.chapterProgress)
                     .tint(theme.accent)
+                    .layoutPriority(-1)
                 Text("\(model.currentIndex + 1)/\(model.chapters.count)")
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(theme.secondaryText)
-                if isSpeaking {
-                    // Exit sits here rather than in the transport row: an
-                    // overlay above those buttons would steal their taps, and
-                    // the row itself needs its full width.
-                    Button { model.stopSpeaking() } label: {
-                        Label("退出", systemImage: "xmark.circle")
-                            .font(.caption2)
-                            .labelStyle(.titleAndIcon)
-                    }
+                    .fixedSize()
+                Text("全书 \(model.bookProgressPercent)%")
+                    .font(.caption2.monospacedDigit())
                     .foregroundStyle(theme.secondaryText)
-                }
+                    .lineLimit(1)
+                    .fixedSize()
             }
 
             if isSpeaking {
@@ -706,11 +706,11 @@ private struct ReaderBottomBar: View {
                 Image(systemName: "backward.end.fill")
                     .font(.system(size: 22))
             }
-            .buttonStyle(SpeechButtonStyle(theme: theme, diameter: 56))
+            .buttonStyle(SpeechButtonStyle(theme: theme, diameter: 52))
             .disabled(model.currentIndex == 0)
             .opacity(model.currentIndex == 0 ? 0.4 : 1)
 
-            Spacer(minLength: 8)
+            Spacer(minLength: 6)
 
             Button { model.speech.toggle() } label: {
                 if model.speech.isPreparing {
@@ -727,7 +727,7 @@ private struct ReaderBottomBar: View {
             }
             .buttonStyle(SpeechButtonStyle(theme: theme, diameter: 68, filled: true))
 
-            Spacer(minLength: 8)
+            Spacer(minLength: 6)
 
             Button {
                 Task { await model.goNextChapter(autoPlaySpeech: true) }
@@ -735,18 +735,30 @@ private struct ReaderBottomBar: View {
                 Image(systemName: "forward.end.fill")
                     .font(.system(size: 22))
             }
-            .buttonStyle(SpeechButtonStyle(theme: theme, diameter: 56))
+            .buttonStyle(SpeechButtonStyle(theme: theme, diameter: 52))
             .disabled(model.currentIndex + 1 >= model.chapters.count)
             .opacity(model.currentIndex + 1 >= model.chapters.count ? 0.4 : 1)
 
-            Spacer(minLength: 8)
+            Spacer(minLength: 6)
 
             Button { showSpeechSettings = true } label: {
                 Image(systemName: "waveform")
-                    .font(.system(size: 19))
+                    .font(.system(size: 18))
             }
-            .buttonStyle(SpeechButtonStyle(theme: theme, diameter: 48))
+            .buttonStyle(SpeechButtonStyle(theme: theme, diameter: 44))
             .accessibilityLabel("朗读设置")
+
+            Spacer(minLength: 6)
+
+            // Leaving playback is a transport action, so it belongs with the
+            // other controls. It used to share the status row with the
+            // progress bar, where it read as a label and squeezed the numbers.
+            Button { model.stopSpeaking() } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 18))
+            }
+            .buttonStyle(SpeechButtonStyle(theme: theme, diameter: 44))
+            .accessibilityLabel("退出朗读")
         }
         .foregroundStyle(theme.text)
     }

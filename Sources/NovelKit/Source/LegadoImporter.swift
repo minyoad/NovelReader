@@ -129,8 +129,14 @@ public enum LegadoImporter {
         )
     }
 
+    /// Legado lets a source carry a trailing `#分组` after its address — the
+    /// real source above ends with `#🎃` — and that fragment is a label, not
+    /// part of the site. Left in place it becomes part of every request URL.
     private static func normalizeBase(_ url: String) -> String {
         var text = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let hash = text.firstIndex(of: "#") {
+            text = String(text[..<hash])
+        }
         while text.hasSuffix("/") { text.removeLast() }
         return text
     }

@@ -469,6 +469,11 @@ public struct AppSettings: Codable, Hashable, Sendable {
     public var searchAllSources: Bool
     /// Output layout applied after AI cleanup.
     public var aiOutputFormat: AIPrompt.OutputFormat
+    /// Recent search keywords, newest first.
+    ///
+    /// Kept short on purpose: a list long enough to scroll is one the user
+    /// scrolls past rather than taps.
+    public var searchHistory: [String]
 
     public init(
         reading: ReadingSettings = ReadingSettings(),
@@ -477,7 +482,8 @@ public struct AppSettings: Codable, Hashable, Sendable {
         ai: AIConfiguration = AIConfiguration(),
         cache: CacheSettings = CacheSettings(),
         searchAllSources: Bool = true,
-        aiOutputFormat: AIPrompt.OutputFormat = .paragraphs
+        aiOutputFormat: AIPrompt.OutputFormat = .paragraphs,
+        searchHistory: [String] = []
     ) {
         self.reading = reading
         self.tts = tts
@@ -486,6 +492,7 @@ public struct AppSettings: Codable, Hashable, Sendable {
         self.cache = cache
         self.searchAllSources = searchAllSources
         self.aiOutputFormat = aiOutputFormat
+        self.searchHistory = searchHistory
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -496,6 +503,7 @@ public struct AppSettings: Codable, Hashable, Sendable {
         case cache
         case searchAllSources
         case aiOutputFormat
+        case searchHistory
     }
 
     /// Tolerant decoding so adding settings in a new build does not wipe the
@@ -511,6 +519,7 @@ public struct AppSettings: Codable, Hashable, Sendable {
         searchAllSources = try container.decodeIfPresent(Bool.self, forKey: .searchAllSources) ?? defaults.searchAllSources
         aiOutputFormat = try container.decodeIfPresent(AIPrompt.OutputFormat.self, forKey: .aiOutputFormat)
             ?? defaults.aiOutputFormat
+        searchHistory = try container.decodeIfPresent([String].self, forKey: .searchHistory) ?? defaults.searchHistory
     }
 
     /// A copy safe to write as plain JSON: API keys live in the Keychain, never

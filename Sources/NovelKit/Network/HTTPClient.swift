@@ -72,7 +72,7 @@ public enum HTTPError: LocalizedError {
 
     public var errorDescription: String? {
         switch self {
-        case .badURL(let url): return "无效的链接：\(url)"
+        case .badURL(let url): return "无效的链接，书源地址里可能含有多余字符：\(url)"
         case .invalidResponse: return "服务器返回了无法识别的响应"
         case .badStatus(let code, let url): return "HTTP \(code)：\(url)"
         case .emptyBody(let url): return "内容为空：\(url)"
@@ -145,6 +145,12 @@ public final class HTTPClient: @unchecked Sendable {
         urlRequest.httpMethod = request.method.rawValue
         urlRequest.setValue(settings.userAgent, forHTTPHeaderField: "User-Agent")
         urlRequest.setValue("zh-CN,zh;q=0.9,en;q=0.8", forHTTPHeaderField: "Accept-Language")
+        // Some sites answer 403/521 to a request without a browser-like
+        // Accept header; the client is fetching HTML, so say so.
+        urlRequest.setValue(
+            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            forHTTPHeaderField: "Accept"
+        )
 
         if let referer, !referer.isEmpty {
             urlRequest.setValue(referer, forHTTPHeaderField: "Referer")

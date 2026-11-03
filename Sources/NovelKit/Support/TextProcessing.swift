@@ -268,7 +268,34 @@ public enum TextProcessing {
         if let url = URL(string: trimmed, relativeTo: base)?.absoluteURL {
             return url.absoluteString
         }
+        // A relative address cannot be fetched on its own, and passing it on
+        // surfaces later as "invalid URL" — far from the real cause. Encoding
+        // the leftovers is the last thing that can make the request work.
+        if let encoded = trimmed.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed),
+           let url = URL(string: encoded) ?? URL(string: encoded, relativeTo: base)?.absoluteURL {
+            return url.absoluteString
+        }
         return trimmed
+    }
+
+    /// A base address with the parts legado allows but URLs reject.
+    ///
+    /// `bookSourceUrl` is written by hand in third-party files and routinely
+    /// carries a `#分组` label, stray spaces, or a trailing slash — all of which
+    /// break the join with a category path. Cleaning it once here keeps every
+    /// caller from repeating the check.
+    public static func normalizedBaseURL(_ raw: String) -> URL? {
+        var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let hash = text.firstIndex(of: "#") {
+            text = String(text[..<hash])
+        }
+        text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return nil }
+        if let url = URL(string: text) { return url }
+        guard let encoded = text.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) else {
+            return nil
+        }
+        return URL(string: encoded)
     }
 
     public static func absoluteURL(_ link: String, base: URL?) -> URL? {

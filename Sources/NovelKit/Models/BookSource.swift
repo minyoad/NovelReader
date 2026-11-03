@@ -211,5 +211,30 @@ public struct BookSource: Identifiable, Codable, Hashable, Sendable {
     }
 
     public var canSearch: Bool { !searchURL.isEmpty }
-    public var canExplore: Bool { enabledExplore && !exploreURL.isEmpty }
+
+    /// The rules a category falls back to when it has none of its own.
+    ///
+    /// Legado sources are often written with `ruleExplore` left as `{}` while
+    /// `exploreUrl` lists dozens of categories — the author expected the
+    /// discover listing to share `ruleSearch`, because the two pages render
+    /// the same markup. Falling back keeps those sources usable instead of
+    /// offering tabs that cannot parse anything.
+    public var fallbackExploreRule: SearchRule {
+        explore.bookList.isEmpty ? search : explore
+    }
+
+    /// A discover page needs both a category list and a way to read it.
+    ///
+    /// A source with nothing usable must not be offered at all, so the reader
+    /// never sees a source that only produces errors.
+    public var canExplore: Bool {
+        guard enabledExplore, !exploreURL.isEmpty else { return false }
+        return ExploreParser.categories(from: exploreURL)
+            .contains { $0.canOpen(exploreRules: fallbackExploreRule) }
+    }
+    /// The categories that can actually be opened, in source order.
+    public var openableExploreCategories: [ExploreCategory] {
+        ExploreParser.categories(from: exploreURL)
+            .filter { $0.canOpen(exploreRules: fallbackExploreRule) }
+    }
 }

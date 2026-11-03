@@ -15,9 +15,27 @@ struct SourcesView: View {
     @State private var lastWarnings: [String] = []
     @State private var showWarnings = false
     @State private var pendingDelete: BookSource?
+    /// What the reader typed into the source list's search field.
+    @State private var query = ""
 
+    private var trimmedQuery: String {
+        query.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Sources matching the search field, grouped the way the list shows them.
+    ///
+    /// Matches the name, the host and the group: a hundred imported sources
+    /// share prefixes like `🎉` and many names repeat, so the host is often the
+    /// only thing that tells two entries apart, and the group is how someone
+    /// who never renamed anything finds their way around.
     private var grouped: [(String, [BookSource])] {
-        let dictionary = Dictionary(grouping: app.sources) { source in
+        let needle = trimmedQuery
+        let matching = needle.isEmpty ? app.sources : app.sources.filter { source in
+            source.name.localizedCaseInsensitiveContains(needle)
+                || source.baseURL.localizedCaseInsensitiveContains(needle)
+                || source.group.localizedCaseInsensitiveContains(needle)
+        }
+        let dictionary = Dictionary(grouping: matching) { source in
             source.group.isEmpty ? "未分组" : source.group
         }
         return dictionary
@@ -62,6 +80,14 @@ struct SourcesView: View {
                                 .tint(.blue)
                             }
                         }
+                    }
+                }
+
+                if !app.sources.isEmpty && grouped.isEmpty {
+                    ContentUnavailableView {
+                        Label("没有匹配的书源", systemImage: "magnifyingglass")
+                    } description: {
+                        Text("试试书源名、网址或分组名的一部分。")
                     }
                 }
 

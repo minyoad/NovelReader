@@ -29,6 +29,12 @@ final class ReaderModel: ObservableObject {
     @Published var showSettings = false
     @Published var showChapterList = false
     @Published var pendingOffset: Int = 0
+    /// How far the reader is into the current chapter, 0...1.
+    ///
+    /// The bottom bar used to show only chapter position, which says nothing
+    /// about how much of a 40-page chapter is left. `PagedReader` owns the page
+    /// count and writes it here as pages turn.
+    @Published var chapterProgress: Double = 0
     @Published var toast: (text: String, isError: Bool)?
     /// Source candidates for the current book, shown in the switch sheet.
     @Published var sourceCandidates: [SearchResult] = []
@@ -142,6 +148,24 @@ final class ReaderModel: ObservableObject {
     var progressFraction: Double {
         guard !chapters.isEmpty else { return 0 }
         return Double(currentIndex + 1) / Double(chapters.count)
+    }
+
+    /// The book's position as a whole, for the label beside the chapter bar.
+    ///
+    /// Chapters differ wildly in length, so counting chapters alone misreports
+    /// how much of the book is behind the reader. The current chapter counts
+    /// as far as `chapterProgress` has taken it.
+    var bookProgressFraction: Double {
+        guard !chapters.isEmpty else { return 0 }
+        let finished = Double(currentIndex)
+        return (finished + chapterProgress) / Double(chapters.count)
+    }
+
+    /// Same value as a whole percentage, always rounding up from zero so a
+    /// freshly opened book does not announce "0%" while text is on screen.
+    var bookProgressPercent: Int {
+        guard bookProgressFraction > 0 else { return 0 }
+        return max(1, min(100, Int((bookProgressFraction * 100).rounded())))
     }
 
     var isSpeaking: Bool { speech.isActive }

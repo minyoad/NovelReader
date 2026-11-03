@@ -30,41 +30,76 @@ struct SearchView: View {
         app.sources.filter { $0.enabled && $0.type == .text && $0.canSearch }
     }
 
+    /// Nothing typed: the field is where a search starts, so this is the only
+    /// moment the history belongs on screen.
+    private var isQueryEmpty: Bool {
+        query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
     var body: some View {
         NavigationStack {
             Group {
-                switch app.searchState {
-                case .idle:
-                    EmptyStateView(
-                        title: "找一本书",
-                        message: searchHint,
-                        systemImage: "magnifyingglass"
-                    )
-                case .searching(let keyword):
-                    VStack(spacing: 14) {
-                        ProgressView()
-                        Text("正在搜索「\(keyword)」…")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                        Text("\(activeSources.count) 个书源")
-                            .font(.caption)
-                            .foregroundStyle(.tertiary)
+                // An empty field always shows the history. Keying this off
+                // `searchState` meant the history only appeared if the app
+                // happened to be idle, and clearing the field does not
+                // reliably drive that state.
+                if isQueryEmpty {
+                    if app.settings.searchHistory.isEmpty {
+                        EmptyStateView(
+                            title: "找一本书",
+                            message: searchHint,
+                            systemImage: "magnifyingglass"
+                        )
+                    } else {
+                        searchHistoryList
                     }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                case .finished(let count, let failed, let skipped):
-                    if app.searchResults.isEmpty {
-                        VStack(spacing: 10) {
-                            EmptyStateView(
-                                title: "没有找到结果",
-                                message: emptyResultMessage(failed: failed, skipped: skipped),
-                                systemImage: "questionmark.folder"
+                } else {
+                    switch app.searchState {
+                    case .idle:
+                        EmptyStateView(
+                            title: "找一本书",
+                            message: searchHint,
+                            systemImage: "magnifyingglass"
+                        )
+                    case .searching(let keyword, let done, let total):
+                        // Results stream in one source at a time, so show them
+                        // as they arrive instead of a full-screen spinner. A
+                        // search over twenty sources used to show nothing at
+                        // all until the slowest one came back.
+                        if app.searchResults.isEmpty {
+                            VStack(spacing: 14) {
+                                ProgressView()
+                                Text("正在搜索「\(keyword)」…")
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                                Text(total > 0 ? "已完成 \(done)/\(total) 个书源" : "\(activeSources.count) 个书源")
+                                    .font(.caption)
+                                    .foregroundStyle(.tertiary)
+                            }
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        } else {
+                            resultsList(
+                                failed: [],
+                                skipped: [],
+                                count: app.searchResults.count,
+                                progress: total > 0 ? "搜索中 \(done)/\(total)" : "搜索中"
                             )
                         }
-                    } else {
-                        resultsList(failed: failed, skipped: skipped, count: count)
+                    case .finished(let count, let failed, let skipped):
+                        if app.searchResults.isEmpty {
+                            VStack(spacing: 10) {
+                                EmptyStateView(
+                                    title: "没有找到结果",
+                                    message: emptyResultMessage(failed: failed, skipped: skipped),
+                                    systemImage: "questionmark.folder"
+                                )
+                            }
+                        } else {
+                            resultsList(failed: failed, skipped: skipped, count: count, progress: nil)
+                        }
+                    case .failed(let message):
+                        EmptyStateView(title: "搜索失败", message: message, systemImage: "wifi.exclamationmark")
                     }
-                case .failed(let message):
-                    EmptyStateView(title: "搜索失败", message: message, systemImage: "wifi.exclamationmark")
                 }
             }
             .navigationTitle("找书")
@@ -84,12 +119,33 @@ struct SearchView: View {
             .onSubmit(of: .search) {
                 Task { await app.search(query) }
             }
+            .onChange(of: query) { _, newValue in
+                // The search field's Cancel button clears the text. Drop the
+                // results with it, otherwise the list keeps showing a search
+                // whose keyword is no longer in the field — and the history,
+                // which only shows when nothing is being searched, never
+                // appears.
+                if newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    app.cancelSearch()
+                }
+            }
             .toolbar {
+                // Search is a sheet, so it needs a way to close itself.
+                ToolbarItem(placement: .topBarLeading) {
+                    Button {
+                        app.isSearching = false
+                    } label: {
+                        Label("发现", systemImage: "chevron.backward")
+                            .labelStyle(.titleAndIcon)
+                            .font(.subheadline)
+                    }
+                    .accessibilityLabel("返回发现")
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
                         Task { await app.search(query) }
                     } label: {
-                        if case .searching = app.searchState {
+                        if app.searchState.isSearching {
                             ProgressView().controlSize(.small)
                         } else {
                             Text("搜索")
@@ -107,6 +163,54 @@ struct SearchView: View {
                 Text(errorMessage ?? "")
             }
         }
+    }
+
+    /// Recent searches, tappable to run again.
+    ///
+    /// This fills the idle screen instead of an empty illustration: the
+    /// searches worth repeating are the most useful thing to offer when the
+    /// field is empty.
+    private var searchHistoryList: some View {
+        List {
+            Section {
+                ForEach(app.settings.searchHistory, id: \.self) { keyword in
+                    Button {
+                        query = keyword
+                        Task { await app.search(keyword) }
+                    } label: {
+                        HStack(spacing: 12) {
+                            Image(systemName: "clock.arrow.circlepath")
+                                .foregroundStyle(.secondary)
+                            Text(keyword)
+                                .foregroundStyle(.primary)
+                            Spacer(minLength: 0)
+                            Image(systemName: "magnifyingglass")
+                                .font(.caption)
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
+                    .swipeActions(edge: .trailing) {
+                        Button(role: .destructive) {
+                            app.removeSearchHistory(keyword)
+                        } label: {
+                            Label("删除", systemImage: "trash")
+                        }
+                    }
+                }
+            } header: {
+                HStack {
+                    Text("最近搜索")
+                    Spacer()
+                    Button("清空") { app.clearSearchHistory() }
+                        .font(.caption)
+                        .textCase(nil)
+                }
+            } footer: {
+                Text(searchHint)
+                    .font(.caption2)
+            }
+        }
+        .listStyle(.plain)
     }
 
     private var searchHint: String {
@@ -135,7 +239,7 @@ struct SearchView: View {
         return parts.joined(separator: "\n")
     }
 
-    private func resultsList(failed: [String], skipped: [String], count: Int) -> some View {
+    private func resultsList(failed: [String], skipped: [String], count: Int, progress: String?) -> some View {
         List {
             Section {
                 ForEach(app.searchResults) { result in
@@ -144,8 +248,14 @@ struct SearchView: View {
             } header: {
                 HStack {
                     Text("\(count) 个结果")
-                    if !failed.isEmpty {
-                        Spacer()
+                    Spacer()
+                    if let progress {
+                        HStack(spacing: 6) {
+                            ProgressView().controlSize(.mini)
+                            Text(progress)
+                                .foregroundStyle(.secondary)
+                        }
+                    } else if !failed.isEmpty {
                         Text("\(failed.count) 个书源失败")
                             .foregroundStyle(.orange)
                     }
@@ -164,54 +274,15 @@ struct SearchView: View {
     }
 
     private func resultRow(_ result: SearchResult) -> some View {
-        HStack(alignment: .top, spacing: 12) {
-            CoverImage(url: result.coverURL, width: 52, height: 72, cornerRadius: 5)
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text(result.name)
-                    .font(.subheadline.weight(.medium))
-                    .lineLimit(2)
-                Text(result.author.isEmpty ? "佚名" : result.author)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                if !result.intro.isEmpty {
-                    // A line of blurb is what lets the user skip obvious
-                    // wrong editions without opening every row.
-                    Text(result.intro)
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                        .lineLimit(2)
-                }
-                if !result.lastChapterTitle.isEmpty {
-                    Text("最新：\(result.lastChapterTitle)")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                        .lineLimit(1)
-                }
-                Text(result.sourceName)
-                    .font(.caption2)
-                    .foregroundStyle(Palette.accent)
+        SearchResultRow(result: result, onShelf: app.bookOnShelf(for: result) != nil)
+            // Tapping a result never adds it: it opens the preview, which is
+            // where the blurb and the chapter count live and where "加入书架"
+            // is the only way in. A one-tap `+` here was too easy to hit by
+            // accident.
+            .onTapGesture {
+                destination = app.bookOnShelf(for: result)
+                    .map { .shelf($0.id) } ?? .preview(result)
             }
-
-            Spacer(minLength: 0)
-
-            Image(systemName: app.bookOnShelf(for: result) == nil ? "chevron.right" : "books.vertical.fill")
-                .font(.caption)
-                .foregroundStyle(
-                    app.bookOnShelf(for: result) == nil
-                        ? AnyShapeStyle(.tertiary)
-                        : AnyShapeStyle(Palette.accent)
-                )
-        }
-        .padding(.vertical, 4)
-        .contentShape(Rectangle())
-        // Tapping a result never adds it: it opens the preview, which is where
-        // the blurb and the chapter count live and where "加入书架" is the only
-        // way in. A one-tap `+` here was too easy to hit by accident.
-        .onTapGesture {
-            destination = app.bookOnShelf(for: result)
-                .map { .shelf($0.id) } ?? .preview(result)
-        }
     }
 }
 #endif
