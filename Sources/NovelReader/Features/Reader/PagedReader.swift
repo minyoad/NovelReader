@@ -448,21 +448,42 @@ struct PagedReader: View {
         return result
     }
 
+    /// Range of the sentence being spoken, in `document.attributed`'s
+    /// coordinates.
+    ///
+    /// Taken from the controller's own position table rather than searched for
+    /// in the text. Searching for the sentence's opening characters matched the
+    /// *first* occurrence in the chapter every time, so a line the author
+    /// repeated ("他说。", "她笑了笑。") highlighted somewhere above the passage
+    /// actually being read.
     private func highlightRange(in document: PagedDocument) -> NSRange? {
         guard model.speech.showsHighlight,
               model.speech.sentences.indices.contains(model.currentSentenceIndex) else { return nil }
-        let sentence = model.speech.sentences[model.currentSentenceIndex]
-        let probe = String(sentence.prefix(14))
-        guard !probe.isEmpty else { return nil }
+        let text = model.content?.text ?? ""
+        guard !text.isEmpty else { return nil }
 
-        let text = document.attributed.string as NSString
-        guard text.length > 0 else { return nil }
+        let start = model.speech.characterOffset(ofSentence: model.currentSentenceIndex, in: text)
+        // The next sentence's start bounds this one exactly, whatever the
+        // whitespace differences between the normalized and raw text.
+        let next = model.currentSentenceIndex + 1
+        let sentenceEnd: Int
+        if model.speech.sentences.indices.contains(next) {
+            sentenceEnd = model.speech.characterOffset(ofSentence: next, in: text)
+        } else {
+            sentenceEnd = start + model.speech.sentences[model.currentSentenceIndex].count
+        }
 
-        let found = text.range(of: probe)
-        guard found.location != NSNotFound else { return nil }
-        let length = min(max(sentence.utf16.count, found.length), text.length - found.location)
+        let location = document.attributedLocation(forOriginal: start)
+        let endLocation = document.attributedLocation(forOriginal: sentenceEnd)
+        let full = document.attributed.string as NSString
+        guard full.length > 0 else { return nil }
+
+        // `attributed` carries a leading body prefix and may add paragraph
+        // breaks, so clamp rather than trust the arithmetic to stay in range.
+        let location0 = min(max(location, 0), full.length)
+        let length = max(min(endLocation, full.length) - location0, 0)
         guard length > 0 else { return nil }
-        return NSRange(location: found.location, length: length)
+        return NSRange(location: location0, length: length)
     }
 }
 #endif
