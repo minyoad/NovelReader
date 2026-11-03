@@ -133,9 +133,12 @@ struct ReaderView: View {
             if let toast = model.toast {
                 VStack {
                     Spacer()
-                    Banner(text: toast, isError: false)
+                    Banner(text: toast.text, isError: toast.isError)
                         .padding(.bottom, 120)
                         .transition(.opacity)
+                        // A tap dismisses it: the timer below is a convenience,
+                        // not the only way out.
+                        .onTapGesture { model.dismissToast() }
                 }
             }
 

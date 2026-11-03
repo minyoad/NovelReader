@@ -18,6 +18,9 @@ struct PagedReader: View {
     @State private var pages: [ReaderPage] = []
     @State private var pageIndex = 0
     @State private var drag: CGFloat = 0
+    /// Last character offset written to the library, so repeated layout passes
+    /// that land on the same page do not each rewrite the shelf.
+    @State private var lastSavedOffset: Int?
     @State private var isAnimating = false
     /// Width of the page in points; captured from the gesture so the drag
     /// progress can be normalised without recomputing layout.
@@ -66,6 +69,11 @@ struct PagedReader: View {
             }
             .onChange(of: pageIndex) { _, _ in
                 syncPageIndicator()
+                // Keeps `pendingOffset` on the visible page no matter what
+                // moved it: a swipe, the speech follow-along, or repagination
+                // after a font change. Pressing read then starts from the page
+                // on screen instead of wherever the offset happened to be.
+                saveProgress()
             }
             .onChange(of: model.currentSentenceIndex) { _, _ in
                 followSpeech(box: box)
@@ -314,7 +322,6 @@ struct PagedReader: View {
                 pageIndex = target
                 drag = 0
                 isAnimating = false
-                saveProgress()
             }
         } else {
             // End of chapter: no page to turn to, so hand the swipe straight to
@@ -365,11 +372,20 @@ struct PagedReader: View {
         pages = layout
         pagesWidth = box.width
 
-        let offset = model.speech.hasContent
+        // Follow the speaker only while it is actually running. `hasContent`
+        // stays true forever once a chapter has been read once, because
+        // `stop()` keeps the sentence list — and that made every repagination
+        // snap the page back to wherever the last reading had stopped,
+        // overriding the page the user had turned to. `pendingOffset` is kept
+        // on the visible page, so it is the right anchor when idle.
+        let offset = model.speech.isActive
             ? model.speech.characterOffset(ofSentence: model.currentSentenceIndex, in: content.text)
             : model.pendingOffset
         pageIndex = layout.isEmpty ? 0 : pageIndex(forOriginalOffset: offset, document: doc)
         drag = 0
+        // A new chapter's offsets are relative to its own text, so a value left
+        // over from the previous one would suppress the first save here.
+        lastSavedOffset = nil
         syncPageIndicator()
 
         // Remember where the visible page starts so changing font size / line
@@ -393,11 +409,17 @@ struct PagedReader: View {
         guard let document, let range = currentPage?.range else { return }
         let offset = document.characterOffset(atAttributed: range.location)
         model.pendingOffset = offset
+        // `pageIndex` changes for reasons other than turning a page — the
+        // speech follow-along and repagination both move it — and every write
+        // here rewrites the whole library to disk. Skip when the page still
+        // starts where it did.
+        guard offset != lastSavedOffset else { return }
+        lastSavedOffset = offset
         model.saveProgress(characterOffset: offset)
     }
 
     private func followSpeech(box: CGSize) {
-        guard let document, !pages.isEmpty, model.speech.hasContent else { return }
+        guard let document, !pages.isEmpty, model.speech.isActive else { return }
         let text = model.content?.text ?? ""
         let offset = model.speech.characterOffset(ofSentence: model.currentSentenceIndex, in: text)
         let target = pageIndex(forOriginalOffset: offset, document: document)

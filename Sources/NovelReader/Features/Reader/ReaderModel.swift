@@ -29,7 +29,7 @@ final class ReaderModel: ObservableObject {
     @Published var showSettings = false
     @Published var showChapterList = false
     @Published var pendingOffset: Int = 0
-    @Published var toast: String?
+    @Published var toast: (text: String, isError: Bool)?
     /// Source candidates for the current book, shown in the switch sheet.
     @Published var sourceCandidates: [SearchResult] = []
     @Published var isSearchingSources = false
@@ -49,6 +49,8 @@ final class ReaderModel: ObservableObject {
     /// What this session may write back to the library.
     let mode: ReadingMode
     private var prefetchTask: Task<Void, Never>?
+    /// Fetches the next chapter's text early, for the speech look-ahead.
+    private var nextChapterPrefetchTask: Task<Void, Never>?
     /// Keeps `ReaderModel` translating the speech controller's state changes.
     ///
     /// `speech` is a separate `ObservableObject`, and views only observe
@@ -79,8 +81,29 @@ final class ReaderModel: ObservableObject {
             Task { await self.advanceAfterSpeech() }
         }
         speech.onError = { [weak self] message in
-            guard let self else { return }
-            self.toast = message
+            // Through `showToast`, not a bare assignment: that is what arms the
+            // timer that hides it again. Assigning `toast` directly left the
+            // banner on screen for good, with no way to dismiss it.
+            self?.showToast(message, isError: true)
+        }
+        // The controller synthesizes the next chapter's opening chunk before
+        // the current one ends, which needs that chapter's text — and only the
+        // reader has the table of contents.
+        speech.nextChapterSentences = { [weak self] in
+            guard let self, let text = self.nextChapterText else { return nil }
+            // Refuse a leftover copy: the reader may have skipped chapters
+            // since it was fetched, and playing the wrong opening over the
+            // right chapter title is worse than one normal gap.
+            guard self.chapters.indices.contains(self.currentIndex + 1),
+                  self.nextChapterTextURL == self.chapters[self.currentIndex + 1].url else {
+                return nil
+            }
+            return TextProcessing.sentences(from: text)
+        }
+        speech.onNextChapterReady = { [weak self] in
+            // Audio for the next chapter exists now, so the boundary no longer
+            // needs the short-lived background allowance.
+            self?.speech.releaseSessionWhenIdle()
         }
         // Headphone buttons move between chapters, so they need the table of
         // contents, which only the reader has.
@@ -223,12 +246,34 @@ final class ReaderModel: ObservableObject {
 
     // MARK: - Offline cache
 
+    /// Text of the chapter after the current one, once it is known.
+    ///
+    /// Kept in memory so `SpeechController` can read it synchronously while
+    /// looking ahead. Filled by `prefetchNextChapterForSpeech()`, which runs as
+    /// soon as a chapter starts loading — a chapter takes minutes to listen to,
+    /// so the text is there long before the look-ahead asks for it.
+    private var nextChapterText: String?
+    /// The chapter `nextChapterText` belongs to, so a stale copy left over from
+    /// a skipped chapter is never handed to the speech controller.
+    private var nextChapterTextURL: String?
+
     /// Downloads the next few chapters in the background so a dropped
     /// connection does not stop the reader mid-chapter.
+    ///
+    /// Two jobs, in this order:
+    ///
+    /// 1. The chapter after this one, always, regardless of `prefetchCount`.
+    ///    Reading aloud crosses that boundary by itself, and hitting an
+    ///    uncached chapter there meant a full page download inside the
+    ///    silent gap between chapters. The setting controls how much extra
+    ///    is kept, not whether the one that is about to be needed is.
+    /// 2. The remaining `prefetchCount` chapters ahead.
     private func schedulePrefetch() {
         prefetchTask?.cancel()
+        prefetchNextChapterForSpeech()
+
         let count = app.settings.cache.prefetchCount
-        guard count > 0, !chapters.isEmpty else { return }
+        guard !chapters.isEmpty else { return }
 
         let index = currentIndex
         let book = self.book
@@ -240,18 +285,62 @@ final class ReaderModel: ObservableObject {
             let cachedIndices = Set(chapters.enumerated()
                 .filter { cachedURLs.contains($0.element.url) }
                 .map { $0.offset })
-            let plan = CachePlanner.prefetchIndices(
-                currentIndex: index,
-                chapterCount: chapters.count,
-                prefetchCount: count,
-                alreadyCached: cachedIndices
-            )
+            var plan = count > 0
+                ? CachePlanner.prefetchIndices(
+                    currentIndex: index,
+                    chapterCount: chapters.count,
+                    prefetchCount: count,
+                    alreadyCached: cachedIndices
+                )
+                : []
+            // The next chapter is already being fetched above; do not queue it
+            // twice, and do not let the plan skip it just because `count` is 0.
+            let immediate = index + 1
+            plan.removeAll { $0 == immediate }
+            if chapters.indices.contains(immediate), !cachedIndices.contains(immediate) {
+                plan.insert(immediate, at: 0)
+            }
             for chapterIndex in plan {
                 if Task.isCancelled { return }
                 await app.cacheChapter(book: book, chapter: chapters[chapterIndex])
                 await MainActor.run { self?.cachedChapterCount += 1 }
             }
             await self?.evictIfNeeded()
+        }
+    }
+
+    /// Fetches the next chapter's text for the speech look-ahead, and caches
+    /// the chapter for reading at the same time.
+    ///
+    /// Runs alongside `schedulePrefetch`'s download rather than before it: the
+    /// two want the same bytes, and whichever gets there first wins while the
+    /// other finds the file already cached.
+    private func prefetchNextChapterForSpeech() {
+        nextChapterPrefetchTask?.cancel()
+        let target = currentIndex + 1
+        guard chapters.indices.contains(target) else {
+            nextChapterText = nil
+            nextChapterTextURL = nil
+            return
+        }
+        let chapter = chapters[target]
+        let book = self.book
+        let app = self.app
+        let cache = mode.cachesChapters
+
+        nextChapterPrefetchTask = Task { [weak self] in
+            let fetched: ChapterContent?
+            do {
+                fetched = try await app.chapterContent(book: book, chapter: chapter, cache: cache)
+            } catch {
+                return
+            }
+            guard let text = fetched?.text, !Task.isCancelled else { return }
+            await MainActor.run {
+                guard let self, self.currentIndex + 1 == target else { return }
+                self.nextChapterText = text
+                self.nextChapterTextURL = chapter.url
+            }
         }
     }
 
@@ -479,13 +568,25 @@ final class ReaderModel: ObservableObject {
     func startSpeaking(autoPlay: Bool = true) {
         guard let text = content?.text, !text.isEmpty else { return }
         let sentences = TextProcessing.sentences(from: text)
-        let startIndex = speech.sentenceIndex(forCharactersBefore: pendingOffset, in: text)
+        // `pendingOffset` is measured against the raw chapter text, but the
+        // sentences were split from the *normalized* text — which is shorter,
+        // because every line is trimmed and zero-width characters are dropped.
+        // Feeding the raw offset to the sentence lookup made playback start
+        // deeper and deeper into the page the further into the chapter it was.
+        let startIndex = speech.sentenceIndex(
+            forCharactersBefore: TextProcessing.normalizedOffset(pendingOffset, in: text),
+            in: TextProcessing.normalizeParagraphs(text),
+            sentences: sentences
+        )
         speech.configure(app.settings.tts)
         speech.attach(store: app.store)
         if app.settings.tts.engine.needsNetwork && !app.settings.tts.isRemoteUsable {
-            toast = app.settings.tts.engine == .edge
-                ? "还没有选择 Edge 音色，请到设置里选一个"
-                : "自定义朗读接口还不完整，请到设置里填写地址和模型"
+            showToast(
+                app.settings.tts.engine == .edge
+                    ? "还没有选择 Edge 音色，请到设置里选一个"
+                    : "自定义朗读接口还不完整，请到设置里填写地址和模型",
+                isError: true
+            )
             return
         }
         // Name the chapter before playback starts, so the Lock Screen never
@@ -512,7 +613,13 @@ final class ReaderModel: ObservableObject {
     }
 
     func toggleSpeech() {
-        if speech.hasContent {
+        // Only a paused or playing queue has something to resume. `hasContent`
+        // alone is not enough: `stop()` leaves `sentences` in place, so after
+        // a finished or exited reading it is still true — and resuming from
+        // where the old reading stopped ignores whatever page the reader has
+        // turned to since. Picking up from the visible page is what pressing
+        // read again should mean.
+        if speech.isActive, speech.hasContent {
             speech.toggle()
         } else {
             startSpeaking()
@@ -605,15 +712,29 @@ final class ReaderModel: ObservableObject {
     func stopBackgroundWork() {
         prefetchTask?.cancel()
         prefetchTask = nil
+        nextChapterPrefetchTask?.cancel()
+        nextChapterPrefetchTask = nil
+        nextChapterText = nil
+        nextChapterTextURL = nil
         speech.stop()
     }
 
-    private func showToast(_ text: String) {
-        toast = text
+    /// Shows a transient message. `isError` colours it as a failure; either way
+    /// it disappears on its own *and* on a tap, since a message that stays
+    /// forever has no way out.
+    private func showToast(_ text: String, isError: Bool = false) {
+        let entry = (text: text, isError: isError)
+        toast = entry
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 2_600_000_000)
-            if self.toast == text { self.toast = nil }
+            // Only clear our own message, not one that replaced it meanwhile.
+            if self.toast?.text == text { self.toast = nil }
         }
+    }
+
+    /// Dismisses the passthrough message — used by the banner's tap.
+    func dismissToast() {
+        toast = nil
     }
 
     func saveProgress(characterOffset: Int = 0) {

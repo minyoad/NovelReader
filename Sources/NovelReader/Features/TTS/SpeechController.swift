@@ -42,6 +42,20 @@ final class SpeechController: NSObject, ObservableObject {
     var onNextChapterRequest: (() -> Void)?
     var onPreviousChapterRequest: (() -> Void)?
 
+    /// Supplies the sentences of the chapter that follows the current one, or
+    /// `nil` when there is none.
+    ///
+    /// Only the reader knows the table of contents, so the controller asks for
+    /// this instead of guessing. Used to synthesize the next chapter's opening
+    /// chunk before the current one ends: without it every chapter boundary
+    /// started with a silent network round trip.
+    var nextChapterSentences: (() -> [String]?)?
+
+    /// Called when the first chunk of the *next* chapter has been synthesized
+    /// ahead of time. The reader uses it to drop the background grace as soon
+    /// as one of the two look-aheads succeeded.
+    var onNextChapterReady: (() -> Void)?
+
     private let synthesizer = AVSpeechSynthesizer()
     private var settings = TTSSettings()
     private var didConfigureSession = false
@@ -64,6 +78,7 @@ final class SpeechController: NSObject, ObservableObject {
     private var progressTimer: Timer?
     private var loadTask: Task<Void, Never>?
     private var prefetchTasks: [Int: Task<Void, Never>] = [:]
+    private var prefetchNextChapterTask: Task<Void, Never>?
     private var currentChunkBoundaries: [EdgeSentenceBoundary] = []
     /// Keeps the app alive across the silent gap while the next chunk or
     /// chapter is still being fetched with the screen locked.
@@ -75,6 +90,10 @@ final class SpeechController: NSObject, ObservableObject {
     /// worse than not prefetching at all. Only the next chunk is kept, so this
     /// never grows past one utterance.
     private var prefetched: (key: String, audio: Data, boundaries: [EdgeSentenceBoundary])?
+    /// The next chapter's opening chunk, synthesized while the current chapter
+    /// is still playing. Held separately from `prefetched` because it belongs
+    /// to a different chapter's chunk list and must not be matched by index.
+    private var prefetchedNextChapter: (key: String, audio: Data, boundaries: [EdgeSentenceBoundary])?
     /// Memoised sentence-end offsets for the current chapter text; invalidated
     /// whenever the text changes (chapter switch, AI cleanup).
     private var offsetsCache: (text: String, offsets: [Int])?
@@ -170,6 +189,12 @@ final class SpeechController: NSObject, ObservableObject {
         offsetsCache = nil
         currentIndex = min(max(index, 0), max(newSentences.count - 1, 0))
         rebuildChunks()
+        // Drop a look-ahead that does not belong to this chapter. It survives
+        // `stop` so a real hand-over keeps its synthesized opening, and this is
+        // what stops it from lingering after a jump to an unrelated chapter.
+        if let cached = prefetchedNextChapter, dropStaleLookahead(cached) {
+            prefetchedNextChapter = nil
+        }
         rebuildTimeline()
         // Publish the new chapter's opening position right away: the previous
         // chapter's progress would otherwise sit on the Lock Screen until the
@@ -281,6 +306,15 @@ final class SpeechController: NSObject, ObservableObject {
         loadTask = nil
         prefetchTasks.values.forEach { $0.cancel() }
         prefetchTasks.removeAll()
+        // The look-ahead for the next chapter outlives a chapter switch — that
+        // is the whole point of it, and cancelling here would throw away the
+        // synthesis exactly when it is about to be used. It is dropped only
+        // when reading stops for good, below.
+        if !keepingSession {
+            prefetchNextChapterTask?.cancel()
+            prefetchNextChapterTask = nil
+            prefetchedNextChapter = nil
+        }
         audioPlayer?.stop()
         audioPlayer = nil
         progressTimer?.invalidate()
@@ -340,6 +374,8 @@ final class SpeechController: NSObject, ObservableObject {
         loadTask = nil
         prefetchTasks.values.forEach { $0.cancel() }
         prefetchTasks.removeAll()
+        prefetchNextChapterTask?.cancel()
+        prefetchNextChapterTask = nil
         audioPlayer?.stop()
         audioPlayer = nil
         progressTimer?.invalidate()
@@ -385,15 +421,35 @@ final class SpeechController: NSObject, ObservableObject {
     }
 
     /// Jump to the sentence that best matches an offset inside the chapter text.
-    func sentenceIndex(forCharactersBefore offset: Int, in text: String) -> Int {
+    /// Sentence to start from when reading the page that begins at `offset`.
+    ///
+    /// Finds the first sentence that *starts at or after* `offset` — the page's
+    /// opening line — rather than the last one that ends before it. Sentences
+    /// are split off the text with whitespace trimmed, so summing their lengths
+    /// drifts from the original offsets; that drift is what made playback start
+    /// a sentence or two into the page instead of at its top.
+    ///
+    /// `sentences` is passed in rather than read from the instance: the caller
+    /// has just split the text and the controller may still be holding the
+    /// previous chapter's list.
+    func sentenceIndex(forCharactersBefore offset: Int, in text: String, sentences: [String]) -> Int {
         guard offset > 0 else { return 0 }
         let target = text.index(text.startIndex, offsetBy: min(offset, text.count))
-        let prefix = String(text[..<target])
-        var accumulated = 0
+
+        var cursor = text.startIndex
         for (index, sentence) in sentences.enumerated() {
-            accumulated += sentence.count
-            if accumulated >= prefix.count { return index }
+            // Locate the sentence in the original text, searching forward from
+            // the previous match so repeated lines do not all resolve to the
+            // first occurrence.
+            guard let range = text.range(of: sentence, range: cursor..<text.endIndex) else { continue }
+            cursor = range.upperBound
+            // The page's opening line usually starts a sentence; when a
+            // sentence is split across the page break, begin with it anyway
+            // rather than skipping its first half.
+            if range.upperBound > target { return index }
         }
+        // The offset is past the last sentence: start at the final one rather
+        // than silently reading nothing.
         return max(sentences.count - 1, 0)
     }
 
@@ -402,13 +458,18 @@ final class SpeechController: NSObject, ObservableObject {
         return sentenceOffsets(in: text)[index]
     }
 
-    /// Character offset of the end of every sentence, computed in one forward
-    /// pass.
+    /// Character offset of the *start* of every sentence, computed in one
+    /// forward pass.
     ///
     /// Searching per call was both O(n²) and wrong for repeated sentences: a
     /// chapter full of "他说。" would map every occurrence to the first one, so
     /// the saved reading position jumped backwards. Walking forward from the
     /// previous match keeps the offsets monotonic and does the work once.
+    ///
+    /// The start, not the end: this drives which page to turn to while reading
+    /// aloud. Using the sentence's last character put the position at the tail
+    /// of the sentence, which for a sentence straddling a page break lands on
+    /// the *next* page — the view jumped forward the moment playback began.
     private func sentenceOffsets(in text: String) -> [Int] {
         if let cache = offsetsCache, cache.text == text { return cache.offsets }
 
@@ -417,7 +478,7 @@ final class SpeechController: NSObject, ObservableObject {
         var cursor = text.startIndex
         for sentence in sentences {
             if let range = text.range(of: sentence, range: cursor..<text.endIndex) {
-                offsets.append(text.distance(from: text.startIndex, to: range.upperBound))
+                offsets.append(text.distance(from: text.startIndex, to: range.lowerBound))
                 cursor = range.upperBound
             } else {
                 // The text no longer contains this sentence verbatim (AI
@@ -528,6 +589,15 @@ final class SpeechController: NSObject, ObservableObject {
         }
         prefetched = nil
 
+        // A new chapter's first chunk can already be synthesized if the reader
+        // handed over at a boundary we prepared for. Check it before asking the
+        // network again.
+        if index == 0, let cached = prefetchedNextChapter, cached.key == key {
+            prefetchedNextChapter = nil
+            beginPlayback(audio: cached.audio, boundaries: cached.boundaries, chunkIndex: index)
+            return
+        }
+
         loadTask = Task { [weak self] in
             do {
                 let audio = try await Self.audio(
@@ -629,6 +699,7 @@ final class SpeechController: NSObject, ObservableObject {
             // it until the first sentence change.
             publishNowPlaying()
             prefetchNextChunk(after: index)
+            prefetchNextChapter(after: index)
         } catch {
             fail(error)
         }
@@ -725,6 +796,57 @@ final class SpeechController: NSObject, ObservableObject {
             }
         }
     }
+
+    /// Whether a held look-ahead cannot be used for the queue that was just
+    /// loaded, in which case it should be released.
+    private func dropStaleLookahead(_ cached: (key: String, audio: Data, boundaries: [EdgeSentenceBoundary])) -> Bool {
+        guard let first = chunks.first else { return true }
+        return cacheKey(for: first) != cached.key
+    }
+
+    /// Synthesizes the *next chapter's* opening chunk while the current chapter
+    /// is still playing.
+    ///
+    /// `prefetchNextChunk` stops at the chapter's last chunk, so every chapter
+    /// boundary used to start with a silent network round trip for the first
+    /// utterance. Starting a few chunks early gives that request the time a
+    /// chunk takes to play, which is far more than the round trip needs — so
+    /// the hand-over happens with no audible gap.
+    private func prefetchNextChapter(after index: Int) {
+        // Not when this is already the looked-ahead-for chapter: the reader
+        // supplies what follows, and asking again mid-chapter would keep
+        // synthesizing two chapters ahead for no benefit.
+        guard index >= chunks.count - Self.nextChapterLookaheadChunks else { return }
+        guard prefetchNextChapterTask == nil else { return }
+        guard settings.engine != .system else { return }
+        guard let nextSentences = nextChapterSentences?(), !nextSentences.isEmpty else { return }
+
+        let nextChunks = SpeechChunker.sentenceChunks(nextSentences)
+        guard let first = nextChunks.first else { return }
+
+        let key = cacheKey(for: first)
+        let settings = self.settings
+        let store = self.store
+
+        prefetchNextChapterTask = Task { [weak self] in
+            defer { Task { @MainActor in self?.prefetchNextChapterTask = nil } }
+            guard !Task.isCancelled else { return }
+            guard let result = try? await Self.audio(for: first, key: key, settings: settings, store: store) else {
+                return
+            }
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                guard let self else { return }
+                self.prefetchedNextChapter = (key: key, audio: result.audio, boundaries: result.boundaries)
+                self.onNextChapterReady?()
+            }
+        }
+    }
+
+    /// How many chunks before the end of a chapter the look-ahead starts.
+    /// Two chunks is roughly half a minute of audio: long enough for the
+    /// fastest listener, cheap enough to discard if the reader stops early.
+    private static let nextChapterLookaheadChunks = 2
 
     private func advanceRemote() {
         let next = currentChunkIndex + 1
