@@ -98,83 +98,6 @@ public enum TextProcessing {
         return lines.joined(separator: "\n")
     }
 
-    /// Maps an offset in the raw text onto the same passage's offset in
-    /// `normalizeParagraphs`' output.
-    ///
-    /// Reading positions are recorded against the raw chapter text, but the
-    /// sentence lists used for speech are built from the normalized text, which
-    /// is shorter: lines are trimmed, blank runs collapse, zero-width
-    /// characters vanish. Passing a raw offset into that coordinate system
-    /// landed further into the chapter the deeper the reader was — a page-top
-    /// position resolved to a sentence somewhere inside the page.
-    ///
-    /// Walked line by line rather than by normalizing a prefix: normalizing a
-    /// prefix treats its trailing blank line as trailing blank lines of the
-    /// whole document and strips it, so the count drifts at every paragraph
-    /// break. Here each complete line before `offset` contributes exactly what
-    /// it will in the full result.
-    public static func normalizedOffset(_ offset: Int, in text: String) -> Int {
-        guard offset > 0 else { return 0 }
-        let normalized = normalizeParagraphs(text)
-        guard offset < text.count else { return normalized.count }
-
-        let cut = text.index(text.startIndex, offsetBy: offset)
-        let prefix = String(text[..<cut])
-        var lines = prefix.components(separatedBy: "\n")
-        // The final component is the partially consumed line; measure it by
-        // normalizing the same way the full pass would.
-        let partial = lines.removeLast()
-
-        var produced: [String] = []
-        for raw in lines {
-            let line = normalizeLine(raw)
-            if line.isEmpty {
-                if produced.last?.isEmpty == false { produced.append("") }
-            } else {
-                produced.append(line)
-            }
-        }
-        if let line = normalizeLineIfNotEmpty(partial) {
-            produced.append(line)
-        }
-        // Whether the cut landed inside a line: an empty trailing component
-        // means the offset sits exactly at a line boundary, so the newline has
-        // already been crossed.
-        let cutInsideLine = !partial.isEmpty
-
-        // The full result drops a leading blank line; the prefix may have
-        // produced one before any content was reached.
-        var count = produced.joined(separator: "\n").count
-        if produced.first?.isEmpty == true, normalized.first != "\n" {
-            count -= 1
-        }
-        // `joined` counts the separators *between* lines; reaching the start of
-        // the following line also crosses the newline after the last one — but
-        // only when the cut fell inside that line.
-        if cutInsideLine, let last = produced.last, !last.isEmpty {
-            count += 1
-        }
-        return max(0, min(count, normalized.count))
-    }
-
-    /// One line of `normalizeParagraphs`, applying the same substitutions.
-    private static func normalizeLine(_ raw: String) -> String {
-        var line = raw
-        line = line.replacingOccurrences(of: "\r\n", with: "\n")
-        line = line.replacingOccurrences(of: "\r", with: "\n")
-        line = line.replacingOccurrences(of: "\u{00A0}", with: " ")
-        line = line.replacingOccurrences(of: "\u{3000}", with: " ")
-        for zeroWidth in ["\u{200B}", "\u{200C}", "\u{200D}", "\u{FEFF}", "\u{2060}"] {
-            line = line.replacingOccurrences(of: zeroWidth, with: "")
-        }
-        return line.trimmingCharacters(in: .whitespaces)
-    }
-
-    private static func normalizeLineIfNotEmpty(_ raw: String) -> String? {
-        let line = normalizeLine(raw)
-        return line.isEmpty ? nil : line
-    }
-
     // MARK: - Chapter cleanup
 
     private static let adPatterns: [String] = [
@@ -252,6 +175,38 @@ public enum TextProcessing {
     }
 
     // MARK: - Sentences (used by TTS)
+
+    /// Splits already-normalized body text into speakable sentences.
+    ///
+    /// Unlike `sentences(from:)`, this does no normalization of its own: `body`
+    /// comes from `PaginatedText`, which is what the pages were laid out from.
+    /// Re-normalizing here — trimming, collapsing blank lines — produced a text
+    /// whose offsets drifted from the reader's, so a position taken from the
+    /// page resolved to an earlier sentence the further into the chapter it
+    /// was. Only paragraph breaks and sentence punctuation matter here.
+    public static func sentences(fromBody body: String, maxLength: Int = 110) -> [String] {
+        var sentences: [String] = []
+        var buffer = ""
+
+        func flush() {
+            let trimmed = buffer.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty { sentences.append(contentsOf: splitLong(trimmed, maxLength: maxLength)) }
+            buffer = ""
+        }
+
+        for character in body {
+            if character == "\n" {
+                flush()
+                continue
+            }
+            buffer.append(character)
+            if "。！？…；!?;".contains(character) {
+                flush()
+            }
+        }
+        flush()
+        return sentences
+    }
 
     /// Splits a chapter into speakable sentences. Long sentences are further
     /// chopped so the synthesizer stays responsive and highlighting stays useful.

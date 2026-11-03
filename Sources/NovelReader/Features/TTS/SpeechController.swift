@@ -80,6 +80,15 @@ final class SpeechController: NSObject, ObservableObject {
     private var prefetchTasks: [Int: Task<Void, Never>] = [:]
     private var prefetchNextChapterTask: Task<Void, Never>?
     private var currentChunkBoundaries: [EdgeSentenceBoundary] = []
+    /// The sentence playback actually started from inside the current chunk.
+    ///
+    /// A chunk is synthesized from its own first sentence, so starting at
+    /// sentence 80 of a chunk that begins at 75 plays audio whose timeline
+    /// still starts at 75. The progress timer read that timeline and reported
+    /// sentence 75 the moment playback began, dragging the index — and with it
+    /// the page — backwards. Progress may never report an earlier sentence
+    /// than the one the user pressed read on.
+    private var chunkStartSentence = 0
     /// Keeps the app alive across the silent gap while the next chunk or
     /// chapter is still being fetched with the screen locked.
     private let grace = BackgroundGrace()
@@ -429,6 +438,12 @@ final class SpeechController: NSObject, ObservableObject {
     /// drifts from the original offsets; that drift is what made playback start
     /// a sentence or two into the page instead of at its top.
     ///
+    /// A sentence straddling the page break used to win here, because it
+    /// "contains" the page top. Its start lies on the *previous* page, and the
+    /// follow-along turned to wherever the sentence begins — so pressing read
+    /// on a page that opened mid-paragraph jumped back a page. Starting on the
+    /// first sentence that begins on the visible page keeps the page still.
+    ///
     /// `sentences` is passed in rather than read from the instance: the caller
     /// has just split the text and the controller may still be holding the
     /// previous chapter's list.
@@ -437,29 +452,41 @@ final class SpeechController: NSObject, ObservableObject {
         let target = text.index(text.startIndex, offsetBy: min(offset, text.count))
 
         var cursor = text.startIndex
+        var straddling: Int?
         for (index, sentence) in sentences.enumerated() {
             // Locate the sentence in the original text, searching forward from
             // the previous match so repeated lines do not all resolve to the
             // first occurrence.
             guard let range = text.range(of: sentence, range: cursor..<text.endIndex) else { continue }
             cursor = range.upperBound
-            // The page's opening line usually starts a sentence; when a
-            // sentence is split across the page break, begin with it anyway
-            // rather than skipping its first half.
-            if range.upperBound > target { return index }
+            if range.lowerBound >= target { return index }
+            // Only reached when no sentence starts before the page top, so the
+            // first one ending past it is the last hope.
+            if straddling == nil, range.upperBound > target { straddling = index }
         }
+        // The page holds nothing but the tail of a sentence that began on the
+        // previous one: read it rather than skip the visible text.
+        if let straddling { return straddling }
         // The offset is past the last sentence: start at the final one rather
         // than silently reading nothing.
         return max(sentences.count - 1, 0)
     }
 
+    /// Raw-chapter character offset of the *start* of a sentence.
+    ///
+    /// The caller works in raw-text coordinates (that is what pages and saved
+    /// progress use), but sentences were located in `body` — the one text the
+    /// layout was built from. The conversion happens here, using the same
+    /// `PaginatedText` the reader paginated with, so the two never disagree.
     func characterOffset(ofSentence index: Int, in text: String) -> Int {
         guard sentences.indices.contains(index) else { return 0 }
-        return sentenceOffsets(in: text)[index]
+        let paginated = PaginatedText(rawText: text)
+        let bodyOffset = sentenceBodyOffsets(in: paginated)[index]
+        return paginated.originalOffset(forBody: bodyOffset)
     }
 
-    /// Character offset of the *start* of every sentence, computed in one
-    /// forward pass.
+    /// Character offset of the *start* of every sentence, in `body`
+    /// coordinates, computed in one forward pass.
     ///
     /// Searching per call was both O(n²) and wrong for repeated sentences: a
     /// chapter full of "他说。" would map every occurrence to the first one, so
@@ -470,15 +497,16 @@ final class SpeechController: NSObject, ObservableObject {
     /// aloud. Using the sentence's last character put the position at the tail
     /// of the sentence, which for a sentence straddling a page break lands on
     /// the *next* page — the view jumped forward the moment playback began.
-    private func sentenceOffsets(in text: String) -> [Int] {
-        if let cache = offsetsCache, cache.text == text { return cache.offsets }
+    private func sentenceBodyOffsets(in paginated: PaginatedText) -> [Int] {
+        let body = paginated.body
+        if let cache = offsetsCache, cache.text == body { return cache.offsets }
 
         var offsets: [Int] = []
         offsets.reserveCapacity(sentences.count)
-        var cursor = text.startIndex
+        var cursor = body.startIndex
         for sentence in sentences {
-            if let range = text.range(of: sentence, range: cursor..<text.endIndex) {
-                offsets.append(text.distance(from: text.startIndex, to: range.lowerBound))
+            if let range = body.range(of: sentence, range: cursor..<body.endIndex) {
+                offsets.append(body.distance(from: body.startIndex, to: range.lowerBound))
                 cursor = range.upperBound
             } else {
                 // The text no longer contains this sentence verbatim (AI
@@ -487,7 +515,7 @@ final class SpeechController: NSObject, ObservableObject {
                 offsets.append(offsets.last ?? 0)
             }
         }
-        offsetsCache = (text, offsets)
+        offsetsCache = (body, offsets)
         return offsets
     }
 
@@ -570,6 +598,7 @@ final class SpeechController: NSObject, ObservableObject {
 
         currentChunkIndex = index
         currentChunkBoundaries = []
+        chunkStartSentence = sentence
         isPreparing = true
         isSpeaking = false
         isPaused = false
@@ -584,7 +613,7 @@ final class SpeechController: NSObject, ObservableObject {
         // through the network or the disk cache.
         if let cached = prefetched, cached.key == key {
             prefetched = nil
-            beginPlayback(audio: cached.audio, boundaries: cached.boundaries, chunkIndex: index)
+            beginPlayback(audio: cached.audio, boundaries: cached.boundaries, chunkIndex: index, fromSentence: sentence)
             return
         }
         prefetched = nil
@@ -594,7 +623,7 @@ final class SpeechController: NSObject, ObservableObject {
         // network again.
         if index == 0, let cached = prefetchedNextChapter, cached.key == key {
             prefetchedNextChapter = nil
-            beginPlayback(audio: cached.audio, boundaries: cached.boundaries, chunkIndex: index)
+            beginPlayback(audio: cached.audio, boundaries: cached.boundaries, chunkIndex: index, fromSentence: sentence)
             return
         }
 
@@ -610,7 +639,8 @@ final class SpeechController: NSObject, ObservableObject {
                 self?.beginPlayback(
                     audio: audio.audio,
                     boundaries: audio.boundaries,
-                    chunkIndex: index
+                    chunkIndex: index,
+                    fromSentence: sentence
                 )
             } catch is CancellationError {
                 return
@@ -676,7 +706,8 @@ final class SpeechController: NSObject, ObservableObject {
     private func beginPlayback(
         audio: Data,
         boundaries: [EdgeSentenceBoundary],
-        chunkIndex index: Int
+        chunkIndex index: Int,
+        fromSentence sentence: Int
     ) {
         guard chunks.indices.contains(index) else { return }
         activateSession()
@@ -687,6 +718,18 @@ final class SpeechController: NSObject, ObservableObject {
             player.delegate = self
             player.volume = Float(max(0, min(settings.volume, 1)))
             player.prepareToPlay()
+            // The chunk was synthesized from its own first sentence, but reading
+            // may have been asked to start partway in. Seek past the sentences
+            // that come before, or playback would audibly rewind to the top of
+            // the chunk while the page jumps back with it.
+            let chunk = chunks[index]
+            if sentence > chunk.sentenceStart {
+                currentChunkBoundaries = boundaries
+                let start = seekTime(forSentence: sentence, chunk: chunk, duration: player.duration)
+                if start > 0, start < player.duration {
+                    player.currentTime = start
+                }
+            }
             guard player.play() else { throw EdgeTTSError.noAudio }
             audioPlayer = player
             currentChunkBoundaries = boundaries
@@ -721,8 +764,14 @@ final class SpeechController: NSObject, ObservableObject {
         guard let chunk else { return }
 
         let offsetInChunk = sentenceOffset(at: elapsed, chunk: chunk, duration: player.duration)
-        let sentence = min(chunk.sentenceStart + offsetInChunk,
-                           chunk.sentenceStart + chunk.sentenceCount - 1)
+        // Never report a position before the sentence playback started from:
+        // the chunk's audio starts at its own first sentence, not the one the
+        // reader asked for.
+        let sentence = max(
+            min(chunk.sentenceStart + offsetInChunk,
+                chunk.sentenceStart + chunk.sentenceCount - 1),
+            chunkStartSentence
+        )
         guard sentence != currentIndex else { return }
         currentIndex = sentence
         onSentenceChange?(sentence)

@@ -75,6 +75,14 @@ struct PagedReader: View {
                 // on screen instead of wherever the offset happened to be.
                 saveProgress()
             }
+            .onChange(of: model.speech.isActive) { _, active in
+                // Playback ending is a page change in every way that matters:
+                // the visible page is a different one than when reading began,
+                // and `pageIndex` does not change to say so. Sync here or the
+                // next press reads from wherever the old session left off.
+                guard !active else { return }
+                saveProgress()
+            }
             .onChange(of: model.currentSentenceIndex) { _, _ in
                 followSpeech(box: box)
             }
@@ -366,20 +374,31 @@ struct PagedReader: View {
             return
         }
 
+        // The page on screen in raw-chapter coordinates, captured before the
+        // new layout replaces it. Both branches below need it: reading aloud
+        // stays on the page being spoken, and idle repagination reopens where
+        // the old page started.
+        let previousPageOffset: Int? = currentPage.map { old in
+            document?.characterOffset(atAttributed: old.range.location) ?? 0
+        }
+
         let doc = PagedDocument.make(content: content, reading: reading, theme: theme)
         let layout = PageLayout.ranges(of: doc.attributed, text: doc.text, in: box)
         document = doc
         pages = layout
         pagesWidth = box.width
 
-        // Follow the speaker only while it is actually running. `hasContent`
-        // stays true forever once a chapter has been read once, because
-        // `stop()` keeps the sentence list — and that made every repagination
-        // snap the page back to wherever the last reading had stopped,
-        // overriding the page the user had turned to. `pendingOffset` is kept
-        // on the visible page, so it is the right anchor when idle.
+        // While reading, the page on screen is already the one being spoken —
+        // `followSpeech` keeps it there — so repagination (a font change, say)
+        // should keep it rather than hunt for the sentence's first character,
+        // which for a long sentence sits on the page before.
+        //
+        // Idle repagination uses `pendingOffset`, which is kept on the visible
+        // page. `hasContent` would not do: `stop()` keeps the sentence list, so
+        // it stays true forever and every repagination snapped back to wherever
+        // the last reading stopped, overriding the page the user had turned to.
         let offset = model.speech.isActive
-            ? model.speech.characterOffset(ofSentence: model.currentSentenceIndex, in: content.text)
+            ? (previousPageOffset ?? model.pendingOffset)
             : model.pendingOffset
         pageIndex = layout.isEmpty ? 0 : pageIndex(forOriginalOffset: offset, document: doc)
         drag = 0
@@ -421,10 +440,40 @@ struct PagedReader: View {
     private func followSpeech(box: CGSize) {
         guard let document, !pages.isEmpty, model.speech.isActive else { return }
         let text = model.content?.text ?? ""
-        let offset = model.speech.characterOffset(ofSentence: model.currentSentenceIndex, in: text)
-        let target = pageIndex(forOriginalOffset: offset, document: document)
+        let start = model.speech.characterOffset(ofSentence: model.currentSentenceIndex, in: text)
+        let target = pageIndex(forOriginalOffset: start, document: document)
+        let sentenceEnd = sentenceEndOffset(at: model.currentSentenceIndex, in: text) ?? start
+        let visible = pageContains(originalRange: start..<sentenceEnd, pageIndex: pageIndex, document: document)
         guard target != pageIndex else { return }
+        guard !visible else { return }
         withAnimation(.easeInOut(duration: 0.2)) { pageIndex = target }
+    }
+
+    /// Where the sentence being read ends, in raw-chapter coordinates.
+    private func sentenceEndOffset(at index: Int, in text: String) -> Int? {
+        guard model.speech.sentences.indices.contains(index) else { return nil }
+        let next = index + 1
+        if model.speech.sentences.indices.contains(next) {
+            return model.speech.characterOffset(ofSentence: next, in: text)
+        }
+        return model.speech.characterOffset(ofSentence: index, in: text)
+            + model.speech.sentences[index].count
+    }
+
+    /// Whether any of `range` (raw-chapter offsets) is laid out on `pageIndex`.
+    private func pageContains(
+        originalRange range: Range<Int>,
+        pageIndex: Int,
+        document: PagedDocument
+    ) -> Bool {
+        guard pages.indices.contains(pageIndex) else { return false }
+        let page = pages[pageIndex]
+        let pageStart = document.characterOffset(atAttributed: page.range.location)
+        // The end is exclusive in character terms but the page may stop short
+        // of it; walking the last character is enough to know whether the
+        // range reaches into this page.
+        let pageEnd = pageStart + page.range.length
+        return range.lowerBound < pageEnd && range.upperBound > pageStart
     }
 
     // MARK: - Styling

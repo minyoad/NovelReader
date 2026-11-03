@@ -98,7 +98,11 @@ final class ReaderModel: ObservableObject {
                   self.nextChapterTextURL == self.chapters[self.currentIndex + 1].url else {
                 return nil
             }
-            return TextProcessing.sentences(from: text)
+            // Same body text the next chapter will be paginated from, so the
+            // chunk synthesized here is byte-identical to the one playback
+            // will ask for — otherwise the look-ahead misses its cache entry.
+            let body = PaginatedText(rawText: text).body
+            return TextProcessing.sentences(fromBody: body)
         }
         speech.onNextChapterReady = { [weak self] in
             // Audio for the next chapter exists now, so the boundary no longer
@@ -567,15 +571,25 @@ final class ReaderModel: ObservableObject {
 
     func startSpeaking(autoPlay: Bool = true) {
         guard let text = content?.text, !text.isEmpty else { return }
-        let sentences = TextProcessing.sentences(from: text)
-        // `pendingOffset` is measured against the raw chapter text, but the
-        // sentences were split from the *normalized* text — which is shorter,
-        // because every line is trimmed and zero-width characters are dropped.
-        // Feeding the raw offset to the sentence lookup made playback start
-        // deeper and deeper into the page the further into the chapter it was.
+        // Sentences are split from the same paragraph-segmented text the pages
+        // were laid out from, and positions are read in that same coordinate
+        // space. `TextProcessing.sentences(from:)` normalizes on its own rules,
+        // which do not match `PaginatedText`'s — every paragraph that opened
+        // with an indent shifted the two apart, and the drift grew with the
+        // distance into the chapter. One text, one set of offsets, no
+        // translation.
+        let paginated = PaginatedText(rawText: text)
+        let body = paginated.body
+        // Everything from here on works in `body` coordinates — the same text
+        // the pages were laid out from. `pendingOffset` is an offset into the
+        // raw chapter; translating it once here is the only conversion needed.
+        // Splitting sentences from the raw text instead left two normalizations
+        // disagreeing at every indented paragraph, which is what made reading
+        // start earlier and earlier into the page.
+        let sentences = TextProcessing.sentences(fromBody: body)
         let startIndex = speech.sentenceIndex(
-            forCharactersBefore: TextProcessing.normalizedOffset(pendingOffset, in: text),
-            in: TextProcessing.normalizeParagraphs(text),
+            forCharactersBefore: paginated.bodyOffset(forOriginal: pendingOffset),
+            in: body,
             sentences: sentences
         )
         speech.configure(app.settings.tts)
