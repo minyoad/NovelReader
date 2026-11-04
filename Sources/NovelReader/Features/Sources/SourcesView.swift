@@ -17,6 +17,19 @@ struct SourcesView: View {
     @State private var pendingDelete: BookSource?
     /// What the reader typed into the source list's search field.
     @State private var query = ""
+    /// Whether the list is in multi-select mode.
+    @State private var isBatchSelecting = false
+    @State private var selection: Set<UUID> = []
+    /// The action waiting behind the confirmation dialog.
+    @State private var pendingBatchAction: BatchAction?
+    @State private var showBatchResult = false
+    @State private var batchResultText = ""
+
+    /// What a batch confirmation will do once the reader agrees.
+    private enum BatchAction {
+        case disable
+        case delete
+    }
 
     private var trimmedQuery: String {
         query.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -43,6 +56,26 @@ struct SourcesView: View {
             .sorted { $0.0 < $1.0 }
     }
 
+    /// Every source currently on screen, flat, for the select-all control.
+    private var visibleSources: [BookSource] {
+        grouped.flatMap(\.1)
+    }
+
+    private var allVisibleSelected: Bool {
+        !visibleSources.isEmpty && visibleSources.allSatisfy { selection.contains($0.id) }
+    }
+
+    /// Shelf books whose source is among the selected ones.
+    private var affectedBooks: [Book] {
+        app.booksOnShelf(from: selection)
+    }
+
+    /// A few names, for a dialog that should read as a sentence.
+    private func bookSummary(_ books: [Book]) -> String {
+        let names = books.prefix(3).map(\.name).joined(separator: "、")
+        return books.count > 3 ? "\(names) 等 \(books.count) 本" : names
+    }
+
     var body: some View {
         NavigationStack {
             List {
@@ -61,23 +94,42 @@ struct SourcesView: View {
                 ForEach(grouped, id: \.0) { group, sources in
                     Section(group) {
                         ForEach(sources) { source in
-                            SourceRow(
-                                source: source,
-                                onToggle: { app.toggleSourceEnabled(source) },
-                                onOpen: { editingSource = source }
-                            )
-                            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                                Button(role: .destructive) {
-                                    pendingDelete = source
-                                } label: {
-                                    Label("删除", systemImage: "trash")
+                            if isBatchSelecting {
+                                BatchSourceRow(
+                                    source: source,
+                                    isSelected: selection.contains(source.id),
+                                    onToggle: { toggleSelection(source) }
+                                )
+                            } else {
+                                SourceRow(
+                                    source: source,
+                                    onToggle: { app.toggleSourceEnabled(source) },
+                                    onOpen: { editingSource = source },
+                                    onSelect: {
+                                        selection = [source.id]
+                                        isBatchSelecting = true
+                                    }
+                                )
+                                .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                                    Button(role: .destructive) {
+                                        pendingDelete = source
+                                    } label: {
+                                        Label("删除", systemImage: "trash")
+                                    }
+                                    Button {
+                                        editingSource = source
+                                    } label: {
+                                        Label("编辑", systemImage: "pencil")
+                                    }
+                                    .tint(.blue)
+                                    Button {
+                                        selection = []
+                                        isBatchSelecting = true
+                                    } label: {
+                                        Label("批量", systemImage: "checklist")
+                                    }
+                                    .tint(.gray)
                                 }
-                                Button {
-                                    editingSource = source
-                                } label: {
-                                    Label("编辑", systemImage: "pencil")
-                                }
-                                .tint(.blue)
                             }
                         }
                     }
@@ -124,14 +176,43 @@ struct SourcesView: View {
                     Text("支持 legado 规则子集：CSS、XPath、JSONPath、@@ 回退、## 正则替换。用到 JavaScript 的书源会标出影响范围。")
                 }
             }
-            .navigationTitle("书源")
+            .navigationTitle(isBatchSelecting ? (selection.isEmpty ? "选择书源" : "已选 \(selection.count) 个") : "书源")
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        showImport = true
-                    } label: {
-                        Image(systemName: "plus")
+                if isBatchSelecting {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button(allVisibleSelected ? "全不选" : "全选") {
+                            toggleSelectAll()
+                        }
+                        .disabled(visibleSources.isEmpty)
                     }
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button("完成") {
+                            endBatchSelection()
+                        }
+                    }
+                } else {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button {
+                            showImport = true
+                        } label: {
+                            Image(systemName: "plus")
+                        }
+                    }
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button {
+                            selection = []
+                            isBatchSelecting = true
+                        } label: {
+                            Image(systemName: "checklist")
+                        }
+                        .accessibilityLabel("批量管理")
+                        .disabled(app.sources.isEmpty)
+                    }
+                }
+            }
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                if isBatchSelecting {
+                    batchActionBar
                 }
             }
             .sheet(isPresented: $showImport) {
@@ -177,7 +258,140 @@ struct SourcesView: View {
             } message: {
                 Text("只会删除书源配置，已加入书架的书不受影响。")
             }
+            .confirmationDialog(
+                pendingBatchAction == .delete
+                    ? "删除 \(selection.count) 个书源？"
+                    : "停用 \(selection.count) 个书源？",
+                isPresented: Binding(
+                    get: { pendingBatchAction != nil },
+                    set: { if !$0 { pendingBatchAction = nil } }
+                ),
+                titleVisibility: .visible
+            ) {
+                if pendingBatchAction == .delete {
+                    Button("删除", role: .destructive) { confirmBatch(.delete) }
+                } else {
+                    Button("停用") { confirmBatch(.disable) }
+                }
+                Button("取消", role: .cancel) { pendingBatchAction = nil }
+            } message: {
+                Text(batchConfirmationMessage)
+            }
+            .alert("批量操作完成", isPresented: $showBatchResult) {
+                Button("好", role: .cancel) {}
+            } message: {
+                Text(batchResultText)
+            }
         }
+    }
+
+    // MARK: - Batch selection
+
+    /// The bar that replaces the row taps while selecting.
+    ///
+    /// Two verbs only:停用 keeps every rule and can be undone by flipping a
+    /// switch, 删除 removes the configuration. Both are blocked until something
+    /// is selected, so a stray tap cannot empty the shelf's sources.
+    private var batchActionBar: some View {
+        VStack(spacing: 10) {
+            if !selection.isEmpty, !affectedBooks.isEmpty {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "books.vertical")
+                        .font(.footnote)
+                        .foregroundStyle(.orange)
+                    Text("书架里有 \(affectedBooks.count) 本书记得在所选书源：\(bookSummary(affectedBooks))")
+                        .font(.footnote)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .padding(.horizontal, 4)
+            }
+            HStack(spacing: 12) {
+                Button {
+                    pendingBatchAction = .disable
+                } label: {
+                    Label("停用", systemImage: "pause.circle")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .disabled(selection.isEmpty)
+
+                Button(role: .destructive) {
+                    pendingBatchAction = .delete
+                } label: {
+                    Label("删除", systemImage: "trash")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.red)
+                .disabled(selection.isEmpty)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(.bar)
+    }
+
+    /// Explains what will happen, including what it means for the shelf.
+    private var batchConfirmationMessage: String {
+        let count = selection.count
+        let books = affectedBooks
+        switch pendingBatchAction {
+        case .delete:
+            if books.isEmpty {
+                return "将移除 \(count) 个书源的配置，它们不再出现在找书和发现页。"
+            }
+            return "将移除 \(count) 个书源的配置。书架上的 \(books.count) 本书（\(bookSummary(books))）会保留，但之后无法更新目录或继续下载章节。只想先关掉的话，可以选「停用」。"
+        case .disable:
+            if books.isEmpty {
+                return "停用后不再出现在找书和发现页，规则保留，随时可以重新启用。"
+            }
+            return "停用后不再出现在找书和发现页。书架上的 \(books.count) 本书（\(bookSummary(books))）暂时无法刷新目录或下载新章节，重新启用即可恢复。"
+        case nil:
+            return ""
+        }
+    }
+
+    private func toggleSelection(_ source: BookSource) {
+        if selection.contains(source.id) {
+            selection.remove(source.id)
+        } else {
+            selection.insert(source.id)
+        }
+    }
+
+    private func toggleSelectAll() {
+        if allVisibleSelected {
+            selection.subtract(visibleSources.map(\.id))
+        } else {
+            selection.formUnion(visibleSources.map(\.id))
+        }
+    }
+
+    private func endBatchSelection() {
+        isBatchSelecting = false
+        selection = []
+    }
+
+    private func confirmBatch(_ action: BatchAction) {
+        let ids = selection
+        let books = affectedBooks
+        pendingBatchAction = nil
+        guard !ids.isEmpty else { return }
+
+        switch action {
+        case .disable:
+            app.setSources(ids, enabled: false)
+            batchResultText = books.isEmpty
+                ? "已停用 \(ids.count) 个书源。"
+                : "已停用 \(ids.count) 个书源。书架上的 \(books.count) 本书还在，需要时可重新启用。"
+        case .delete:
+            app.deleteSources(withIDs: ids)
+            batchResultText = books.isEmpty
+                ? "已删除 \(ids.count) 个书源。"
+                : "已删除 \(ids.count) 个书源。书架上的 \(books.count) 本书已保留，但暂时无法更新。"
+        }
+        endBatchSelection()
+        showBatchResult = true
     }
 
     private func report(_ result: (added: Int, warnings: [String])) {
@@ -214,6 +428,8 @@ private struct SourceRow: View {
     /// rather than the whole row: a row-wide gesture also fires when the switch
     /// is tapped, which would open the editor on every enable/disable.
     var onOpen: () -> Void
+    /// Starts batch selection with this row included, from the context menu.
+    var onSelect: () -> Void = {}
 
     /// Computed once per render from the parsed rules. Cheap (14 string scans)
     /// and it cannot go stale, unlike a value cached at import time.
@@ -283,6 +499,54 @@ private struct SourceRow: View {
         }
         .padding(.vertical, 2)
         .opacity(source.enabled ? 1 : 0.55)
+        .contextMenu {
+            Button {
+                onSelect()
+            } label: {
+                Label("批量选择", systemImage: "checklist")
+            }
+        }
+    }
+}
+
+/// A row while batch selection is on: the whole row toggles the checkmark.
+///
+/// The switch is gone here on purpose — switching a source off is one of the
+/// batch actions, and two ways to toggle the same flag in one screen is how
+/// people end up with half a batch applied.
+private struct BatchSourceRow: View {
+    let source: BookSource
+    let isSelected: Bool
+    var onToggle: () -> Void
+
+    var body: some View {
+        Button(action: onToggle) {
+            HStack(spacing: 12) {
+                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                    .font(.title3)
+                    .foregroundStyle(isSelected ? Palette.accent : Color.secondary)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(source.name)
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                    HStack(spacing: 6) {
+                        Text(source.host)
+                        if !source.enabled {
+                            Text("已停用")
+                                .foregroundStyle(.orange)
+                        }
+                    }
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                }
+                Spacer(minLength: 0)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .padding(.vertical, 2)
     }
 }
 

@@ -413,6 +413,43 @@ final class AppModel: ObservableObject {
         persistSources()
     }
 
+    /// Removes several sources at once, keeping the shelf as it was.
+    ///
+    /// One save for the whole batch: a hundred sources would otherwise queue a
+    /// hundred writes to the same file.
+    func deleteSources(withIDs ids: Set<UUID>) {
+        let removed = sources.filter { ids.contains($0.id) }
+        guard !removed.isEmpty else { return }
+        sources.removeAll { ids.contains($0.id) }
+        for source in removed { forgetExploreFailures(of: source) }
+        persistSources()
+    }
+
+    /// Switches several sources off at once.
+    ///
+    /// Disabling is the reversible half of deleting: the rules stay, the books
+    /// keep their link, and flipping them back on costs nothing.
+    func setSources(_ ids: Set<UUID>, enabled: Bool) {
+        var changed = false
+        for index in sources.indices where ids.contains(sources[index].id) {
+            guard sources[index].enabled != enabled else { continue }
+            sources[index].enabled = enabled
+            changed = true
+        }
+        guard changed else { return }
+        persistSources()
+    }
+
+    /// Shelf books that would lose their source.
+    ///
+    /// Deleting a source does not touch the shelf, but those books can no
+    /// longer be refreshed or read further, so the reader is told before the
+    /// decision rather than after. Disabling leaves the books working, so it is
+    /// reported as a count instead of a warning.
+    func booksOnShelf(from sourceIDs: Set<UUID>) -> [Book] {
+        books.filter { sourceIDs.contains($0.sourceID) }
+    }
+
     func toggleSourceEnabled(_ source: BookSource) {
         guard let index = sources.firstIndex(where: { $0.id == source.id }) else { return }
         sources[index].enabled.toggle()
