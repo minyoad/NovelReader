@@ -94,24 +94,39 @@ struct SourcesView: View {
                 ForEach(grouped, id: \.0) { group, sources in
                     Section(group) {
                         ForEach(sources) { source in
-                            if isBatchSelecting {
-                                BatchSourceRow(
-                                    source: source,
-                                    isSelected: selection.contains(source.id),
-                                    onToggle: { toggleSelection(source) }
-                                )
-                            } else {
-                                SourceRow(
-                                    source: source,
-                                    onToggle: { app.toggleSourceEnabled(source) },
-                                    onOpen: { editingSource = source },
-                                    onSelect: {
-                                        selection = [source.id]
-                                        isBatchSelecting = true
-                                    },
-                                    onMoveToggle: { toggleSelection(source) }
-                                )
-                                .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                            // One row type for both modes, with the row's own
+                            // gestures switched off while selecting.
+                            //
+                            // A plain `if/else` swapped the view type under the
+                            // `List`, and coming back out of selection left the
+                            // list unable to scroll: SwiftUI kept the selection
+                            // row's hit area on top of the new rows.
+                            SourceRow(
+                                source: source,
+                                isSelecting: isBatchSelecting,
+                                isSelected: selection.contains(source.id),
+                                onToggle: {
+                                    if isBatchSelecting {
+                                        toggleSelection(source)
+                                    } else {
+                                        app.toggleSourceEnabled(source)
+                                    }
+                                },
+                                onOpen: {
+                                    guard !isBatchSelecting else {
+                                        toggleSelection(source)
+                                        return
+                                    }
+                                    editingSource = source
+                                },
+                                onSelect: {
+                                    selection = [source.id]
+                                    isBatchSelecting = true
+                                },
+                                onMoveToggle: { toggleSelection(source) }
+                            )
+                            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                                if !isBatchSelecting {
                                     Button(role: .destructive) {
                                         pendingDelete = source
                                     } label: {
@@ -123,8 +138,12 @@ struct SourcesView: View {
                                         Label("编辑", systemImage: "pencil")
                                     }
                                     .tint(.blue)
+                                }
+                            }
+                            .swipeActions(edge: .leading, allowsFullSwipe: false) {
+                                if !isBatchSelecting {
                                     Button {
-                                        selection = []
+                                        selection = [source.id]
                                         isBatchSelecting = true
                                     } label: {
                                         Label("批量", systemImage: "checklist")
@@ -180,20 +199,20 @@ struct SourcesView: View {
                 if !app.sources.isEmpty && !isBatchSelecting {
                     Section {
                         Button {
-                            checkSourceHealth()
+                            checkExploreHealth()
                         } label: {
                             if isCheckingHealth {
                                 HStack(spacing: 8) {
                                     ProgressView().controlSize(.small)
-                                    Text("正在检测…")
+                                    Text("正在检测发现页…")
                                 }
                             } else {
-                                Label("检测：只保留能用的书源", systemImage: "waveform.path.ecg")
+                                Label("检测发现页", systemImage: "waveform.path.ecg")
                             }
                         }
                         .disabled(isCheckingHealth)
                     } footer: {
-                        Text("逐个打开书源的发现页，能出书的保留，打不开的自动选中，确认后再删除。不消耗流量以外的任何东西。")
+                        Text("逐个打开书源的发现页：能打开的取消选中，打不开的会被选中，之后由你决定停用还是删除。发现页打不开不代表书源不能用——搜索和阅读可能是好的，所以默认建议先停用。")
                     }
                 }
             }
@@ -346,24 +365,40 @@ struct SourcesView: View {
                     .padding(.horizontal, 4)
             }
             if !selection.isEmpty, !affectedBooks.isEmpty {
-                HStack(alignment: .top, spacing: 8) {
-                    Image(systemName: "books.vertical")
-                        .font(.footnote)
-                        .foregroundStyle(.orange)
-                    Text("书架里有 \(affectedBooks.count) 本书记得在所选书源：\(bookSummary(affectedBooks))")
-                        .font(.footnote)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(alignment: .top, spacing: 8) {
+                        Image(systemName: "books.vertical")
+                            .font(.footnote)
+                            .foregroundStyle(.orange)
+                        Text("书架里有 \(affectedBooks.count) 本书记得在所选书源：\(bookSummary(affectedBooks))")
+                            .font(.footnote)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    // Removing them from the batch is the one action that has to
+                    // be one tap: hunting for them by hand across two hundred
+                    // rows is exactly what the reader was trying to avoid.
+                    Button {
+                        deselectShelvedSources()
+                    } label: {
+                        Label("去掉书架书籍的来源", systemImage: "minus.circle")
+                            .font(.footnote)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
                 }
                 .padding(.horizontal, 4)
             }
             HStack(spacing: 12) {
+                // 停用 first and promoted: it is reversible, and the only
+                // certain thing this screen knows is that a source's discover
+                // page did not answer — not that the source is broken.
                 Button {
                     pendingBatchAction = .disable
                 } label: {
                     Label("停用", systemImage: "pause.circle")
                         .frame(maxWidth: .infinity)
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.borderedProminent)
                 .disabled(selection.isEmpty)
 
                 Button(role: .destructive) {
@@ -372,7 +407,7 @@ struct SourcesView: View {
                     Label("删除", systemImage: "trash")
                         .frame(maxWidth: .infinity)
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.bordered)
                 .tint(.red)
                 .disabled(selection.isEmpty)
             }
@@ -397,10 +432,11 @@ struct SourcesView: View {
         let books = affectedBooks
         switch pendingBatchAction {
         case .delete:
+            let scope = "注意：检测只看过发现页，打不开不代表书源不能用，删除前请确认。"
             if books.isEmpty {
-                return "将移除 \(count) 个书源的配置，它们不再出现在找书和发现页。"
+                return scope + "\n将移除 \(count) 个书源的配置，它们不再出现在找书和发现页。"
             }
-            return "将移除 \(count) 个书源的配置。书架上的 \(books.count) 本书（\(bookSummary(books))）会保留，但之后无法更新目录或继续下载章节。只想先关掉的话，可以选「停用」。"
+            return scope + "\n将移除 \(count) 个书源的配置。书架上的 \(books.count) 本书（\(bookSummary(books))）会保留，但之后无法更新目录或继续下载章节。只想先关掉的话，可以选「停用」。"
         case .disable:
             if books.isEmpty {
                 return "停用后不再出现在找书和发现页，规则保留，随时可以重新启用。"
@@ -444,16 +480,15 @@ struct SourcesView: View {
     // MARK: - Health check
 
     @State private var isCheckingHealth = false
-    /// Sources the last check proved dead, so a second tap need not wait again.
-    @State private var deadSourceIDs: Set<UUID> = []
 
-    /// Keeps the sources that return books and selects the rest.
+    /// Opens every source's discover page and selects the ones that answered.
     ///
-    /// The usual reason to prune a source list is that most entries are dead,
-    /// and finding out which takes either a long afternoon of tapping or this.
-    /// Nothing is deleted here: the dead ones are only selected, so the reader
-    /// still sees the count and confirms.
-    private func checkSourceHealth() {
+    /// Only the discover page is checked — a source whose listing happens to
+    /// break may still search and read perfectly — so this is offered as
+    /// "检测发现页", not as a verdict on whether a source works. Nothing is
+    /// deleted here: the sources that failed are selected so the reader sees
+    /// the count and decides, and 停用 is the first action in the bar.
+    private func checkExploreHealth() {
         guard !isCheckingHealth else { return }
         let queue = visibleSources
         guard !queue.isEmpty else { return }
@@ -464,8 +499,8 @@ struct SourcesView: View {
 
         Task {
             let coordinator = ExploreProbeCoordinator()
-            var alive: Set<UUID> = []
-            var dead: Set<UUID> = []
+            var ok: Set<UUID> = []
+            var failed: Set<UUID> = []
             var done = 0
 
             await withTaskGroup(of: (BookSource, ExploreCategory?).self) { group in
@@ -488,9 +523,9 @@ struct SourcesView: View {
                 for await (source, working) in group {
                     done += 1
                     if working != nil {
-                        alive.insert(source.id)
+                        ok.insert(source.id)
                     } else {
-                        dead.insert(source.id)
+                        failed.insert(source.id)
                     }
                     if next < queue.count {
                         enqueue(queue[next])
@@ -499,15 +534,22 @@ struct SourcesView: View {
                 }
             }
 
-            deadSourceIDs = dead
-            // Only what this run found dead is selected: a source that could
-            // not be checked is not offered for deletion.
-            selection = dead
+            selection = failed
             isCheckingHealth = false
-            batchResultText = "检测完成：\(done) 个书源里 \(alive.count) 个可用。"
-                + (dead.isEmpty ? "" : "\n已选中 \(dead.count) 个打不开的，确认后可删除。")
+            batchResultText = "发现页检测完成：\(done) 个书源里 \(ok.count) 个能打开。"
+                + (failed.isEmpty ? "" : "\n已选中 \(failed.count) 个打不开的。它们可能仍能搜索，建议先停用。")
             showBatchResult = true
         }
+    }
+
+    /// Drops the sources whose books are already on the shelf.
+    ///
+    /// Those are the ones worth keeping whatever their state, so a batch that
+    /// started from "everything failed" can be reduced to "everything failed
+    /// that I am not reading".
+    private func deselectShelvedSources() {
+        let kept = Set(affectedBooks.map(\.sourceID))
+        selection.subtract(kept)
     }
 
     private func endBatchSelection() {
@@ -566,6 +608,10 @@ struct SourcesView: View {
 
 private struct SourceRow: View {
     let source: BookSource
+    /// Batch mode: the row shows a checkmark instead of a switch and tapping
+    /// it toggles the selection.
+    var isSelecting: Bool = false
+    var isSelected: Bool = false
     var onToggle: () -> Void
     /// Opens the source's detail screen. Deliberately bound to the text block
     /// rather than the whole row: a row-wide gesture also fires when the switch
@@ -601,6 +647,11 @@ private struct SourceRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
+            if isSelecting {
+                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                    .font(.title3)
+                    .foregroundStyle(isSelected ? Palette.accent : Color.secondary)
+            }
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
                     Text(source.name)
@@ -612,6 +663,14 @@ private struct SourceRow: View {
                             .padding(.horizontal, 5)
                             .padding(.vertical, 2)
                             .background(Color.secondary.opacity(0.15), in: Capsule())
+                    }
+                    if !source.enabled {
+                        Text("已停用")
+                            .font(.system(size: 9, weight: .semibold))
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 2)
+                            .foregroundStyle(.orange)
+                            .background(Color.orange.opacity(0.15), in: Capsule())
                     }
                     if let badge = compatibility.badge {
                         Text(badge.title)
@@ -626,43 +685,57 @@ private struct SourceRow: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
-                HStack(spacing: 8) {
-                    if source.canSearch {
-                        Label("可搜索", systemImage: "magnifyingglass")
-                    } else {
-                        Label("无搜索规则", systemImage: "exclamationmark.triangle")
+                if !isSelecting {
+                    HStack(spacing: 8) {
+                        if source.canSearch {
+                            Label("可搜索", systemImage: "magnifyingglass")
+                        } else {
+                            Label("无搜索规则", systemImage: "exclamationmark.triangle")
+                        }
+                        if source.enabledExplore {
+                            Label("发现", systemImage: "safari")
+                        }
                     }
-                    if source.enabledExplore {
-                        Label("发现", systemImage: "safari")
+                    .font(.system(size: 10))
+                    .foregroundStyle(source.canSearch ? Color.secondary : Color.orange)
+                    if let note = compatibility.shortNote {
+                        // Says what is missing rather than just that JS is involved:
+                        // "封面用 JS" and "目录用 JS" need very different decisions,
+                        // and only the second one means "pick another source".
+                        Text(note)
+                            .font(.system(size: 10))
+                            .foregroundStyle(compatibility.level == .unreadable ? Color.orange : Color.secondary)
+                            .lineLimit(2)
                     }
-                }
-                .font(.system(size: 10))
-                .foregroundStyle(source.canSearch ? Color.secondary : Color.orange)
-                if let note = compatibility.shortNote {
-                    // Says what is missing rather than just that JS is involved:
-                    // "封面用 JS" and "目录用 JS" need very different decisions,
-                    // and only the second one means "pick another source".
-                    Text(note)
-                        .font(.system(size: 10))
-                        .foregroundStyle(compatibility.level == .unreadable ? Color.orange : Color.secondary)
-                        .lineLimit(2)
                 }
             }
             // The whole text column is the "open details" target, gaps included,
             // while the switch beside it keeps its own taps.
             .frame(maxWidth: .infinity, alignment: .leading)
             .contentShape(Rectangle())
-            .onTapGesture(perform: onOpen)
-            Toggle("", isOn: Binding(
-                get: { source.enabled },
-                set: { _ in onToggle() }
-            ))
-            .labelsHidden()
-            .contentShape(Rectangle())
-            .onTapGesture {}
+            .onTapGesture {
+                // The gesture stays attached in both modes; only what it does
+                // changes, so entering and leaving selection never rebuilds the
+                // row into a different type underneath the list.
+                if isSelecting {
+                    onMoveToggle()
+                } else {
+                    onOpen()
+                }
+            }
+            .allowsHitTesting(true)
+            if !isSelecting {
+                Toggle("", isOn: Binding(
+                    get: { source.enabled },
+                    set: { _ in onToggle() }
+                ))
+                .labelsHidden()
+                .contentShape(Rectangle())
+                .onTapGesture {}
+            }
         }
         .padding(.vertical, 2)
-        .opacity(source.enabled ? 1 : 0.55)
+        .opacity(source.enabled || isSelecting ? 1 : 0.55)
         // Sliding across rows to select or deselect a run of sources.
         //
         // A `DragGesture` on the row rather than `List`'s multi-selection: this
@@ -677,47 +750,6 @@ private struct SourceRow: View {
                 Label("批量选择", systemImage: "checklist")
             }
         }
-    }
-}
-
-/// A row while batch selection is on: the whole row toggles the checkmark.
-///
-/// The switch is gone here on purpose — switching a source off is one of the
-/// batch actions, and two ways to toggle the same flag in one screen is how
-/// people end up with half a batch applied.
-private struct BatchSourceRow: View {
-    let source: BookSource
-    let isSelected: Bool
-    var onToggle: () -> Void
-
-    var body: some View {
-        Button(action: onToggle) {
-            HStack(spacing: 12) {
-                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                    .font(.title3)
-                    .foregroundStyle(isSelected ? Palette.accent : Color.secondary)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(source.name)
-                        .font(.subheadline.weight(.medium))
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
-                    HStack(spacing: 6) {
-                        Text(source.host)
-                        if !source.enabled {
-                            Text("已停用")
-                                .foregroundStyle(.orange)
-                        }
-                    }
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                }
-                Spacer(minLength: 0)
-            }
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .padding(.vertical, 2)
     }
 }
 
