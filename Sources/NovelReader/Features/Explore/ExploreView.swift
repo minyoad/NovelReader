@@ -9,7 +9,6 @@ import NovelKit
 struct ExploreView: View {
     @EnvironmentObject private var app: AppModel
 
-    @State private var selectedCategory: ExploreCategory?
     @State private var destination: Destination?
     @State private var showingSourcePicker = false
 
@@ -36,11 +35,7 @@ struct ExploreView: View {
         NavigationStack {
             Group {
                 if sources.isEmpty {
-                    EmptyStateView(
-                        title: "还没有可发现的来源",
-                        message: "去「书源」导入带发现页的书源，就能直接翻分类找书。",
-                        systemImage: "safari"
-                    )
+                    emptyState
                 } else {
                     content
                 }
@@ -67,20 +62,81 @@ struct ExploreView: View {
                     }
                     .accessibilityLabel("搜索")
                 }
-                if sources.count > 1 {
+                // Also shown with a single source when some were hidden: the
+                // footer there is the only way to bring them back.
+                if sources.count > 1 || !app.hiddenExploreSources.isEmpty || app.exploreProbe.isRunning {
                     ToolbarItem(placement: .topBarTrailing) {
                         sourceMenu
                     }
                 }
             }
             .task {
+                // A fresh install or an update that discarded old verdicts
+                // checks the imported collection once: with a few hundred dead
+                // sources, tapping through them is not a realistic way to find
+                // the live ones.
+                if app.shouldProbeExplore {
+                    app.shouldProbeExplore = false
+                    app.probeExploreSources()
+                    guard let source = currentSource else { return }
+                    await app.startExploreAtProbedCategory(source: source)
+                    return
+                }
                 // Opening the tab should land on real books, not an empty
                 // screen the reader has to poke before anything happens.
                 guard case .idle = app.exploreState,
                       let source = currentSource else { return }
                 await app.startExplore(source: source)
-                selectedCategory = app.exploreCategories.first
             }
+        }
+    }
+
+    /// Shown when nothing is left to browse.
+    ///
+    /// Recover-and-check in one tap: restoring alone would put the dead
+    /// sources back on screen with the same errors, so the probe runs right
+    /// after and keeps only the ones that answered.
+    private var emptyState: some View {
+        VStack(spacing: 20) {
+            EmptyStateView(
+                title: app.hiddenExploreSources.isEmpty ? "还没有可发现的来源" : "没有能打开的来源",
+                message: app.hiddenExploreSources.isEmpty
+                    ? "去「书源」导入带发现页的书源，就能直接翻分类找书。"
+                    : "打不开的书源已被隐藏。恢复后检测一遍，只留下真正能打开的。",
+                systemImage: "safari"
+            )
+            if !app.hiddenExploreSources.isEmpty {
+                VStack(spacing: 12) {
+                    Button {
+                        app.restoreHiddenExploreSources()
+                        app.probeExploreSources()
+                    } label: {
+                        Label("重新检测书源", systemImage: "waveform.path.ecg")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    probeStatus
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var probeStatus: some View {
+        switch app.exploreProbe {
+        case .idle:
+            EmptyView()
+        case .running(let done, let total, let working):
+            VStack(spacing: 6) {
+                ProgressView(value: Double(done), total: Double(max(total, 1)))
+                    .frame(maxWidth: 220)
+                Text("正在检测 \(done)/\(total)，\(working) 个可用")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        case .finished(let working, let total):
+            Text("检测完成：\(total) 个书源里 \(working) 个可用")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
         }
     }
 
@@ -95,13 +151,15 @@ struct ExploreView: View {
             ExploreSourcePicker(
                 sources: sources,
                 current: currentSource,
+                hiddenCount: app.hiddenExploreSources.count,
+                categoryCount: { app.openCategories(of: $0).count },
+                probe: app.exploreProbe,
+                onRestore: { app.restoreHiddenExploreSources() },
+                onProbe: { app.probeExploreSources() },
+                onCancelProbe: { app.cancelExploreProbe() },
                 onPick: { source in
                     showingSourcePicker = false
-                    selectedCategory = nil
-                    Task {
-                        await app.startExplore(source: source)
-                        selectedCategory = app.exploreCategories.first
-                    }
+                    Task { await app.startExploreAtProbedCategory(source: source) }
                 }
             )
         }
@@ -151,7 +209,6 @@ struct ExploreView: View {
             HStack(spacing: 8) {
                 ForEach(app.exploreCategories) { category in
                     Button {
-                        selectedCategory = category
                         Task {
                             guard let source = currentSource else { return }
                             await app.loadExplore(category: category, source: source, page: 1)
@@ -163,12 +220,12 @@ struct ExploreView: View {
                             .padding(.vertical, 7)
                             .background(
                                 Capsule().fill(
-                                    category == selectedCategory
+                                    category == app.exploreCategory
                                         ? Palette.accent.opacity(0.15)
                                         : Color.secondary.opacity(0.1)
                                 )
                             )
-                            .foregroundStyle(category == selectedCategory ? Palette.accent : .primary)
+                            .foregroundStyle(category == app.exploreCategory ? Palette.accent : .primary)
                     }
                     .buttonStyle(.plain)
                 }
@@ -205,7 +262,7 @@ struct ExploreView: View {
                                     .map { .shelf($0.id) } ?? .preview(result)
                             }
                     }
-                    if more, let category = selectedCategory, let source = currentSource {
+                    if more, let category = app.exploreCategory, let source = currentSource {
                         // Sources rarely say how many pages exist, so the next
                         // one is fetched when the reader reaches the end.
                         ProgressView()

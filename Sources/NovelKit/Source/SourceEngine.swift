@@ -102,10 +102,7 @@ public struct SourceEngine {
         page: Int,
         source: BookSource
     ) async throws -> [SearchResult] {
-        logSource(source, category: category, page: page)
-
         guard source.canExplore else {
-            log("REJECT 书源不可探索 name=\(source.name) enabledExplore=\(source.enabledExplore) exploreURL空=\(source.exploreURL.isEmpty)")
             throw SourceError.unsupported("书源「\(source.name)」没有配置发现页")
         }
 
@@ -121,7 +118,6 @@ public struct SourceEngine {
             options["body"] = .string(body)
             variables["key"] = body
         }
-        log("REQUEST url=\(resolved) method=\(options["method"]?.stringValue ?? "GET") body=\(options["body"]?.stringValue ?? "-")")
         let fetched = try await client.fetch(
             try makeRequest(
                 url: resolved,
@@ -132,19 +128,14 @@ public struct SourceEngine {
             ),
             referer: source.baseURL
         )
-        log("RESPONSE finalURL=\(fetched.finalURL.absoluteString) status=\(fetched.statusCode) bytes=\(fetched.text.count)")
-        ExploreLog.block("HTML_HEAD", String(fetched.text.prefix(600)))
 
         let root = try scope(for: fetched, source: source)
         let engine = makeEngine(variables: variables, baseURL: fetched.finalURL)
         let rules = Self.exploreRules(for: category, source: source)
-        log("RULES 来源=\(Self.exploreRuleOrigin(for: category, source: source)) bookList=\(rules.bookList) name=\(rules.name) bookURL=\(rules.bookURL)")
         if rules.bookList.isEmpty {
-            log("REJECT 列表规则为空")
             throw SourceError.unsupported("书源「\(source.name)」的分类「\(category.name)」没有配置列表规则")
         }
         let items = engine.scopes(for: rules.bookList, in: root)
-        log("MATCH bookList 命中=\(items.count)")
         guard !items.isEmpty else {
             // The page loaded but the selector matched nothing. Saying so
             // separately from a network failure is what tells us whether to
@@ -160,11 +151,10 @@ public struct SourceEngine {
         }
 
         var results: [SearchResult] = []
-        var dropped = 0
         for item in items {
-            guard let name = engine.value(rules.name, in: item), !name.isEmpty else { dropped += 1; continue }
+            guard let name = engine.value(rules.name, in: item), !name.isEmpty else { continue }
             guard let detail = engine.value(rules.bookURL, in: item),
-                  let detailURL = TextProcessing.resolveURL(detail, base: fetched.finalURL) else { dropped += 1; continue }
+                  let detailURL = TextProcessing.resolveURL(detail, base: fetched.finalURL) else { continue }
             let cover = engine.value(rules.coverURL, in: item)
             results.append(SearchResult(
                 sourceID: source.id,
@@ -179,27 +169,7 @@ public struct SourceEngine {
                 detailURL: detailURL
             ))
         }
-        log("RESULT 解析成功=\(results.count) 丢弃(缺书名或链接)=\(dropped)")
         return results
-    }
-
-    private func log(_ message: String) {
-        ExploreLog.line(message)
-    }
-
-    /// Dumps everything the discover page needs to explain itself.
-    private func logSource(_ source: BookSource, category: ExploreCategory, page: Int) {
-        log("=== OPEN source=\(source.name) id=\(source.id) page=\(page) ===")
-        log("baseURL=\(source.baseURL) enabled=\(source.enabled) enabledExplore=\(source.enabledExplore) canExplore=\(source.canExplore)")
-        ExploreLog.block("EXPLORE_URL", source.exploreURL)
-        log("SOURCE_RULES bookList=\(source.explore.bookList) name=\(source.explore.name) bookURL=\(source.explore.bookURL) author=\(source.explore.author) coverURL=\(source.explore.coverURL)")
-        log("CATEGORY name=\(category.name) url=\(category.url) hasOwnRules=\(category.hasRules)")
-        ExploreLog.block("CATEGORY_OPTIONS", category.optionsJson)
-        let categories = ExploreParser.categories(from: source.exploreURL)
-        log("CATEGORIES total=\(categories.count) openable=\(source.openableExploreCategories.count)")
-        for item in categories {
-            log("  - name=\(item.name) url=\(item.url) own=\(item.hasRules) openable=\(item.canOpen(exploreRules: source.fallbackExploreRule))")
-        }
     }
 
     /// Legado's per-category `ruleExplore` uses the same field names as
@@ -224,6 +194,7 @@ public struct SourceEngine {
         }
         return source.explore.bookList.isEmpty ? "回退到搜索规则" : "书源级"
     }
+
 
     static func searchRule(from object: [String: JSONValue]) -> SearchRule {
         func text(_ key: String) -> String { object[key]?.stringValue ?? "" }

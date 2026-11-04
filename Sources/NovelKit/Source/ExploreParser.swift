@@ -44,8 +44,35 @@ public struct ExploreCategory: Identifiable, Hashable, Sendable {
     /// source's. Both empty means the tab would open onto a page nothing can
     /// parse, which is the common shape of a half-configured legacy source.
     public func canOpen(exploreRules: SearchRule) -> Bool {
+        guard hasUsableURL else { return false }
         let rule = hasRules ? ownBookList : exploreRules.bookList
         return !rule.isEmpty && !Self.isUnsupported(rule)
+    }
+
+    /// Whether the address can become a request at all.
+    ///
+    /// Real sources carry leftovers that never resolve: 📚作品集 writes
+    /// `http://zuopinj.com/alltotal/<,index_1.html>`, keeping the editor's
+    /// placeholder in the template. Those tabs open onto "无效的链接" no matter
+    /// what the site does, so they are not offered.
+    public var hasUsableURL: Bool {
+        let resolved = ExploreParser.url(for: self, page: 1)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !resolved.isEmpty else { return false }
+
+        // Anything still holding a template marker or an angle bracket can
+        // never be a URL; percent-encoding it would only send a request to a
+        // nonsense path.
+        if resolved.contains("<") || resolved.contains(">") { return false }
+        if resolved.contains("{{") || resolved.contains("}}") { return false }
+        if resolved.contains(" ") { return false }
+
+        // Absolute addresses must parse. Relative ones are resolved against the
+        // source's base URL later, so their validity is not decided here.
+        guard let scheme = resolved.split(separator: ":", maxSplits: 1).first,
+              resolved.contains("://") else { return true }
+        guard ["http", "https"].contains(scheme.lowercased()) else { return false }
+        return URL(string: resolved) != nil
     }
 
     /// `bookList` from this category's own block, when it has one.
@@ -85,6 +112,14 @@ public enum ExploreParser {
     /// gives nothing to label the tab with, and inventing a name would put
     /// unlabelled tabs in front of the reader.
     public static func categories(from exploreURL: String) -> [ExploreCategory] {
+        let text = exploreURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Newer sources describe the whole discover page as a JSON array of
+        // `{title, url, style}` objects. Falling through to the line format
+        // would split that text at its first colon and produce one bogus tab.
+        if text.hasPrefix("[") {
+            return jsonCategories(from: text)
+        }
+
         var seen = Set<String>()
         var result: [ExploreCategory] = []
 
@@ -122,6 +157,77 @@ public enum ExploreParser {
             result.append(ExploreCategory(name: trimmedName, url: url, options: options))
         }
         return result
+    }
+
+    /// Categories from the JSON-array form of `exploreUrl`.
+    ///
+    /// Only `title` and `url` are used: `style` lays the tabs out in legado's
+    /// own grid and means nothing here. A malformed array yields no categories
+    /// at all rather than one invented from the JSON text.
+    public static func jsonCategories(from exploreURL: String) -> [ExploreCategory] {
+        guard let data = removingTrailingCommas(exploreURL).data(using: .utf8),
+              let entries = try? JSONDecoder().decode([JSONValue].self, from: data) else {
+            return []
+        }
+
+        var seen = Set<String>()
+        var result: [ExploreCategory] = []
+        for entry in entries {
+            guard let object = entry.objectValue,
+                  let title = object["title"]?.stringValue?
+                      .trimmingCharacters(in: .whitespacesAndNewlines),
+                  let rawURL = object["url"]?.stringValue?
+                      .trimmingCharacters(in: .whitespacesAndNewlines),
+                  !title.isEmpty, !rawURL.isEmpty else { continue }
+            guard seen.insert(title).inserted else { continue }
+
+            // A JSON entry can carry an option block in its address too, the
+            // same `url,{...}` shape the line format uses.
+            let (url, options) = splitOptions(rawURL)
+            guard !url.isEmpty else { continue }
+            result.append(ExploreCategory(name: title, url: url, options: options))
+        }
+        return result
+    }
+
+    /// Drops a comma that sits immediately before `]` or `}`, outside strings.
+    ///
+    /// Hand-written sources ship `…},{…},]`; legado tolerates the trailing
+    /// comma, but JSON does not, and a strict decode would throw the whole
+    /// discover page away.
+    static func removingTrailingCommas(_ text: String) -> String {
+        var out: [Character] = []
+        out.reserveCapacity(text.count)
+        var inString = false
+        var escaped = false
+
+        for character in text {
+            if inString {
+                out.append(character)
+                if escaped {
+                    escaped = false
+                } else if character == "\\" {
+                    escaped = true
+                } else if character == "\"" {
+                    inString = false
+                }
+                continue
+            }
+
+            switch character {
+            case "\"":
+                inString = true
+                out.append(character)
+            case "]", "}":
+                var probe = out.count - 1
+                while probe >= 0, out[probe].isWhitespace { probe -= 1 }
+                if probe >= 0, out[probe] == "," { out.remove(at: probe) }
+                out.append(character)
+            default:
+                out.append(character)
+            }
+        }
+        return String(out)
     }
 
     /// Splits `exploreUrl` into category entries.

@@ -38,6 +38,48 @@ struct ExploreParserTests {
         #expect(categories.first?.url == "https://example.com/top?p={{page}}")
     }
 
+    @Test("a JSON-array exploreUrl becomes categories")
+    func jsonArrayCategories() {
+        // 玄幻阁网 describes its discover page this way; the line parser used
+        // to split the array at its first colon and open one bogus tab.
+        let raw = """
+        [
+        {"title":"玄幻","url":"/sort1/{{page}}/","style":{"layout_flexGrow":1}},
+        {"title":"武侠","url":"/sort2/{{page}}/","style":{"layout_flexGrow":1}}
+        ]
+        """
+        let categories = ExploreParser.categories(from: raw)
+        #expect(categories.map(\.name) == ["玄幻", "武侠"])
+        #expect(categories.map(\.url) == ["/sort1/{{page}}/", "/sort2/{{page}}/"])
+    }
+
+    @Test("a trailing comma in the JSON array is tolerated")
+    func jsonTrailingComma() {
+        let raw = """
+        [
+        {"title":"玄幻","url":"/sort1/{{page}}/"},
+        {"title":"武侠","url":"/sort2/{{page}}/"},
+        ]
+        """
+        #expect(ExploreParser.categories(from: raw).count == 2)
+    }
+
+    @Test("a JSON entry may carry its own option block")
+    func jsonEntryOptions() {
+        let raw = """
+        [{"title":"排行","url":"/top/{{page}}.html,{\\"ruleExplore\\":{\\"bookList\\":\\".item\\"}}"}]
+        """
+        let category = ExploreParser.categories(from: raw).first
+        #expect(category?.url == "/top/{{page}}.html")
+        #expect(category?.hasRules == true)
+    }
+
+    @Test("a broken JSON array yields no categories, not one bogus tab")
+    func brokenJSONArray() {
+        let raw = "[{\"title\":\"玄幻\",\"url\":"
+        #expect(ExploreParser.categories(from: raw).isEmpty)
+    }
+
     @Test("`&&` also separates category entries")
     func ampersandSeparator() {
         // 🥈31小说 writes its whole list on one line; treating it as a single
@@ -284,6 +326,47 @@ struct ExploreParserTests {
             explore: SearchRule(bookList: ".item")
         )
         #expect(source.canExplore == false)
+    }
+
+    @Test("a category whose address never resolves is not offered")
+    func unusableAddress() {
+        // 📚作品集 ships `http://zuopinj.com/alltotal/<,index_1.html>`: the
+        // editor's placeholder is still in the template, so the tab could only
+        // ever produce an invalid-link error.
+        let broken = ExploreCategory(name: "作品集", url: "http://zuopinj.com/alltotal/<,index_1.html>")
+        #expect(broken.hasUsableURL == false)
+
+        let source = BookSource(
+            name: "作品集",
+            baseURL: "http://zuopinj.com",
+            enabledExplore: true,
+            exploreURL: "全部::http://zuopinj.com/alltotal/<,index_1.html>",
+            explore: SearchRule(bookList: ".item")
+        )
+        #expect(source.canExplore == false)
+        #expect(source.openableExploreCategories.isEmpty)
+    }
+
+    @Test("ordinary addresses stay usable")
+    func usableAddresses() {
+        // Relative, absolute, protocol-relative and paged forms all resolve.
+        for url in [
+            "/xuanhuan/{{page}}.html",
+            "https://www.example.com/list/1.html",
+            "//www.example.com/list/1.html",
+            "/list/{{page}}/"
+        ] {
+            let category = ExploreCategory(name: "分类", url: url)
+            #expect(category.hasUsableURL, "expected \(url) to be usable")
+        }
+    }
+
+    @Test("leftovers that cannot form a request are rejected")
+    func addressLeftovers() {
+        for url in ["", "   ", "/list/{{page}}/{{key}}", "/list/a b.html", "ftp://example.com/list"] {
+            let category = ExploreCategory(name: "分类", url: url)
+            #expect(!category.hasUsableURL, "expected \(url) to be rejected")
+        }
     }
 }
 

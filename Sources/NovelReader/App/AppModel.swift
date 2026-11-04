@@ -131,6 +131,11 @@ final class AppModel: ObservableObject {
     @Published var exploreState: ExploreState = .idle
     /// Which discover categories the current source offers.
     @Published var exploreCategories: [ExploreCategory] = []
+    /// The category whose books are on screen.
+    ///
+    /// Held here rather than in the view because opening a source can skip
+    /// past stale tabs, and the highlighted tab has to follow what was loaded.
+    @Published var exploreCategory: ExploreCategory?
     /// The book source whose discover page is showing.
     @Published var exploreSourceID: UUID?
     /// Whether the search screen is presented over the discover page.
@@ -145,6 +150,13 @@ final class AppModel: ObservableObject {
     /// the user is looking at now.
     private var activeSearchTicket: UUID?
     @Published var banner: (text: String, isError: Bool)?
+
+    /// Latches and counters used only by the discover-page probe.
+    ///
+    /// They live behind a lock because the probe updates them from the request
+    /// tasks, which run off the main actor; keeping them here avoids touching
+    /// `self` across those boundaries.
+    nonisolated let probeCoordinator = ExploreProbeCoordinator()
 
     let store: LibraryStore
     private var client: HTTPClient
@@ -184,6 +196,7 @@ final class AppModel: ObservableObject {
         client = HTTPClient(settings: loaded.network)
         books = await store.loadBooks()
         sources = await store.loadSources()
+        loadExploreAvailability()
 
         if sources.isEmpty {
             sources = [BuiltinContent.sampleSource] + BuiltinContent.presetSources
@@ -369,6 +382,9 @@ final class AppModel: ObservableObject {
                     source.isBuiltIn = sources[index].isBuiltIn
                     source.enabled = sources[index].enabled
                     sources[index] = source
+                    // The rules changed, so any verdict learned from the old
+                    // ones no longer applies.
+                    forgetExploreFailures(of: source)
                 } else {
                     sources.append(source)
                     added += 1
@@ -387,11 +403,13 @@ final class AppModel: ObservableObject {
         } else {
             sources.append(source)
         }
+        forgetExploreFailures(of: source)
         persistSources()
     }
 
     func deleteSource(_ source: BookSource) {
         sources.removeAll { $0.id == source.id }
+        forgetExploreFailures(of: source)
         persistSources()
     }
 
@@ -556,34 +574,442 @@ final class AppModel: ObservableObject {
     // MARK: - Explore
 
     /// Sources whose discover page can actually be opened.
+    ///
+    /// A source that has failed here is remembered and dropped from the list:
+    /// a dead site or a page that no longer matches its selectors will fail
+    /// every time, and leaving it in the picker only produces the same error on
+    /// the next attempt. Both lists are remembered across launches and can be
+    /// reset from the picker's footer.
     var explorableSources: [BookSource] {
-        sources.filter { $0.enabled && $0.type == .text && $0.canExplore }
+        sources.filter {
+            $0.enabled
+                && $0.type == .text
+                && $0.canExplore
+                && !unavailableExploreSourceIDs.contains($0.id.uuidString)
+                && !openCategories(of: $0).isEmpty
+        }
+    }
+
+    /// Sources that are explorable on paper but currently filtered out.
+    var hiddenExploreSources: [BookSource] {
+        sources.filter {
+            $0.enabled
+                && $0.type == .text
+                && $0.canExplore
+                && (unavailableExploreSourceIDs.contains($0.id.uuidString)
+                    || openCategories(of: $0).isEmpty)
+        }
+    }
+
+    /// The categories of a source that have not failed yet.
+    ///
+    /// Failures are tracked per category as well as per source. A source whose
+    /// 玄幻 tab answers 404 usually still has a dozen other sections, and
+    /// hiding the whole source over one stale address was what emptied the
+    /// list while working sources were still in it.
+    func openCategories(of source: BookSource) -> [ExploreCategory] {
+        let failed = unavailableExploreCategories[source.id.uuidString] ?? []
+        return source.openableExploreCategories.filter { !failed.contains($0.name) }
+    }
+
+    /// Category names that failed to open, keyed by source id.
+    @Published private(set) var unavailableExploreCategories: [String: Set<String>] = [:] {
+        didSet { persistExploreAvailability() }
+    }
+
+    /// Sources with every category failed, or whose host does not answer.
+    @Published private(set) var unavailableExploreSourceIDs: Set<String> = [] {
+        didSet { persistExploreAvailability() }
+    }
+
+    private static let unavailableExploreKey = "explore.unavailableSources"
+    private static let failedCategoriesKey = "explore.failedCategories"
+    private static let availabilityVersionKey = "explore.availabilityVersion"
+
+    /// Bumped when the filtering rules change, so verdicts reached by older
+    /// ones are thrown away instead of hiding sources that now qualify.
+    private static let availabilityVersion = 3
+
+    /// Set when old verdicts were discarded, so the discover page can check the
+    /// sources once instead of making the reader tap through them again.
+    @Published var shouldProbeExplore = false
+
+    /// How many tabs opening a source will try before giving up.
+    ///
+    /// Two would cover the usual case — the first tab is stale, the second
+    /// works — and three keeps a dead source from costing a minute of timeouts.
+    private static let exploreAttempts = 3
+
+    /// Brings hidden sources and categories back, for when the failure was the
+    /// network rather than the site.
+    func restoreHiddenExploreSources() {
+        guard !unavailableExploreSourceIDs.isEmpty || !unavailableExploreCategories.isEmpty else { return }
+        unavailableExploreSourceIDs = []
+        unavailableExploreCategories = [:]
+    }
+
+    /// Drops the learned state for one source, after its rules were re-imported
+    /// or edited: the old verdict was about the old rules.
+    func forgetExploreFailures(of source: BookSource) {
+        unavailableExploreSourceIDs.remove(source.id.uuidString)
+        unavailableExploreCategories[source.id.uuidString] = nil
+    }
+
+    private func persistExploreAvailability() {
+        let defaults = UserDefaults.standard
+        defaults.set(Array(unavailableExploreSourceIDs), forKey: Self.unavailableExploreKey)
+        let categories = unavailableExploreCategories.mapValues { Array($0) }
+        defaults.set(categories, forKey: Self.failedCategoriesKey)
+    }
+
+    private func loadExploreAvailability() {
+        let defaults = UserDefaults.standard
+        if defaults.integer(forKey: Self.availabilityVersionKey) < Self.availabilityVersion {
+            // Earlier builds hid a whole source as soon as any one of its tabs
+            // failed, which threw away sources that still had working
+            // sections. Those verdicts cannot be trusted, so start clean.
+            unavailableExploreSourceIDs = []
+            unavailableExploreCategories = [:]
+            defaults.set(Self.availabilityVersion, forKey: Self.availabilityVersionKey)
+            shouldProbeExplore = true
+            return
+        }
+
+        unavailableExploreSourceIDs = Set(defaults.stringArray(forKey: Self.unavailableExploreKey) ?? [])
+        let stored = defaults.dictionary(forKey: Self.failedCategoriesKey) as? [String: [String]] ?? [:]
+        unavailableExploreCategories = stored.mapValues(Set.init)
     }
 
     /// Loads the first page of a source's discover page.
     ///
     /// Only categories the source can actually read are offered: a tab that is
-    /// guaranteed to fail is worse than no tab at all.
+    /// guaranteed to fail is worse than no tab at all. When the first tab does
+    /// fail anyway — the site moved a section, the page was rewritten — the
+    /// next one is tried, so a source with one stale link still opens.
     func startExplore(source: BookSource) async {
         exploreSourceID = source.id
-        exploreCategories = source.openableExploreCategories
-        guard let first = exploreCategories.first else {
+        exploreCategories = openCategories(of: source)
+        guard !exploreCategories.isEmpty else {
             exploreState = .failed("这个书源的发现页没有配置可用的分类规则")
             return
         }
-        await loadExplore(category: first, source: source, page: 1)
+
+        exploreState = .loading
+        var lastError: Error?
+        for category in exploreCategories.prefix(Self.exploreAttempts) {
+            switch await fetchExplore(category: category, source: source, page: 1) {
+            case .success(let results):
+                exploreCategories = openCategories(of: source)
+                exploreCategory = category
+                exploreState = .loaded(results, page: 1, more: !results.isEmpty)
+                return
+            case .failure(let error):
+                lastError = error
+                // A whole-source failure would only repeat on the next tab;
+                // the source is hidden by now, so stop wasting the reader's
+                // time on timeouts.
+                if unavailableExploreSourceIDs.contains(source.id.uuidString) { break }
+            }
+        }
+
+        exploreCategories = openCategories(of: source)
+        exploreCategory = exploreCategories.first
+        exploreState = .failed(lastError?.localizedDescription ?? "发现页打不开")
     }
 
     func loadExplore(category: ExploreCategory, source: BookSource, page: Int) async {
+        // Named for the page it shows; the list above is rebuilt from page 1
+        // when the first tab fails.
+        _ = page
         exploreState = .loading
+        var lastError: Error?
+        // Tapping a stale tab should land on books, not on its error: carry on
+        // to the next tab the same way opening the source does. A failure that
+        // condemns the whole source is not worth repeating on its neighbours.
+        for attempt in categoriesAfter(category, of: source).prefix(Self.exploreAttempts) {
+            switch await fetchExplore(category: attempt, source: source, page: 1) {
+            case .success(let results):
+                exploreCategories = openCategories(of: source)
+                exploreCategory = attempt
+                exploreState = .loaded(results, page: 1, more: !results.isEmpty)
+                return
+            case .failure(let error):
+                lastError = error
+                if unavailableExploreSourceIDs.contains(source.id.uuidString) { break }
+            }
+        }
+
+        exploreCategories = openCategories(of: source)
+        if !exploreCategories.contains(category) {
+            exploreCategory = exploreCategories.first
+        }
+        exploreState = .failed(lastError?.localizedDescription ?? "这个分类打不开")
+    }
+
+    /// The tapped tab first, then the others in the order they are listed.
+    private func categoriesAfter(_ category: ExploreCategory, of source: BookSource) -> [ExploreCategory] {
+        let open = openCategories(of: source)
+        guard open.contains(category) else { return open }
+        return [category] + open.filter { $0 != category }
+    }
+
+    /// Fetches one page and records whether the category opened.
+    ///
+    /// Only the first page is judged: a later page failing can be a timeout or
+    /// the end of the list, and hiding a tab that just showed books would be
+    /// wrong.
+    private func fetchExplore(
+        category: ExploreCategory,
+        source: BookSource,
+        page: Int
+    ) async -> Result<[SearchResult], Error> {
         do {
             let results = try await engine.explore(category: category, page: page, source: source)
-            ExploreLog.line("UI OK source=\(source.name) category=\(category.name) page=\(page) 结果=\(results.count)")
-            exploreState = .loaded(results, page: page, more: !results.isEmpty)
+            if page == 1 { recordExploreSuccess(category: category, source: source) }
+            return .success(results)
         } catch {
-            ExploreLog.line("UI FAIL source=\(source.name) category=\(category.name) error=\(error.localizedDescription)")
-            exploreState = .failed(error.localizedDescription)
+            if page == 1 { recordExploreFailure(category: category, source: source, error: error) }
+            return .failure(error)
         }
+    }
+
+    /// Clears the marks on a category and on its source.
+    ///
+    /// A page that returns books proves both, so a site that came back is
+    /// offered again without the reader having to reset anything.
+    private func recordExploreSuccess(category: ExploreCategory, source: BookSource) {
+        let key = source.id.uuidString
+        unavailableExploreSourceIDs.remove(key)
+        guard var failed = unavailableExploreCategories[key] else { return }
+        failed.remove(category.name)
+        if failed.isEmpty {
+            unavailableExploreCategories[key] = nil
+        } else {
+            unavailableExploreCategories[key] = failed
+        }
+    }
+
+    private func recordExploreFailure(category: ExploreCategory, source: BookSource, error: Error) {
+        recordExploreFailure(
+            category: category,
+            source: source,
+            wholeSource: ExploreFailure.failsWholeSource(error)
+        )
+    }
+
+    private func recordExploreFailure(
+        category: ExploreCategory,
+        source: BookSource,
+        wholeSource: Bool
+    ) {
+        let key = source.id.uuidString
+        if wholeSource {
+            unavailableExploreCategories[key] = Set(source.openableExploreCategories.map(\.name))
+            unavailableExploreSourceIDs.insert(key)
+        } else {
+            unavailableExploreCategories[key, default: []].insert(category.name)
+            if openCategories(of: source).isEmpty {
+                unavailableExploreSourceIDs.insert(key)
+            }
+        }
+    }
+
+    // MARK: - Explore probe
+
+    /// Progress of "open every discover page once", for the picker's footer.
+    enum ExploreProbeState: Equatable {
+        case idle
+        case running(done: Int, total: Int, working: Int)
+        case finished(working: Int, total: Int)
+
+        var isRunning: Bool {
+            if case .running = self { return true }
+            return false
+        }
+    }
+
+    @Published private(set) var exploreProbe: ExploreProbeState = .idle
+    private var probeTask: Task<Void, Never>?
+
+    /// How many sources are checked at once.
+    ///
+    /// Each source walks its own tabs in turn, so this only decides how many
+    /// sites are being talked to at the same time; six spreads the load and
+    /// still finishes a few hundred sources in a couple of minutes.
+    private static let probeConcurrency = 6
+
+    /// Opens every discover page and keeps whatever answers.
+    ///
+    /// Imported collections are mostly dead, and finding the live ones by
+    /// tapping each source in turn is hopeless. This walks the visible list in
+    /// the background, records the verdicts and leaves a short list of sources
+    /// that actually returned books.
+    func probeExploreSources() {
+        guard probeTask == nil else { return }
+        let queue = explorableSources
+        guard !queue.isEmpty else {
+            exploreProbe = .finished(working: 0, total: 0)
+            return
+        }
+        probeCoordinator.reset()
+        exploreProbe = .running(done: 0, total: queue.count, working: 0)
+        probeTask = Task { [weak self] in
+            await self?.runExploreProbe(queue)
+            self?.probeTask = nil
+        }
+    }
+
+    func cancelExploreProbe() {
+        probeTask?.cancel()
+    }
+
+    /// One source's verdict, as produced by the request tasks.
+    private struct ProbeOutcome: Sendable {
+        let source: BookSource
+        let workingCategory: ExploreCategory?
+        let failures: [ExploreCategory]
+        /// The first failure that condemns the whole source, if any.
+        let sourceError: Error?
+
+        var isWorking: Bool { workingCategory != nil }
+    }
+
+    private func runExploreProbe(_ queue: [BookSource]) async {
+        let total = queue.count
+        var done = 0
+        var working = 0
+
+        // A dead host is known within seconds; the reader's own timeout is far
+        // too long to spend on a hundred of them.
+        var quick = settings.network
+        quick.timeout = min(quick.timeout, 6)
+        let probeClient = HTTPClient(settings: quick)
+        let coordinator = probeCoordinator
+        let categories = Dictionary(
+            uniqueKeysWithValues: queue.map { ($0.id, openCategories(of: $0)) }
+        )
+
+        await withTaskGroup(of: ProbeOutcome.self) { group in
+            var next = 0
+            func enqueue(_ source: BookSource) {
+                let tabs = categories[source.id] ?? []
+                group.addTask {
+                    await Self.probe(source, categories: tabs, client: probeClient, coordinator: coordinator)
+                }
+            }
+
+            for _ in 0..<min(Self.probeConcurrency, total) {
+                enqueue(queue[next])
+                next += 1
+            }
+
+            for await outcome in group {
+                done += 1
+                applyProbeOutcome(outcome)
+                if outcome.isWorking { working += 1 }
+                exploreProbe = .running(done: done, total: total, working: working)
+
+                if next < total {
+                    enqueue(queue[next])
+                    next += 1
+                }
+                if Task.isCancelled { break }
+            }
+            group.cancelAll()
+        }
+
+        // The source on screen may have lost every tab it had.
+        if let id = exploreSourceID, let source = sources.first(where: { $0.id == id }) {
+            exploreCategories = openCategories(of: source)
+            if let shown = exploreCategory, !exploreCategories.contains(shown) {
+                exploreCategory = exploreCategories.first
+            }
+        }
+        exploreProbe = Task.isCancelled
+            ? .finished(working: working, total: done)
+            : .finished(working: working, total: total)
+    }
+
+    /// Walks one source's tabs until one answers.
+    ///
+    /// Checking only the first tab was what hid sources with one stale link;
+    /// checking all of them on a dead host is what made the run slow. So the
+    /// tabs are tried in order and the walk stops at the first page that comes
+    /// back with books — or as soon as the source is clearly broken.
+    private nonisolated static func probe(
+        _ source: BookSource,
+        categories: [ExploreCategory],
+        client: HTTPClient,
+        coordinator: ExploreProbeCoordinator
+    ) async -> ProbeOutcome {
+        guard let host = URL(string: source.baseURL)?.host else {
+            return ProbeOutcome(source: source, workingCategory: nil, failures: categories, sourceError: nil)
+        }
+        if coordinator.isDead(host: host) {
+            return ProbeOutcome(source: source, workingCategory: nil, failures: categories, sourceError: nil)
+        }
+
+        let engine = SourceEngine(client: client)
+        var failures: [ExploreCategory] = []
+
+        for category in categories {
+            if Task.isCancelled { break }
+            if coordinator.shouldSkip(source: source.id) { break }
+            do {
+                _ = try await engine.explore(category: category, page: 1, source: source)
+                // A tab that returns books proves both the tab and the source,
+                // so the failures on the way here are not worth keeping.
+                return ProbeOutcome(source: source, workingCategory: category, failures: [], sourceError: nil)
+            } catch {
+                failures.append(category)
+                coordinator.recordFailure(source: source.id)
+                if ExploreFailure.failsWholeSource(error) {
+                    return ProbeOutcome(source: source, workingCategory: nil, failures: categories, sourceError: error)
+                }
+                // Only the first host-level failure is conclusive: a site that
+                // cannot be resolved at all is gone, while one bad section is
+                // not.
+                if let http = error as? HTTPError, case .transport = http {
+                    coordinator.markDead(host: host)
+                    return ProbeOutcome(source: source, workingCategory: nil, failures: categories, sourceError: error)
+                }
+            }
+        }
+        return ProbeOutcome(source: source, workingCategory: nil, failures: failures, sourceError: nil)
+    }
+
+    /// Records a finished source on the main actor.
+    private func applyProbeOutcome(_ outcome: ProbeOutcome) {
+        let key = outcome.source.id.uuidString
+        if let working = outcome.workingCategory {
+            unavailableExploreSourceIDs.remove(key)
+            unavailableExploreCategories[key] = nil
+            // Keeps what the check learned for the picker's row count without
+            // marking anything: the source is offered as a whole.
+            probeWorkingCategory[outcome.source.id] = working
+            return
+        }
+        probeWorkingCategory[outcome.source.id] = nil
+        if outcome.sourceError != nil {
+            unavailableExploreCategories[key] = Set(outcome.source.openableExploreCategories.map(\.name))
+        } else {
+            unavailableExploreCategories[key] = Set(outcome.failures.map(\.name))
+        }
+        if openCategories(of: outcome.source).isEmpty {
+            unavailableExploreSourceIDs.insert(key)
+        }
+    }
+
+    /// Which tab worked for a source during the last check.
+    @Published private(set) var probeWorkingCategory: [UUID: ExploreCategory] = [:]
+
+    /// Opens a source at the tab the last check found working.
+    func startExploreAtProbedCategory(source: BookSource) async {
+        await startExplore(source: source)
+        guard let working = probeWorkingCategory[source.id],
+              exploreCategories.contains(working),
+              exploreCategories.first != working else { return }
+        await loadExplore(category: working, source: source, page: 1)
     }
 
     /// Appends the next page of the category already on screen.
