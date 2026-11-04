@@ -25,6 +25,30 @@ struct PagedReader: View {
     /// Width of the page in points; captured from the gesture so the drag
     /// progress can be normalised without recomputing layout.
     @State private var pagesWidth: CGFloat = 1
+    /// Styled pages around the visible one, keyed by page index.
+    ///
+    /// Filled when the page changes or when a turn starts — never while a frame
+    /// is being drawn. Styling copies an attributed slice and walks it, so doing
+    /// it inside `body` or inside the frame that has to react to the finger is
+    /// what made the turn stall.
+    @State private var pageText: [Int: StagedPage] = [:]
+    /// What is left of the page a chapter-boundary swipe started on, so the
+    /// reader keeps showing it while the next chapter loads.
+    @State private var leaving: NSAttributedString?
+    /// The page the turn is settling onto. `pageIndex` only moves once the
+    /// animation has finished, so this is what the layer underneath shows in
+    /// the meantime.
+    @State private var turnTarget: Int?
+    /// Direction of the turn being settled. `drag` is back at zero by then, so
+    /// it can no longer say which way the page is going.
+    @State private var turnForward: Bool?
+    /// A distance being animated to and back, held in its own state.
+    ///
+    /// `drag` follows the finger with no animation (a spring on top of a gesture
+    /// is a fight between the finger and the animator). The finish of a turn is
+    /// animated on this separate value instead, so exactly one driver moves the
+    /// page at a time and the swipe never stalls just before the page goes.
+    @State private var turn: CGFloat = 0
 
     private var reading: ReadingSettings { app.settings.reading }
 
@@ -68,6 +92,7 @@ struct PagedReader: View {
                 paginate(box: box)
             }
             .onChange(of: pageIndex) { _, _ in
+                refreshStaging()
                 syncPageIndicator()
                 // Keeps `pendingOffset` on the visible page no matter what
                 // moved it: a swipe, the speech follow-along, or repagination
@@ -146,39 +171,84 @@ struct PagedReader: View {
         return pages.indices.contains(candidate) ? candidate : nil
     }
 
-    private var isForward: Bool { drag < 0 }
-
-    private var dragProgress: CGFloat {
-        min(abs(drag) / max(pagesWidth, 1), 1)
+    /// Which way the page is going.
+    ///
+    /// `drag` is zeroed when the finger lifts (`snapBack`), so it stops meaning
+    /// anything the moment the finish animation starts; without `turnForward`
+    /// the release would pick the neighbour on the wrong side and the page
+    /// behind would show the previous page instead of the next one.
+    private var isForward: Bool {
+        if let turnForward { return turnForward }
+        return drag < 0
     }
 
-    @ViewBuilder
+    /// Where the page is right now: under the finger while dragging, or being
+    /// animated away while a turn finishes.
+    private var pageOffset: CGFloat { drag + turn }
+
+    private var dragProgress: CGFloat {
+        min(abs(pageOffset) / max(pagesWidth, 1), 1)
+    }
+
+    /// The page that is revealed by the moving sheet: the turn's destination
+    /// while it settles, otherwise the neighbour on the side being pulled.
+    private func revealedIndex() -> Int? {
+        turnTarget ?? neighbor(forward: isForward)
+    }
+
     private func pageLayers(box: CGSize) -> some View {
         if reading.pageTurnEffect == .curl {
-            curlLayers(box: box)
-        } else {
+            return AnyView(curlLayers(box: box))
+        }
+
+        // The page under the finger slides; the page revealed underneath stays
+        // in place. This is the "lift the sheet and look underneath" model, and
+        // it is the one that reads well: what moves is the sheet the reader is
+        // touching, not a belt carrying two pages.
+        //
+        // Each layer reads its own cache slot, so a turn is pure offset and
+        // text lookup: nothing in here restyles a page while the page moves.
+        return AnyView(
             ZStack {
-                // Revealed page (or chapter hint) behind the page being dragged.
-                if abs(drag) > 0.5, let document {
-                    let forward = isForward
-                    if let index = neighbor(forward: forward) {
-                        pageImage(document: document, page: pages[index])
-                    } else {
-                        chapterHint(forward: forward, box: box)
-                            .offset(x: forward ? box.width : -box.width)
-                            .offset(x: drag)
-                    }
+                if let resting = restingIndex() {
+                    pageImage(text: text(at: resting), paper: theme.background)
+                } else if abs(pageOffset) > 0.5 || isAnimating {
+                    // End of chapter: the hint card is what comes next.
+                    chapterHint(forward: turnForward ?? isForward, box: box)
                 }
 
-                // Page under the finger (or the settled page when no drag).
-                if let document, let currentPage {
-                    pageImage(document: document, page: currentPage)
-                        .offset(x: reading.pageTurnEffect == .slide ? drag : 0)
+                if let top = topIndex() {
+                    pageImage(text: topText, paper: theme.background)
+                        .offset(x: reading.pageTurnEffect == .slide ? pageOffset : 0)
                         .opacity(reading.pageTurnEffect == .fade ? Double(1 - dragProgress) : 1)
                 }
             }
             .frame(width: box.width, height: box.height)
-        }
+        )
+    }
+
+    /// The page drawn with no offset: the one a turn has settled onto, or the
+    /// page revealed by the finger.
+    private func restingIndex() -> Int? {
+        guard !pages.isEmpty else { return nil }
+        if let turnTarget { return turnTarget }
+        guard abs(pageOffset) > 0.5 || isAnimating else { return nil }
+        return revealedIndex()
+    }
+
+    /// The page on the finger. A turn no longer changes it: `pageIndex` only
+    /// moves once the animation has finished and the destination is already
+    /// underneath, so the top layer keeps the same text for the whole turn and
+    /// its canvas never repaints mid-gesture.
+    private func topIndex() -> Int? {
+        pages.isEmpty ? nil : pageIndex
+    }
+
+    /// Text for the top layer. A chapter-boundary swipe keeps drawing the page
+    /// it started on while the next chapter loads, even after the content under
+    /// it has been replaced.
+    private var topText: NSAttributedString {
+        leaving ?? text(at: pageIndex)
     }
 
     /// Paper-curl mode. The sheet and the page it reveals are drawn by
@@ -188,50 +258,170 @@ struct PagedReader: View {
     /// At a chapter boundary there is no neighbouring page to reveal, so the
     /// hint card takes over and the current page just slides with the finger —
     /// curling would have nothing to fold onto.
-    @ViewBuilder
     private func curlLayers(box: CGSize) -> some View {
         let forward = isForward
-        let hasNeighbor = neighbor(forward: forward) != nil
+        let hasNeighbor = revealedIndex() != nil
 
-        ZStack {
+        return ZStack {
             if hasNeighbor {
-                if let document, let currentPage {
-                    CurledPage(
-                        settledText: styledPage(document: document, page: currentPage),
-                        neighborText: neighborPageText(document: document, forward: forward),
-                        progress: dragProgress,
-                        forward: forward,
-                        paper: theme.background
-                    )
-                    .frame(width: box.width, height: box.height)
-                }
+                CurledPage(
+                    settledText: currentText,
+                    neighborText: neighborText(forward: forward),
+                    progress: dragProgress,
+                    forward: forward,
+                    paper: theme.background
+                )
+                .frame(width: box.width, height: box.height)
             } else {
-                if abs(drag) > 0.5 {
+                if abs(pageOffset) > 0.5 {
                     chapterHint(forward: forward, box: box)
                         .offset(x: forward ? box.width : -box.width)
-                        .offset(x: drag)
+                        .offset(x: pageOffset)
                 }
-                if let document, let currentPage {
-                    pageImage(document: document, page: currentPage)
-                        .offset(x: drag)
-                }
+                pageImage(text: currentText, paper: theme.background)
+                    .offset(x: pageOffset)
             }
         }
         .frame(width: box.width, height: box.height)
     }
 
-    private func neighborPageText(document: PagedDocument, forward: Bool) -> NSAttributedString? {
-        guard let index = neighbor(forward: forward) else { return nil }
+    /// The page on screen, from the cache; `preparePages` fills it before an
+    /// index is committed, so this never styles a page inside a frame.
+    private var currentText: NSAttributedString {
+        text(at: pageIndex)
+    }
+
+    /// Styled page text for the page at `index`, from the page cache.
+    ///
+    /// Falls back to styling only when the cache was not prepared (first frame
+    /// after a repagination); the normal paths all prefill it.
+    private func text(at index: Int) -> NSAttributedString {
+        guard let document, pages.indices.contains(index) else { return NSAttributedString() }
+        let key = stagingKey(for: index)
+        if let cached = pageText[index], cached.key == key {
+            return cached.text
+        }
         return styledPage(document: document, page: pages[index])
     }
 
+    /// Identity of a styled page: everything that changes how it draws.
+    private func stagingKey(for index: Int) -> StagingKey {
+        let document = self.document
+        return StagingKey(
+            url: document?.chapterURL ?? "",
+            index: index,
+            pageCount: pages.count,
+            highlight: model.speech.showsHighlight ? model.currentSentenceIndex : -1,
+            firstLine: pages.indices.contains(index)
+                ? document?.characterOffset(atAttributed: pages[index].range.location) ?? -1
+                : -1,
+            accent: theme.resolved.rawValue
+        )
+    }
+
+    /// Styles the visible page and both of its neighbours.
+    ///
+    /// Called when the page changes and when a drag begins — the two moments
+    /// where a CoreText pass is harmless — so the frames that must follow the
+    /// finger never wait on one.
+    private func preparePages(around index: Int) {
+        guard let document, pages.indices.contains(index) else {
+            pageText = [:]
+            return
+        }
+        var prepared: [Int: StagedPage] = [:]
+        for candidate in [index - 1, index, index + 1] where pages.indices.contains(candidate) {
+            let key = stagingKey(for: candidate)
+            if let cached = pageText[candidate], cached.key == key {
+                prepared[candidate] = cached
+            } else {
+                prepared[candidate] = StagedPage(key: key, text: styledPage(document: document, page: pages[candidate]))
+            }
+        }
+        pageText = prepared
+    }
+
+    /// Re-centres the page cache after something other than a turn moved the
+    /// visible page.
+    ///
+    /// A turn does not use this: it installs its destination as part of the
+    /// same transaction that moves `pageIndex`, so there is never a frame in
+    /// which the new index is live but the cache still holds the old page.
+    private func refreshStaging() {
+        guard pages.indices.contains(pageIndex) else {
+            pageText = [:]
+            return
+        }
+        let needed = [pageIndex - 1, pageIndex, pageIndex + 1].filter { pages.indices.contains($0) }
+        let covered = needed.allSatisfy { index in
+            guard let cached = pageText[index] else { return false }
+            return cached.key == stagingKey(for: index)
+        }
+        guard !covered else { return }
+        preparePages(around: pageIndex)
+    }
+
+    /// Styles the visible page if the cache lost it, then the page on the given
+    /// side. Called when a drag starts, never per frame.
+    private func prepareNeighbor(forward: Bool) {
+        guard let document, let current = currentPage else { return }
+        let currentKey = stagingKey(for: pageIndex)
+        if pageText[pageIndex]?.key != currentKey {
+            pageText[pageIndex] = StagedPage(
+                key: currentKey,
+                text: styledPage(document: document, page: current)
+            )
+        }
+        guard let index = neighbor(forward: forward) else { return }
+        let key = stagingKey(for: index)
+        if pageText[index]?.key != key {
+            pageText[index] = StagedPage(
+                key: key,
+                text: styledPage(document: document, page: pages[index])
+            )
+        }
+    }
+
+    private struct StagedPage {
+        var key: StagingKey
+        var text: NSAttributedString
+    }
+
+    private struct StagingKey: Equatable {
+        var url: String
+        var index: Int
+        var pageCount: Int
+        var highlight: Int
+        var firstLine: Int
+        var accent: String
+    }
+
+    /// The page revealed by the sheet being pulled away.
+    private func neighborText(forward: Bool) -> NSAttributedString {
+        guard let index = revealedIndex() else { return NSAttributedString() }
+        return text(at: index)
+    }
+
     private func pageImage(document: PagedDocument, page: ReaderPage) -> some View {
+        pageImage(text: styledPage(document: document, page: page), paper: theme.background)
+    }
+
+    private func pageImage(text: NSAttributedString, paper: Color) -> some View {
         // `paper` matters beyond the curl: in slide mode the incoming page sits
         // under the outgoing one, and a clear background would let both sets of
         // glyphs show through where they overlap.
-        PageImage(attributed: styledPage(document: document, page: page), paper: theme.background)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .clipped()
+        //
+        // The paper is also drawn as a SwiftUI layer behind the canvas rather
+        // than left to `PageDrawView.backgroundColor`: a `UIViewRepresentable`
+        // reconfigures its view slightly after SwiftUI has already placed it,
+        // and during a drag that delay shows as a blank or transparent strip
+        // where the page should be.
+        ZStack {
+            paper
+            PageImage(attributed: text, paper: nil)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .clipped()
     }
 
     /// The page indicator lives in the reader header, not here. `nil` when the
@@ -303,8 +493,21 @@ struct PagedReader: View {
                 pagesWidth = box.width
                 let dx = value.translation.width
                 guard abs(dx) > abs(value.translation.height) else { return }
+                // The page that will be revealed is styled here, once, on the
+                // first frame that moves: a CoreText pass at that moment is
+                // affordable, one on every frame is not.
+                if abs(drag) < 0.5 {
+                    prepareNeighbor(forward: dx < 0)
+                }
                 let edge = neighbor(forward: dx < 0) == nil
-                drag = edge ? rubberBand(dx) : dx
+                // Following the finger, never animating: the finger is the
+                // animator here, and an implicit animation on top of it makes
+                // the page lag behind and then stall for the spring's tail.
+                var transaction = Transaction()
+                transaction.disablesAnimations = true
+                withTransaction(transaction) {
+                    drag = edge ? rubberBand(dx) : dx
+                }
             }
             .onEnded { value in
                 guard !isAnimating, box.width > 20 else { return }
@@ -317,7 +520,11 @@ struct PagedReader: View {
                 if shouldTurn {
                     commitTurn(forward: dx < 0, box: box)
                 } else if drag != 0 {
-                    withAnimation(.easeOut(duration: 0.2)) { drag = 0 }
+                    // A cancelled turn hands the page back to the spring: the
+                    // finger's offset is released at once and only the return
+                    // trip is animated, so the page does not jump backwards.
+                    snapBack()
+                    withAnimation(.easeOut(duration: 0.2)) { turn = 0 }
                 }
             }
     }
@@ -327,17 +534,51 @@ struct PagedReader: View {
         return max(-limit, min(limit, dx * 0.3))
     }
 
+    /// Moves the finger's offset into the animated one without a visual jump.
+    private func snapBack() {
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            turn = drag
+            drag = 0
+        }
+    }
+
     private func commitTurn(forward: Bool, box: CGSize) {
         if let target = neighbor(forward: forward) {
+            // The page that will slide off is the cached page at the current
+            // index, and the page it is settling onto is pinned here: `drag` is
+            // about to be zeroed, so nothing downstream can work out the
+            // direction or the destination from it any more.
+            turnForward = forward
+            turnTarget = target
             isAnimating = true
+            // Underneath: the destination, which must be in hand before the
+            // animation starts so the commit frame only moves an index.
+            prepareNeighbor(forward: forward)
+            // The animated offset starts where the finger left the page, so the
+            // last stretch to the margin is one continuous movement instead of
+            // the finger's position snapping to the start of the animation.
+            snapBack()
             withAnimation(.easeOut(duration: 0.22)) {
-                drag = forward ? -box.width : box.width
+                turn = forward ? -box.width : box.width
             }
             Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 230_000_000)
-                pageIndex = target
-                drag = 0
-                isAnimating = false
+                // Fixed duration rather than waiting on the animation to report
+                // back: a dropped frame must not leave the reader frozen.
+                try? await Task.sleep(nanoseconds: 235_000_000)
+                var transaction = Transaction()
+                transaction.disablesAnimations = true
+                withTransaction(transaction) {
+                    // One update: the index lands on the page that is already
+                    // underneath and the offset drops to zero. Nothing here
+                    // re-styles or re-renders.
+                    pageIndex = target
+                    turn = 0
+                    turnTarget = nil
+                    turnForward = nil
+                    isAnimating = false
+                }
             }
         } else {
             // End of chapter: no page to turn to, so hand the swipe straight to
@@ -346,18 +587,22 @@ struct PagedReader: View {
             // `drag`, which reads as the page sliding away rather than bouncing.
             guard !isAnimating else { return }
             isAnimating = true
-            // Keep the rubber-band offset as the leaving edge, then fade the
-            // current page out while the next chapter loads.
-            withAnimation(.easeOut(duration: 0.12)) {
-                drag = forward ? -box.width * 0.12 : box.width * 0.12
-            }
+            // The chapter being left stays on screen, unmoved but dimmed, until
+            // the next one is laid out: there is nothing behind it to reveal,
+            // and a page sliding off onto blank paper looks like a glitch.
+            leaving = currentText
+            snapBack()
+            turn = 0
             Task { @MainActor in
                 if forward {
                     await model.goNextChapter()
                 } else {
-                    await model.goPreviousChapter()
+                    await model.goPreviousChapterBackwards()
                 }
-                drag = 0
+                var transaction = Transaction()
+                transaction.disablesAnimations = true
+                withTransaction(transaction) { turn = 0 }
+                turnForward = nil
                 isAnimating = false
             }
         }
@@ -411,11 +656,40 @@ struct PagedReader: View {
         // page. `hasContent` would not do: `stop()` keeps the sentence list, so
         // it stays true forever and every repagination snapped back to wherever
         // the last reading stopped, overriding the page the user had turned to.
-        let offset = model.speech.isActive
+        //
+        // A chapter opened from its end ignores both: the swipe out of the
+        // previous chapter showed the last page moving in, so that is where the
+        // reader has to land.
+        let opensAtEnd = isNewChapter && model.pendingEndOfChapter
+        model.pendingEndOfChapter = false
+        let resumeOffset = model.speech.isActive
             ? (previousPageOffset ?? model.pendingOffset)
             : model.pendingOffset
-        pageIndex = layout.isEmpty ? 0 : pageIndex(forOriginalOffset: offset, document: doc)
-        drag = 0
+        if opensAtEnd, !layout.isEmpty {
+            pageIndex = layout.count - 1
+            // Fills the visible page and its neighbours before the frame that
+            // turns the chapter switch off, so the page is already drawn when
+            // the old one is released.
+            preparePages(around: pageIndex)
+            // The landing page has to be what the next session opens on, the
+            // same way `saveProgress` keeps idle repagination honest.
+            model.pendingOffset = offset(of: pageIndex, document: doc)
+        } else {
+            pageIndex = layout.isEmpty ? 0 : pageIndex(forOriginalOffset: resumeOffset, document: doc)
+        }
+        // Restyle with the finished layout, in the same pass that installs it,
+        // so the next frame has the text ready and the turn never waits on a
+        // CoreText pass at the moment the page should already be gone.
+        leaving = nil
+        if !opensAtEnd || layout.isEmpty {
+            refreshStaging()
+        }
+        var resetTransaction = Transaction()
+        resetTransaction.disablesAnimations = true
+        withTransaction(resetTransaction) {
+            drag = 0
+            turn = 0
+        }
         // A new chapter's offsets are relative to its own text, so a value left
         // over from the previous one would suppress the first save here.
         lastSavedOffset = nil
@@ -423,9 +697,15 @@ struct PagedReader: View {
 
         // Remember where the visible page starts so changing font size / line
         // spacing reopens on the same passage instead of the cached old offset.
-        if let range = currentPage?.range {
+        if let range = currentPage?.range, !opensAtEnd {
             model.pendingOffset = doc.characterOffset(atAttributed: range.location)
         }
+    }
+
+    /// Character offset of the page's first character, in raw-chapter terms.
+    private func offset(of index: Int, document: PagedDocument) -> Int {
+        guard pages.indices.contains(index) else { return 0 }
+        return document.characterOffset(atAttributed: pages[index].range.location)
     }
 
     private func pageIndex(forOriginalOffset offset: Int, document: PagedDocument) -> Int {

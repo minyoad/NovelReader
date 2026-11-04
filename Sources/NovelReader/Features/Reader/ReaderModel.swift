@@ -35,6 +35,13 @@ final class ReaderModel: ObservableObject {
     /// about how much of a 40-page chapter is left. `PagedReader` owns the page
     /// count and writes it here as pages turn.
     @Published var chapterProgress: Double = 0
+    /// Where to land when the chapter loaded next opens at its end.
+    ///
+    /// Pages do not exist until the chapter has been laid out, so a swipe that
+    /// leaves a chapter backwards can only say "the end"; the reader converts
+    /// it into a page once it has the layout, and the chapter's last page is
+    /// what the swipe showed moving in.
+    @Published var pendingEndOfChapter = false
     @Published var toast: (text: String, isError: Bool)?
     /// Source candidates for the current book, shown in the switch sheet.
     @Published var sourceCandidates: [SearchResult] = []
@@ -212,7 +219,12 @@ final class ReaderModel: ObservableObject {
         }
     }
 
-    func loadChapter(at index: Int, offset: Int = 0, autoplaySpeech: Bool = false) async {
+    func loadChapter(
+        at index: Int,
+        offset: Int = 0,
+        autoplaySpeech: Bool = false,
+        opensAtEnd: Bool = false
+    ) async {
         guard chapters.indices.contains(index) else { return }
         // Reading across a chapter boundary has to keep the audio session: iOS
         // suspends a backgrounded app the moment the session goes inactive, and
@@ -231,6 +243,7 @@ final class ReaderModel: ObservableObject {
         currentIndex = index
         currentSentenceIndex = 0
         pendingOffset = offset
+        pendingEndOfChapter = opensAtEnd
         isLoading = true
         errorMessage = nil
 
@@ -492,6 +505,17 @@ final class ReaderModel: ObservableObject {
             return
         }
         await loadChapter(at: currentIndex - 1, autoplaySpeech: autoPlaySpeech)
+    }
+
+    /// Arrives at the previous chapter's last page, for a swipe out of the top
+    /// of a chapter. Paged readers pass this; `goPreviousChapter` opens at the
+    /// beginning, which is what chapter lists and the bottom bar want.
+    func goPreviousChapterBackwards(autoPlaySpeech: Bool = false) async {
+        guard currentIndex - 1 >= 0 else {
+            app.showBanner("已经是第一章了", isError: false)
+            return
+        }
+        await loadChapter(at: currentIndex - 1, autoplaySpeech: autoPlaySpeech, opensAtEnd: true)
     }
 
     func retry() async {
