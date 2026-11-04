@@ -93,63 +93,52 @@ struct SourcesView: View {
 
                 ForEach(grouped, id: \.0) { group, sources in
                     Section(group) {
-                        ForEach(sources) { source in
-                            // One row type for both modes, with the row's own
-                            // gestures switched off while selecting.
-                            //
-                            // A plain `if/else` swapped the view type under the
-                            // `List`, and coming back out of selection left the
-                            // list unable to scroll: SwiftUI kept the selection
-                            // row's hit area on top of the new rows.
-                            SourceRow(
-                                source: source,
-                                isSelecting: isBatchSelecting,
-                                isSelected: selection.contains(source.id),
-                                onToggle: {
-                                    if isBatchSelecting {
-                                        toggleSelection(source)
-                                    } else {
-                                        app.toggleSourceEnabled(source)
-                                    }
-                                },
-                                onOpen: {
-                                    guard !isBatchSelecting else {
-                                        toggleSelection(source)
-                                        return
-                                    }
-                                    editingSource = source
-                                },
-                                onSelect: {
-                                    selection = [source.id]
-                                    isBatchSelecting = true
-                                },
-                                onMoveToggle: { toggleSelection(source) }
-                            )
-                            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                                if !isBatchSelecting {
-                                    Button(role: .destructive) {
-                                        pendingDelete = source
-                                    } label: {
-                                        Label("删除", systemImage: "trash")
-                                    }
-                                    Button {
+                        // A `LazyVStack` of plain rows instead of `List` rows.
+                        //
+                        // A `List` decides for itself when a drag is a scroll and
+                        // when it belongs to a row, and a sideways row gesture
+                        // made it stop scrolling for a while afterwards. Plain
+                        // rows have plain frames, so the selection drag can be
+                        // measured against them and the list keeps scrolling.
+                        LazyVStack(spacing: 0) {
+                            ForEach(sources) { source in
+                                SourceRow(
+                                    source: source,
+                                    isSelecting: isBatchSelecting,
+                                    isSelected: selection.contains(source.id),
+                                    onToggle: {
+                                        if isBatchSelecting {
+                                            toggleSelection(source)
+                                        } else {
+                                            app.toggleSourceEnabled(source)
+                                        }
+                                    },
+                                    onOpen: {
+                                        guard !isBatchSelecting else {
+                                            toggleSelection(source)
+                                            return
+                                        }
                                         editingSource = source
-                                    } label: {
-                                        Label("编辑", systemImage: "pencil")
-                                    }
-                                    .tint(.blue)
-                                }
-                            }
-                            .swipeActions(edge: .leading, allowsFullSwipe: false) {
-                                if !isBatchSelecting {
-                                    Button {
+                                    },
+                                    onSelect: {
                                         selection = [source.id]
                                         isBatchSelecting = true
-                                    } label: {
-                                        Label("批量", systemImage: "checklist")
-                                    }
-                                    .tint(.gray)
-                                }
+                                    },
+                                    onMoveToggle: { toggleSelection(source) }
+                                )
+                                .modifier(
+                                    SourceRowChrome(
+                                        isBatchSelecting: isBatchSelecting,
+                                        onDelete: { pendingDelete = source },
+                                        onEdit: { editingSource = source },
+                                        onBatch: {
+                                            selection = [source.id]
+                                            isBatchSelecting = true
+                                        }
+                                    )
+                                )
+                                Divider()
+                                    .padding(.leading, 16)
                             }
                         }
                     }
@@ -216,6 +205,9 @@ struct SourcesView: View {
                     }
                 }
             }
+            .coordinateSpace(name: SourceRowLayout.space)
+            .onPreferenceChange(RowFramesKey.self) { rowFrames = $0 }
+            .simultaneousGesture(slideSelectionGesture)
             .navigationTitle(isBatchSelecting ? (selection.isEmpty ? "选择书源" : "已选 \(selection.count) 个") : "书源")
             .toolbar {
                 if isBatchSelecting {
@@ -342,6 +334,73 @@ struct SourcesView: View {
             } message: {
                 Text(batchResultText)
             }
+        }
+    }
+
+    // MARK: - Slide to select
+
+    /// Which rows this drag has already touched.
+    @State private var dragVisits: Set<UUID> = []
+    /// What this drag does to every row it reaches, fixed by the first one.
+    @State private var dragDirection: DragDirection?
+    /// Set once a drag has gone clearly sideways, so a vertical drag stays a
+    /// scroll.
+    @State private var dragIsHorizontal = false
+    /// Where each visible row sits, reported by the rows themselves.
+    @State private var rowFrames: [UUID: CGRect] = [:]
+
+    private enum DragDirection { case select, deselect }
+
+    /// Slides sideways across rows to select or deselect a run.
+    ///
+    /// One gesture for the whole list, `simultaneousGesture` so the list keeps
+    /// its own scroll: a vertical drag is left completely alone, and only a
+    /// sideways one is claimed. Nothing is attached per row, which is what made
+    /// the list stop scrolling after a sideways swipe.
+    private var slideSelectionGesture: some Gesture {
+        DragGesture(minimumDistance: 8)
+            .onChanged { value in
+                guard isBatchSelecting else { return }
+                if !dragIsHorizontal {
+                    let dx = abs(value.translation.width)
+                    let dy = abs(value.translation.height)
+                    guard dx > 12, dx > dy * 1.5 else { return }
+                    dragIsHorizontal = true
+                }
+                if let id = rowHit(by: value.location) {
+                    applyDrag(to: id)
+                }
+            }
+            .onEnded { _ in
+                dragVisits.removeAll()
+                dragDirection = nil
+                dragIsHorizontal = false
+            }
+    }
+
+    /// Finds the row whose frame contains `point`, in the list's coordinates.
+    ///
+    /// Read from the rows' own reports rather than guessed from row heights,
+    /// section headers and the scroll offset — none of which this screen would
+    /// otherwise know.
+    private func rowHit(by point: CGPoint) -> UUID? {
+        rowFrames.first { $0.value.contains(point) }?.key
+    }
+
+    /// Touching a row once per drag sets it to the drag's direction.
+    ///
+    /// The first row decides: if it was unselected the rest of the drag selects,
+    /// otherwise it deselects — the same rule as the photo app — so sliding over
+    /// a mixed run does not flicker against whatever it happens to find.
+    private func applyDrag(to id: UUID) {
+        if dragDirection == nil {
+            dragDirection = selection.contains(id) ? .deselect : .select
+        }
+        guard dragVisits.insert(id).inserted else { return }
+        if dragDirection == .select {
+            selection.insert(id)
+        } else {
+            selection.remove(id)
         }
     }
 
@@ -619,27 +678,8 @@ private struct SourceRow: View {
     var onOpen: () -> Void
     /// Starts batch selection with this row included, from the context menu.
     var onSelect: () -> Void = {}
-    /// Adds or removes this row while the list is being swiped in batch mode.
+    /// Adds or removes this row when the selection drag reaches it.
     var onMoveToggle: () -> Void = {}
-
-    @State private var isSwiping = false
-
-    /// Fires when a finger slides mostly sideways across this row.
-    ///
-    /// Touching without moving is left alone so the row still opens its detail
-    /// page; a vertical drag is left alone so the list still scrolls.
-    private var batchDragGesture: some Gesture {
-        DragGesture(minimumDistance: 12)
-            .onChanged { value in
-                guard !isSwiping else { return }
-                let dx = abs(value.translation.width)
-                let dy = abs(value.translation.height)
-                guard dx > dy else { return }
-                isSwiping = true
-                onMoveToggle()
-            }
-            .onEnded { _ in isSwiping = false }
-    }
 
     /// Computed once per render from the parsed rules. Cheap (14 string scans)
     /// and it cannot go stale, unlike a value cached at import time.
@@ -711,6 +751,7 @@ private struct SourceRow: View {
             }
             // The whole text column is the "open details" target, gaps included,
             // while the switch beside it keeps its own taps.
+            .padding(.vertical, 2)
             .frame(maxWidth: .infinity, alignment: .leading)
             .contentShape(Rectangle())
             .onTapGesture {
@@ -723,7 +764,6 @@ private struct SourceRow: View {
                     onOpen()
                 }
             }
-            .allowsHitTesting(true)
             if !isSelecting {
                 Toggle("", isOn: Binding(
                     get: { source.enabled },
@@ -734,15 +774,24 @@ private struct SourceRow: View {
                 .onTapGesture {}
             }
         }
-        .padding(.vertical, 2)
-        .opacity(source.enabled || isSelecting ? 1 : 0.55)
-        // Sliding across rows to select or deselect a run of sources.
+        // The checkmark is part of the row's tap target, not a stray icon.
         //
-        // A `DragGesture` on the row rather than `List`'s multi-selection: this
-        // works with the plain `List` the screen already uses, and a swipe that
-        // starts on a row and ends up scrolling still scrolls, because the
-        // gesture only answers to a mostly horizontal movement.
-        .simultaneousGesture(batchDragGesture)
+        // It sits outside the text column, so a tap on the circle used to fall
+        // between the two hit areas and do nothing — the one place a reader
+        // would naturally poke in a selection list.
+        .onTapGesture {
+            guard isSelecting else { return }
+            onMoveToggle()
+        }
+        .opacity(source.enabled || isSelecting ? 1 : 0.55)
+        // Where this row sits, in the list's own coordinates. The slide gesture
+        // reads these instead of guessing row heights and scroll offsets.
+        .background(GeometryReader { proxy in
+            Color.clear.preference(
+                key: RowFramesKey.self,
+                value: [source.id: proxy.frame(in: .named(SourceRowLayout.space))]
+            )
+        })
         .contextMenu {
             Button {
                 onSelect()
@@ -750,6 +799,60 @@ private struct SourceRow: View {
                 Label("批量选择", systemImage: "checklist")
             }
         }
+    }
+}
+
+// MARK: - Row layout
+
+/// Shared numbers for the source rows and the slide gesture that reads them.
+private enum SourceRowLayout {
+    /// Rows report their frames in this space, which is the list's own.
+    static let space = "source-list"
+}
+
+/// Where each visible row sits, in the list's coordinates.
+private struct RowFramesKey: PreferenceKey {
+    static var defaultValue: [UUID: CGRect] = [:]
+    static func reduce(value: inout [UUID: CGRect], nextValue: () -> [UUID: CGRect]) {
+        value.merge(nextValue()) { _, new in new }
+    }
+}
+
+/// The row chrome a plain row does not get from `List`.
+///
+/// `List` gives every row swipe actions for free; a row inside a `LazyVStack`
+/// does not, so the same choices come back as a context menu: a short tap still
+/// opens the details, a long press offers edit, delete and batch select.
+private struct SourceRowChrome: ViewModifier {
+    let isBatchSelecting: Bool
+    var onDelete: () -> Void
+    var onEdit: () -> Void
+    var onBatch: () -> Void
+
+    func body(content: Content) -> some View {
+        content
+            .padding(.horizontal, 16)
+            .padding(.vertical, 2)
+            .contentShape(Rectangle())
+            .contextMenu {
+                if !isBatchSelecting {
+                    Button {
+                        onEdit()
+                    } label: {
+                        Label("编辑", systemImage: "pencil")
+                    }
+                    Button {
+                        onBatch()
+                    } label: {
+                        Label("批量选择", systemImage: "checklist")
+                    }
+                    Button(role: .destructive) {
+                        onDelete()
+                    } label: {
+                        Label("删除", systemImage: "trash")
+                    }
+                }
+            }
     }
 }
 
