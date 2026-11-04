@@ -931,7 +931,18 @@ final class AppModel: ObservableObject {
             func enqueue(_ source: BookSource) {
                 let tabs = categories[source.id] ?? []
                 group.addTask {
-                    await Self.probe(source, categories: tabs, client: probeClient, coordinator: coordinator)
+                    let verdict = await Self.probeSource(
+                        source,
+                        categories: tabs,
+                        client: probeClient,
+                        coordinator: coordinator
+                    )
+                    return ProbeOutcome(
+                        source: source,
+                        workingCategory: verdict.working,
+                        failures: verdict.failures,
+                        sourceError: verdict.sourceError
+                    )
                 }
             }
 
@@ -979,11 +990,37 @@ final class AppModel: ObservableObject {
         client: HTTPClient,
         coordinator: ExploreProbeCoordinator
     ) async -> ProbeOutcome {
+        let verdict = await probeSource(
+            source,
+            categories: categories,
+            client: client,
+            coordinator: coordinator
+        )
+        return ProbeOutcome(
+            source: source,
+            workingCategory: verdict.working,
+            failures: verdict.failures,
+            sourceError: verdict.sourceError
+        )
+    }
+
+    /// The check one source gets, shared by the discover-page run and the
+    /// source list's "only keep the ones that work" button.
+    ///
+    /// It leaves no record of its own: the caller decides what a verdict means
+    /// (the discover page records failures, the source list just keeps the
+    /// survivors).
+    nonisolated static func probeSource(
+        _ source: BookSource,
+        categories: [ExploreCategory],
+        client: HTTPClient,
+        coordinator: ExploreProbeCoordinator
+    ) async -> (working: ExploreCategory?, failures: [ExploreCategory], sourceError: Error?) {
         guard let host = URL(string: source.baseURL)?.host else {
-            return ProbeOutcome(source: source, workingCategory: nil, failures: categories, sourceError: nil)
+            return (nil, categories, nil)
         }
         if coordinator.isDead(host: host) {
-            return ProbeOutcome(source: source, workingCategory: nil, failures: categories, sourceError: nil)
+            return (nil, categories, nil)
         }
 
         let engine = SourceEngine(client: client)
@@ -996,23 +1033,23 @@ final class AppModel: ObservableObject {
                 _ = try await engine.explore(category: category, page: 1, source: source)
                 // A tab that returns books proves both the tab and the source,
                 // so the failures on the way here are not worth keeping.
-                return ProbeOutcome(source: source, workingCategory: category, failures: [], sourceError: nil)
+                return (category, [], nil)
             } catch {
                 failures.append(category)
                 coordinator.recordFailure(source: source.id)
                 if ExploreFailure.failsWholeSource(error) {
-                    return ProbeOutcome(source: source, workingCategory: nil, failures: categories, sourceError: error)
+                    return (nil, categories, error)
                 }
                 // Only the first host-level failure is conclusive: a site that
                 // cannot be resolved at all is gone, while one bad section is
                 // not.
                 if let http = error as? HTTPError, case .transport = http {
                     coordinator.markDead(host: host)
-                    return ProbeOutcome(source: source, workingCategory: nil, failures: categories, sourceError: error)
+                    return (nil, categories, error)
                 }
             }
         }
-        return ProbeOutcome(source: source, workingCategory: nil, failures: failures, sourceError: nil)
+        return (nil, failures, nil)
     }
 
     /// Records a finished source on the main actor.

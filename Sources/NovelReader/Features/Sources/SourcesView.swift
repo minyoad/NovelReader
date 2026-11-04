@@ -108,7 +108,8 @@ struct SourcesView: View {
                                     onSelect: {
                                         selection = [source.id]
                                         isBatchSelecting = true
-                                    }
+                                    },
+                                    onMoveToggle: { toggleSelection(source) }
                                 )
                                 .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                                     Button(role: .destructive) {
@@ -175,6 +176,26 @@ struct SourcesView: View {
                 } footer: {
                     Text("支持 legado 规则子集：CSS、XPath、JSONPath、@@ 回退、## 正则替换。用到 JavaScript 的书源会标出影响范围。")
                 }
+
+                if !app.sources.isEmpty && !isBatchSelecting {
+                    Section {
+                        Button {
+                            checkSourceHealth()
+                        } label: {
+                            if isCheckingHealth {
+                                HStack(spacing: 8) {
+                                    ProgressView().controlSize(.small)
+                                    Text("正在检测…")
+                                }
+                            } else {
+                                Label("检测：只保留能用的书源", systemImage: "waveform.path.ecg")
+                            }
+                        }
+                        .disabled(isCheckingHealth)
+                    } footer: {
+                        Text("逐个打开书源的发现页，能出书的保留，打不开的自动选中，确认后再删除。不消耗流量以外的任何东西。")
+                    }
+                }
             }
             .navigationTitle(isBatchSelecting ? (selection.isEmpty ? "选择书源" : "已选 \(selection.count) 个") : "书源")
             .toolbar {
@@ -184,6 +205,26 @@ struct SourcesView: View {
                             toggleSelectAll()
                         }
                         .disabled(visibleSources.isEmpty)
+                    }
+                    ToolbarItem(placement: .topBarTrailing) {
+                        // Two presets that match the two reasons people prune a
+                        // source list, instead of another menu to open first.
+                        Button {
+                            selectDeadSources()
+                        } label: {
+                            Image(systemName: "waveform.path.badge.minus")
+                        }
+                        .accessibilityLabel("选中无搜索规则的书源")
+                        .disabled(visibleSources.allSatisfy(\.canSearch))
+                    }
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button {
+                            selectDisabledSources()
+                        } label: {
+                            Image(systemName: "pause.circle")
+                        }
+                        .accessibilityLabel("选中已停用的书源")
+                        .disabled(visibleSources.allSatisfy(\.enabled))
                     }
                     ToolbarItem(placement: .topBarTrailing) {
                         Button("完成") {
@@ -294,6 +335,16 @@ struct SourcesView: View {
     /// is selected, so a stray tap cannot empty the shelf's sources.
     private var batchActionBar: some View {
         VStack(spacing: 10) {
+            // The same list filter, one tap away: two hundred imported sources
+            // are mostly dead ones, and "only what I searched for" is the
+            // fastest way to put the useful ones in one place.
+            if let scoped = scopeHint {
+                Text(scoped)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 4)
+            }
             if !selection.isEmpty, !affectedBooks.isEmpty {
                 HStack(alignment: .top, spacing: 8) {
                     Image(systemName: "books.vertical")
@@ -331,6 +382,15 @@ struct SourcesView: View {
         .background(.bar)
     }
 
+    /// "全选" acts on what is on screen, so the bar says what that is.
+    ///
+    /// Selecting a hundred sources and then finding out the search field had
+    /// narrowed the list is the kind of surprise a label prevents.
+    private var scopeHint: String? {
+        guard !trimmedQuery.isEmpty else { return nil }
+        return "全选只作用于当前搜索的 \(visibleSources.count) 个书源"
+    }
+
     /// Explains what will happen, including what it means for the shelf.
     private var batchConfirmationMessage: String {
         let count = selection.count
@@ -364,6 +424,89 @@ struct SourcesView: View {
             selection.subtract(visibleSources.map(\.id))
         } else {
             selection.formUnion(visibleSources.map(\.id))
+        }
+    }
+
+    /// Selects the sources that cannot search at all.
+    ///
+    /// Without a search rule a source can only be opened through its discover
+    /// page, and most of those are dead — these are the safest ones to clear
+    /// out in bulk.
+    private func selectDeadSources() {
+        selection.formUnion(visibleSources.filter { !$0.canSearch }.map(\.id))
+    }
+
+    /// Selects what was switched off earlier, for deleting it for good.
+    private func selectDisabledSources() {
+        selection.formUnion(visibleSources.filter { !$0.enabled }.map(\.id))
+    }
+
+    // MARK: - Health check
+
+    @State private var isCheckingHealth = false
+    /// Sources the last check proved dead, so a second tap need not wait again.
+    @State private var deadSourceIDs: Set<UUID> = []
+
+    /// Keeps the sources that return books and selects the rest.
+    ///
+    /// The usual reason to prune a source list is that most entries are dead,
+    /// and finding out which takes either a long afternoon of tapping or this.
+    /// Nothing is deleted here: the dead ones are only selected, so the reader
+    /// still sees the count and confirms.
+    private func checkSourceHealth() {
+        guard !isCheckingHealth else { return }
+        let queue = visibleSources
+        guard !queue.isEmpty else { return }
+        isCheckingHealth = true
+        selection = []
+        isBatchSelecting = true
+        let client = HTTPClient(settings: app.settings.network)
+
+        Task {
+            let coordinator = ExploreProbeCoordinator()
+            var alive: Set<UUID> = []
+            var dead: Set<UUID> = []
+            var done = 0
+
+            await withTaskGroup(of: (BookSource, ExploreCategory?).self) { group in
+                var next = 0
+                func enqueue(_ source: BookSource) {
+                    group.addTask {
+                        let verdict = await AppModel.probeSource(
+                            source,
+                            categories: source.openableExploreCategories,
+                            client: client,
+                            coordinator: coordinator
+                        )
+                        return (source, verdict.working)
+                    }
+                }
+                for _ in 0..<min(6, queue.count) {
+                    enqueue(queue[next])
+                    next += 1
+                }
+                for await (source, working) in group {
+                    done += 1
+                    if working != nil {
+                        alive.insert(source.id)
+                    } else {
+                        dead.insert(source.id)
+                    }
+                    if next < queue.count {
+                        enqueue(queue[next])
+                        next += 1
+                    }
+                }
+            }
+
+            deadSourceIDs = dead
+            // Only what this run found dead is selected: a source that could
+            // not be checked is not offered for deletion.
+            selection = dead
+            isCheckingHealth = false
+            batchResultText = "检测完成：\(done) 个书源里 \(alive.count) 个可用。"
+                + (dead.isEmpty ? "" : "\n已选中 \(dead.count) 个打不开的，确认后可删除。")
+            showBatchResult = true
         }
     }
 
@@ -430,6 +573,27 @@ private struct SourceRow: View {
     var onOpen: () -> Void
     /// Starts batch selection with this row included, from the context menu.
     var onSelect: () -> Void = {}
+    /// Adds or removes this row while the list is being swiped in batch mode.
+    var onMoveToggle: () -> Void = {}
+
+    @State private var isSwiping = false
+
+    /// Fires when a finger slides mostly sideways across this row.
+    ///
+    /// Touching without moving is left alone so the row still opens its detail
+    /// page; a vertical drag is left alone so the list still scrolls.
+    private var batchDragGesture: some Gesture {
+        DragGesture(minimumDistance: 12)
+            .onChanged { value in
+                guard !isSwiping else { return }
+                let dx = abs(value.translation.width)
+                let dy = abs(value.translation.height)
+                guard dx > dy else { return }
+                isSwiping = true
+                onMoveToggle()
+            }
+            .onEnded { _ in isSwiping = false }
+    }
 
     /// Computed once per render from the parsed rules. Cheap (14 string scans)
     /// and it cannot go stale, unlike a value cached at import time.
@@ -499,6 +663,13 @@ private struct SourceRow: View {
         }
         .padding(.vertical, 2)
         .opacity(source.enabled ? 1 : 0.55)
+        // Sliding across rows to select or deselect a run of sources.
+        //
+        // A `DragGesture` on the row rather than `List`'s multi-selection: this
+        // works with the plain `List` the screen already uses, and a swipe that
+        // starts on a row and ends up scrolling still scrolls, because the
+        // gesture only answers to a mostly horizontal movement.
+        .simultaneousGesture(batchDragGesture)
         .contextMenu {
             Button {
                 onSelect()
