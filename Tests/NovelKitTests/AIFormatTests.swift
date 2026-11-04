@@ -206,6 +206,32 @@ struct ReadingSettingsTests {
         #expect(!optedOut.followSystemAppearance)
     }
 
+    @Test("old installs adopt the new type defaults once, and keep a custom size")
+    func typographyMigration() {
+        // What an install from before this change has on disk: the numbers the
+        // sliders started at.
+        var legacy = ReadingSettings(fontSize: 19, lineSpacing: 8)
+        let adopted = legacy.adoptTypographyDefaults(hasMigrated: false)
+        #expect(adopted)
+        #expect(legacy.fontSize == 26)
+        #expect(legacy.lineSpacing == 13)
+
+        // Idempotent, and a second run is a no-op even on old numbers.
+        let repeated = legacy.adoptTypographyDefaults(hasMigrated: true)
+        #expect(!repeated)
+        var late = ReadingSettings(fontSize: 19, lineSpacing: 8)
+        let lateRun = late.adoptTypographyDefaults(hasMigrated: true)
+        #expect(!lateRun)
+        #expect(late.fontSize == 19)
+
+        // A size the reader picked is theirs: only the exact old defaults are
+        // migrated, so a deliberate 22 stays 22.
+        var custom = ReadingSettings(fontSize: 22, lineSpacing: 8)
+        let customRun = custom.adoptTypographyDefaults(hasMigrated: false)
+        #expect(!customRun)
+        #expect(custom.fontSize == 22)
+    }
+
     @Test("persisted settings never carry API keys")
     func strippingSecrets() throws {
         var settings = AppSettings()

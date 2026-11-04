@@ -115,9 +115,13 @@ struct SearchView: View {
                     }
                 }
             }
-            .searchable(text: $query, prompt: "书名或作者")
-            .onSubmit(of: .search) {
-                Task { await app.search(query) }
+            // A pinned field rather than `.searchable`: the system search bar
+            // collapses into the navigation bar until the reader pulls down,
+            // and this page exists for nothing else. Presented as a sheet it
+            // also has no scroll view of its own to drive the collapse, so the
+            // field simply never appeared.
+            .safeAreaInset(edge: .top, spacing: 0) {
+                searchField
             }
             .onChange(of: query) { _, newValue in
                 // The search field's Cancel button clears the text. Drop the
@@ -163,6 +167,41 @@ struct SearchView: View {
                 Text(errorMessage ?? "")
             }
         }
+    }
+
+    /// The always-visible search bar.
+    ///
+    /// Hand-rolled instead of `.searchable` for two reasons: the system bar is
+    /// collapsed until the reader pulls the list down, and this page is a sheet
+    /// with no list of its own to pull. The clear button only appears once there
+    /// is something to clear, the same way the system field behaves.
+    private var searchField: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(.secondary)
+            TextField("书名或作者", text: $query)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .submitLabel(.search)
+                .onSubmit { Task { await app.search(query) } }
+            if !query.isEmpty {
+                Button {
+                    query = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.tertiary)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("清空")
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .background(Color.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
+        .padding(.horizontal, 16)
+        .padding(.top, 8)
+        .padding(.bottom, 10)
+        .background(.bar)
     }
 
     /// Recent searches, tappable to run again.

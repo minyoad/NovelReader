@@ -244,6 +244,38 @@ private struct ReaderContent: View {
     let theme: Theme
     @EnvironmentObject private var app: AppModel
 
+    /// How far the scroll view has moved, and how tall its content is.
+    ///
+    /// Scroll mode has no pages, so this is the only way the bottom bar can
+    /// report a chapter position: `PagedReader` publishes it in page mode, and
+    /// without a counterpart here the bar sat at zero for the whole chapter.
+    private struct ScrollMetrics: Equatable {
+        var offset: CGFloat = 0
+        var contentHeight: CGFloat = 0
+    }
+
+    private struct ScrollMetricsKey: PreferenceKey {
+        static var defaultValue = ScrollMetrics()
+
+        static func reduce(value: inout ScrollMetrics, nextValue: () -> ScrollMetrics) {
+            let next = nextValue()
+            if next.contentHeight > 0 { value = next }
+        }
+    }
+
+    private struct ViewportKey: PreferenceKey {
+        static var defaultValue: CGFloat = 0
+
+        static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+            let next = nextValue()
+            if next > 0 { value = next }
+        }
+    }
+
+    private static let scrollSpace = "reader.scroll"
+
+    @State private var viewportHeight: CGFloat = 0
+
     private var reading: ReadingSettings { app.settings.reading }
 
     private var paragraphs: [String] {
@@ -329,6 +361,29 @@ private struct ReaderContent: View {
                         model.showBars.toggle()
                     }
                 }
+                .background(
+                    GeometryReader { geo in
+                        Color.clear.preference(
+                            key: ScrollMetricsKey.self,
+                            value: ScrollMetrics(
+                                offset: -geo.frame(in: .named(Self.scrollSpace)).minY,
+                                contentHeight: geo.size.height
+                            )
+                        )
+                    }
+                )
+            }
+            .coordinateSpace(name: Self.scrollSpace)
+            .background(
+                GeometryReader { geo in
+                    Color.clear.preference(key: ViewportKey.self, value: geo.size.height)
+                }
+            )
+            .onPreferenceChange(ViewportKey.self) { height in
+                if abs(viewportHeight - height) > 0.5 { viewportHeight = height }
+            }
+            .onPreferenceChange(ScrollMetricsKey.self) { metrics in
+                publishScrollProgress(metrics)
             }
             .onChange(of: model.currentIndex) { _, _ in
                 proxy.scrollTo(0, anchor: .top)
@@ -348,6 +403,21 @@ private struct ReaderContent: View {
                     restoreScroll(proxy: proxy, text: text)
                 }
             }
+        }
+    }
+
+    /// Feeds the bottom bar when scrolling rather than turning pages.
+    ///
+    /// Clamped, and only written when it moves by a visible amount: the
+    /// preference fires on every scroll tick, and pushing a new value into the
+    /// observed model re-renders the whole reader.
+    private func publishScrollProgress(_ metrics: ScrollMetrics) {
+        guard let text = model.content?.text, !text.isEmpty,
+              metrics.contentHeight > 0, viewportHeight > 0 else { return }
+        let scrollable = max(metrics.contentHeight - viewportHeight, 1)
+        let progress = min(max(Double(metrics.offset / scrollable), 0), 1)
+        if abs(model.chapterProgress - progress) > 0.005 {
+            model.chapterProgress = progress
         }
     }
 
@@ -599,9 +669,13 @@ private struct ReaderBottomBar: View {
                 ProgressView(value: model.chapterProgress)
                     .tint(theme.accent)
                     .layoutPriority(-1)
-                Text("\(model.currentIndex + 1)/\(model.chapters.count)")
+                // The percentage sits where "12/345" used to: a chapter number
+                // over the book's total described a different thing from the bar
+                // next to it, and read as if the bar were the whole book.
+                Text("本章 \(Int((model.chapterProgress * 100).rounded()))%")
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(theme.secondaryText)
+                    .lineLimit(1)
                     .fixedSize()
                 Text("全书 \(model.bookProgressPercent)%")
                     .font(.caption2.monospacedDigit())

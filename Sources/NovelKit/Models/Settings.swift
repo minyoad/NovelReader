@@ -120,8 +120,8 @@ public struct ReadingSettings: Codable, Hashable, Sendable {
     public var resumeLastReading: Bool
 
     public init(
-        fontSize: Double = 19,
-        lineSpacing: Double = 8,
+        fontSize: Double = 26,
+        lineSpacing: Double = 13,
         paragraphSpacing: Double = 12,
         horizontalPadding: Double = 20,
         theme: ReaderTheme = .paper,
@@ -193,6 +193,24 @@ public struct ReadingSettings: Codable, Hashable, Sendable {
     public func resolvedTheme(systemIsDark: Bool) -> ReaderTheme {
         guard followSystemAppearance else { return theme }
         return systemIsDark ? theme.darkCounterpart : theme.lightCounterpart
+    }
+
+    /// One-time migration to the current typography defaults.
+    ///
+    /// Only fires for installs still sitting on the old defaults, which is what
+    /// `19`/`8` mean here: someone who picked their own size should keep it.
+    /// Returns `true` when it changed anything, so the caller can persist.
+    ///
+    /// A migration is needed at all because the stored blob carries every key:
+    /// decoding would otherwise keep the old numbers forever and the new
+    /// default would only ever reach fresh installs.
+    @discardableResult
+    public mutating func adoptTypographyDefaults(hasMigrated: Bool) -> Bool {
+        guard !hasMigrated else { return false }
+        guard fontSize == 19, lineSpacing == 8 else { return false }
+        fontSize = 26
+        lineSpacing = 13
+        return true
     }
 
     /// One-time migration for installs created while "follow system" defaulted

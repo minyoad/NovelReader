@@ -224,10 +224,22 @@ final class AppModel: ObservableObject {
         let alreadyAdopted = await store.isFlagSet(flag)
 
         var updated = loaded
+        // The bundled typography defaults moved once; installs that never
+        // touched the sliders need the new numbers written through, because
+        // the stored blob would otherwise keep the old ones forever.
+        let typographyFlag = "typographyDefaultsAdopted"
+        let typographyAdopted = await store.isFlagSet(typographyFlag)
+        let hasStoredSettings = await store.hasSettingsOnDisk()
+        var changed = false
+        if hasStoredSettings, updated.reading.adoptTypographyDefaults(hasMigrated: typographyAdopted) {
+            changed = true
+        }
         // A brand new install has nothing stored yet, so there is nothing to
         // migrate — the new default already applies.
-        let hasStoredSettings = await store.hasSettingsOnDisk()
         if hasStoredSettings, updated.reading.adoptSystemAppearance(hasMigrated: alreadyAdopted) {
+            changed = true
+        }
+        if changed {
             // Persist right away: a crash before the next `saveSettings` would
             // otherwise redo the migration with the same result, which is fine,
             // but writing here keeps disk and memory in step. `strippingSecrets`
@@ -235,6 +247,7 @@ final class AppModel: ObservableObject {
             await store.saveSettings(updated.strippingSecrets)
         }
         if !alreadyAdopted { await store.setFlag(flag) }
+        if !typographyAdopted { await store.setFlag(typographyFlag) }
         return updated
     }
 
