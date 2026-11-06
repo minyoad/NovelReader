@@ -7,6 +7,14 @@ struct LibraryView: View {
 
     private let columns = [GridItem(.adaptive(minimum: 100), spacing: 18)]
 
+    /// The book opened by tapping a card. Reading is what a tap means on a
+    /// shelf: the reader is where one continues, and the detail page is a
+    /// detour on the way there. It is still reachable from the long-press
+    /// menu as 「书籍信息」.
+    @State private var readingBook: Book?
+    /// The book whose detail page was asked for from the long-press menu.
+    @State private var detailBook: Book?
+
     var body: some View {
         NavigationStack {
             Group {
@@ -20,22 +28,27 @@ struct LibraryView: View {
                     ScrollView {
                         LazyVGrid(columns: columns, spacing: 22) {
                             ForEach(sortedBooks) { book in
-                                NavigationLink {
-                                    BookDetailView(book: book)
+                                Button {
+                                    readingBook = book
                                 } label: {
                                     BookCard(book: book)
                                 }
                                 .buttonStyle(.plain)
                                 .contextMenu {
-                                    Button(role: .destructive) {
-                                        app.removeFromShelf(book)
+                                    Button {
+                                        detailBook = book
                                     } label: {
-                                        Label("移出书架", systemImage: "trash")
+                                        Label("书籍信息", systemImage: "info.circle")
                                     }
                                     Button {
                                         app.updateProgress(bookID: book.id, chapterIndex: 0, chapterTitle: "", characterOffset: 0)
                                     } label: {
                                         Label("标记为未读", systemImage: "arrow.counterclockwise")
+                                    }
+                                    Button(role: .destructive) {
+                                        app.removeFromShelf(book)
+                                    } label: {
+                                        Label("移出书架", systemImage: "trash")
                                     }
                                 }
                             }
@@ -45,6 +58,9 @@ struct LibraryView: View {
                 }
             }
             .navigationTitle("书架")
+            .navigationDestination(item: $detailBook) { book in
+                BookDetailView(book: book)
+            }
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     NavigationLink {
@@ -55,6 +71,11 @@ struct LibraryView: View {
                     .disabled(app.books.isEmpty)
                 }
             }
+        }
+        // Full screen rather than a push: closing the reader returns to the
+        // shelf, not to a detail page the user never asked to see.
+        .fullScreenCover(item: $readingBook) { book in
+            ReaderView(book: book, app: app)
         }
     }
 
