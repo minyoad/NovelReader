@@ -51,8 +51,8 @@ struct AutoCleanupTests {
     }
 }
 
-@Suite("Ad-clean scope: head and tail only")
-struct AutoCleanupScopeTests {
+@Suite("Ad-clean chunks: the whole chapter is sent")
+struct AutoCleanupChunkTests {
 
     private func paragraphs(_ count: Int, _ prefix: String = "第", chars: Int = 120) -> [String] {
         (0..<count).map { index in
@@ -61,130 +61,120 @@ struct AutoCleanupScopeTests {
         }
     }
 
-    @Test("a short chapter is sent whole")
-    func shortChapterWhole() {
+    @Test("a short chapter is one chunk")
+    func shortChapter() {
         let text = "开头一句。\n结尾一句。"
-        let scope = AutoCleanup.scope(for: text)
-        #expect(scope.isWholeChapter)
-        #expect(scope.prompt == "开头一句。\n结尾一句。")
+        #expect(AutoCleanup.chunks(for: text) == [text])
     }
 
-    @Test("a long chapter sends only its edges and keeps the middle back")
-    func longChapterSplits() {
-        let text = paragraphs(30).joined(separator: "\n")
-        let scope = AutoCleanup.scope(for: text)
-        #expect(!scope.isWholeChapter)
-        // The middle is the bulk of the chapter and is never sent.
-        #expect(scope.middle.count > scope.head.count)
-        #expect(!scope.prompt.contains(scope.middle))
-        // Reassembly puts everything back in order, byte for byte.
-        #expect(AutoCleanup.reassemble(scope: scope, cleaned: scope) == text)
+    @Test("the middle of a long chapter is sent, not skipped")
+    func middleIsSent() {
+        // The regression this guards: an ad URL pasted between two middle
+        // paragraphs. An edges-only scope never showed it to the model.
+        let lines = paragraphs(30)
+        let middle = lines[15]
+        let text = (lines.enumerated().flatMap { index, line in
+            index == 15 ? [line, "最新网址 www.example.com"] : [line]
+        }).joined(separator: "\n")
+        let chunks = AutoCleanup.chunks(for: text)
+        #expect(chunks.count > 1)
+        #expect(chunks.contains { $0.contains(middle) })
+        #expect(chunks.contains { $0.contains("www.example.com") })
     }
 
-    @Test("no paragraph is lost between head, middle and tail")
-    func everyParagraphAccountedFor() {
-        // Regression: the tail scan stopped one paragraph short of the head
-        // window, and that paragraph fell out of the chapter on reassembly.
-        // Sizes around the loop conditions are where this hides.
-        for count in 3...40 {
-            for chars in [20, 300, 700, 1500] {
-                let source = paragraphs(count, chars: chars)
-                let text = source.joined(separator: "\n")
-                let scope = AutoCleanup.scope(for: text)
-                let rebuilt = AutoCleanup.reassemble(scope: scope, cleaned: scope)
-                #expect(rebuilt == text, "\(count) 段 × \(chars) 字时丢内容")
+    @Test("every chunk is within budget or a single oversized paragraph")
+    func sizesWithinBudget() {
+        // 40 paragraphs × 200 chars = 8000, so several chunks.
+        let text = paragraphs(40, chars: 200).joined(separator: "\n")
+        let chunks = AutoCleanup.chunks(for: text)
+        #expect(chunks.count >= 4)
+        for chunk in chunks {
+            let lines = chunk.components(separatedBy: "\n")
+            if lines.count > 1 {
+                #expect(chunk.count <= AutoCleanup.chunkLength + AutoCleanup.overlapParagraphs * 200)
             }
         }
     }
 
-    @Test("the head and tail never overlap")
-    func noOverlap() {
-        let text = paragraphs(6, chars: AutoCleanup.edgeLength * 2).joined(separator: "\n")
-        let scope = AutoCleanup.scope(for: text)
-        #expect(!scope.isWholeChapter)
-        let headParagraphs = scope.head.components(separatedBy: "\n")
-        let tailParagraphs = scope.tail.components(separatedBy: "\n")
-        #expect(Set(headParagraphs).isDisjoint(with: Set(tailParagraphs)))
-        #expect(!scope.middle.isEmpty || headParagraphs.count + tailParagraphs.count == 6)
+    @Test("a paragraph longer than the budget is not cut in half")
+    func oversizedParagraphWhole() {
+        // Cutting a paragraph gives the model a half-line, which it is told
+        // never to delete partially — and which it will happily rewrite.
+        let huge = String(repeating: "长", count: AutoCleanup.chunkLength * 3)
+        let chunks = AutoCleanup.chunks(for: "短\n" + huge + "\n短")
+        #expect(chunks.contains { $0.contains(huge) })
     }
 
-    @Test("the prompt is two blocks separated by a marker")
-    func promptHasSeparator() {
+    @Test("neighbouring chunks share one paragraph of context")
+    func overlapExists() {
         let text = paragraphs(30).joined(separator: "\n")
-        let prompt = AutoCleanup.scope(for: text).prompt
-        #expect(prompt.contains(AIPrompt.scopeSeparator))
-        // Exactly one marker: two would make the reply ambiguous.
-        let markers = prompt.components(separatedBy: "\n")
-            .filter { $0.trimmingCharacters(in: .whitespaces) == AIPrompt.scopeSeparator }
-        #expect(markers.count == 1)
+        let chunks = AutoCleanup.chunks(for: text)
+        #expect(chunks.count > 1)
+        for index in 1..<chunks.count {
+            let previousLast = chunks[index - 1].components(separatedBy: "\n").last
+            let currentFirst = chunks[index].components(separatedBy: "\n").first
+            #expect(previousLast == currentFirst, "第 \(index) 块没有带上文")
+        }
     }
 
-    @Test("cleaned edges are quoted around the untouched middle")
-    func reassembleKeepsMiddle() {
-        let scope = AutoCleanup.Scope(head: "开头\n广告", tail: "求收藏\n结尾", middle: "中间正文")
-        let cleaned = AutoCleanup.Scope(head: "开头", tail: "结尾", middle: "")
-        #expect(AutoCleanup.reassemble(scope: scope, cleaned: cleaned) == "开头\n中间正文\n结尾")
+    @Test("no heading runs past the overlap")
+    func overlapIsOne() {
+        let text = paragraphs(30).joined(separator: "\n")
+        let chunks = AutoCleanup.chunks(for: text)
+        let firstLines = Set(chunks[0].components(separatedBy: "\n"))
+        let secondLines = chunks[1].components(separatedBy: "\n")
+        #expect(secondLines.filter { firstLines.contains($0) }.count == AutoCleanup.overlapParagraphs)
     }
 
-    @Test("an emptied head keeps the middle and tail")
-    func emptyHead() {
-        let scope = AutoCleanup.Scope(head: "全是广告", tail: "结尾", middle: "中间")
-        let cleaned = AutoCleanup.Scope(head: "", tail: "结尾", middle: "")
-        #expect(AutoCleanup.reassemble(scope: scope, cleaned: cleaned) == "中间\n结尾")
+    @Test("nothing is lost when the model changes nothing")
+    func roundTripUnchanged() {
+        for count in 3...40 {
+            for chars in [20, 300, 700, 1500] {
+                let source = paragraphs(count, chars: chars)
+                let text = source.joined(separator: "\n")
+                let chunks = AutoCleanup.chunks(for: text)
+                let rebuilt = AutoCleanup.reassemble(chunks: chunks, cleaned: chunks)
+                #expect(rebuilt == text, "\(count) 段 × \(chars) 字时丢内容或重复")
+            }
+        }
     }
 
-    @Test("both edges emptied falls back to the original")
-    func bothEdgesEmpty() {
-        // The model rejected everything it was shown. Putting that back would
-        // lose the chapter's opening and ending at once.
-        let scope = AutoCleanup.Scope(head: "开头", tail: "结尾", middle: "中间")
-        let cleaned = AutoCleanup.Scope(head: "", tail: "", middle: "")
-        #expect(AutoCleanup.reassemble(scope: scope, cleaned: cleaned) == scope.prompt)
+    @Test("cleaned chunks come back in order without the overlap")
+    func reassemblesCleaned() {
+        let chunks = ["甲\n乙", "乙\n丙\n广告", "丙\n丁"]
+        let cleaned = ["甲\n乙", "乙\n丙", "丙\n丁"]
+        #expect(AutoCleanup.reassemble(chunks: chunks, cleaned: cleaned) == "甲\n乙\n丙\n丁")
     }
 
-    @Test("a whole-chapter reply that comes back empty keeps the original")
-    func wholeEmpty() {
-        let scope = AutoCleanup.Scope(head: "原文", tail: "", middle: "")
-        let cleaned = AutoCleanup.Scope(head: "  ", tail: "", middle: "")
-        #expect(AutoCleanup.reassemble(scope: scope, cleaned: cleaned) == "原文")
-    }
-}
-
-@Suite("Reading a head/tail reply")
-struct ScopeReplyTests {
-
-    @Test("the marker splits head from tail")
-    func splitsOnMarker() {
-        let reply = "开头\n\(AIPrompt.scopeSeparator)\n结尾"
-        let scope = AIPrompt.readScopeReply(reply)
-        #expect(scope.head == "开头")
-        #expect(scope.tail == "结尾")
+    @Test("a chunk that was nothing but ads disappears")
+    func emptyChunk() {
+        let chunks = ["甲\n乙", "乙\n丙"]
+        let cleaned = ["甲\n乙", ""]
+        #expect(AutoCleanup.reassemble(chunks: chunks, cleaned: cleaned) == "甲\n乙")
     }
 
-    @Test("a longer or shorter run of equals still counts")
-    func toleratesMarkerLength() {
-        // Models copy the separator with however many characters they like.
-        let reply = "开头\n=====\n结尾"
-        let scope = AIPrompt.readScopeReply(reply)
-        #expect(scope.head == "开头")
-        #expect(scope.tail == "结尾")
+    @Test("an overlap the model also deleted does not eat new text")
+    func deletedOverlap() {
+        // The model judged the carried-over paragraph to be part of a block it
+        // removed. The next chunk's own first paragraph must survive.
+        let chunks = ["甲\n乙", "乙\n丙"]
+        let cleaned = ["甲", "丙"]
+        #expect(AutoCleanup.reassemble(chunks: chunks, cleaned: cleaned) == "甲\n丙")
     }
 
-    @Test("a reply without a marker is treated as the head")
-    func noMarker() {
-        // The safe side: the trailer is then kept as it was, rather than the
-        // head being pasted over the whole chapter.
-        let scope = AIPrompt.readScopeReply("只有一段")
-        #expect(scope.head == "只有一段")
-        #expect(scope.tail.isEmpty)
+    @Test("a genuine repeated line after the seam is kept")
+    func repeatedDialogueKept() {
+        let chunks = ["甲\n乙", "乙\n乙"]
+        let cleaned = chunks
+        // "<chunk1 last>" is the overlap; the second "乙" belongs to chunk 2.
+        #expect(AutoCleanup.reassemble(chunks: chunks, cleaned: cleaned) == "甲\n乙\n乙")
     }
 
-    @Test("a code fence around the reply is stripped first")
-    func fenced() {
-        let reply = "```\n开头\n\(AIPrompt.scopeSeparator)\n结尾\n```"
-        let scope = AIPrompt.readScopeReply(reply)
-        #expect(scope.head == "开头")
-        #expect(scope.tail == "结尾")
+    @Test("a mismatched reply count is rejected rather than misaligned")
+    func countMismatch() {
+        // Returning "" makes the caller keep the original; guessing an
+        // alignment could splice the wrong paragraphs together.
+        #expect(AutoCleanup.reassemble(chunks: ["甲", "乙"], cleaned: ["甲"]) == "")
     }
 }
 
@@ -274,6 +264,8 @@ struct AdStripPromptTests {
         #expect(prompt.contains("广告"))
         #expect(prompt.contains("与剧情无关的废话"))
         #expect(prompt.contains("章节末尾附加"))
+        // Ads between paragraphs are the reason the whole chapter is sent.
+        #expect(prompt.contains("段落中间"))
     }
 
     @Test("the prompt forbids rewriting and re-paragraphing")
@@ -288,11 +280,14 @@ struct AdStripPromptTests {
         #expect(prompt.contains("宁可留下一条广告"))
     }
 
-    @Test("the prompt explains the head/tail input")
-    func promptExplainsEdges() {
+    @Test("the prompt explains the chunking")
+    func promptExplainsChunks() {
         let prompt = AIPrompt.systemPrompt(for: .stripAds)
-        #expect(prompt.contains("开头和结尾"))
-        #expect(prompt.contains(AIPrompt.scopeSeparator))
+        #expect(prompt.contains("切成多段"))
+        #expect(prompt.contains("重复"))
+        // The old head/tail wording would make the model think the middle is
+        // an ellipsis and is free to be dropped.
+        #expect(!prompt.contains("开头和结尾"))
     }
 
     @Test("layout instructions do not leak into an automatic strip")

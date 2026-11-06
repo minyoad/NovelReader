@@ -1447,28 +1447,40 @@ final class AppModel: ObservableObject {
         )
     }
 
-    /// Strips the head and tail of a chapter.
+    /// Cleans a whole chapter: ads, site notices and trailers anywhere in it.
     ///
-    /// Only the edges are sent (see `AutoCleanup.scope`): the middle of a
-    /// chapter is prose, and asking the model about it was what made this slow
-    /// — and what made it risky enough to need a careful prompt in the first
-    /// place.
+    /// The chapter is split into paragraph-aligned chunks (see
+    /// `AutoCleanup.chunks(for:)`) and the chunks are sent **concurrently**.
+    /// Sending it as one request would make a long chapter wait for its full
+    /// length; sending only the ends would miss the URL some sites paste
+    /// between paragraphs in the middle. Concurrency is what keeps the whole
+    /// chapter affordable: the wait is the slowest chunk, not the sum.
     ///
     /// Returns nil when there was nothing to change. A failure keeps the
     /// original and reports nothing here: it is normal for one chapter of a
     /// prefetch to miss while offline, and a banner per chapter would bury the
     /// one that matters.
     private func autoClean(_ content: ChapterContent, bookID: UUID) async -> ChapterContent? {
-        let scope = AutoCleanup.scope(for: content.text)
-        guard !scope.prompt.isEmpty else { return nil }
+        let chunks = AutoCleanup.chunks(for: content.text)
+        guard !chunks.isEmpty else { return nil }
+        let system = AIPrompt.systemPrompt(for: .stripAds)
+        let client = AIClient(configuration: settings.ai)
         do {
-            let client = AIClient(configuration: settings.ai)
-            let reply = try await client.chat(
-                system: AIPrompt.systemPrompt(for: .stripAds),
-                user: scope.prompt
-            )
-            let cleanedScope = AIPrompt.readScopeReply(reply)
-            let text = AutoCleanup.reassemble(scope: scope, cleaned: cleanedScope)
+            // Indexed results: the reply order must be the chapter order, not
+            // the order in which the requests happened to finish.
+            var replies = [String?](repeating: nil, count: chunks.count)
+            try await withThrowingTaskGroup(of: (Int, String).self) { group in
+                for (index, chunk) in chunks.enumerated() {
+                    group.addTask {
+                        (index, try await client.chat(system: system, user: chunk))
+                    }
+                }
+                for try await (index, reply) in group {
+                    replies[index] = AIPrompt.cleanReply(reply)
+                }
+            }
+            let cleaned = replies.compactMap { $0 }
+            let text = AutoCleanup.reassemble(chunks: chunks, cleaned: cleaned)
             let finalText = TextProcessing.cleanupChapterText(text)
             guard finalText != content.text,
                   !finalText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {

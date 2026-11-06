@@ -298,10 +298,9 @@ public enum AIPrompt {
             4. 拿不准某句话是不是正文时保留它。宁可留下一条广告，也不要删掉一句剧情或人物名字。
             5. 如果原文里没有上述内容，就原样输出。
 
-            输入说明：为了节省时间，用户只发来一章的**开头和结尾**，
-            中间用单独一行 `==========` 隔开；这中间不是正文，只是省略号。
-            请把分隔线原样保留在输出里，分隔线前后的部分各自清理，
-            不要把分隔线前的内容搬到后面，也不要补全被省略的部分。
+            输入说明：为了提速，长章节会被切成多段分别发送，每段之间可能有
+            一两段重复，那是上下文重叠，不是原文重复。照常清理即可，
+            不要因为重复就删掉段落，也不要补全没有发来的部分。
             """
 
             // The paragraph rules above would conflict with "do not
@@ -336,36 +335,6 @@ public enum AIPrompt {
             result = String(result.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
         }
         return result
-    }
-
-    /// The marker the head/tail prompt asks the model to keep.
-    ///
-    /// Without a sentinel the reply is one unbroken stream of paragraphs and
-    /// there is no way to tell where the opening ended and the trailer began —
-    /// putting the head's text back into the middle would silently duplicate
-    /// prose. The marker is a line the model is told to echo verbatim.
-    public static let scopeSeparator = "=========="
-
-    /// Splits a head/tail reply back into its two halves.
-    ///
-    /// A reply with no marker is treated as the head alone: the caller then
-    /// keeps the original trailer, which is the safe side to err on.
-    public static func readScopeReply(_ text: String) -> AutoCleanup.Scope {
-        let cleaned = cleanReply(text)
-        let lines = cleaned.components(separatedBy: "\n")
-        // Accept a run of "=" as the marker: models copy the separator with an
-        // arbitrary number of characters, and a miss here silently loses the
-        // trailer's cleanup.
-        let markerLine: (String) -> Bool = { line in
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            return trimmed.count >= 3 && trimmed.allSatisfy { $0 == "=" }
-        }
-        guard let marker = lines.firstIndex(where: markerLine) else {
-            return AutoCleanup.Scope(head: cleaned, tail: "", middle: "")
-        }
-        let head = lines[..<marker].joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
-        let tail = lines[(marker + 1)...].joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
-        return AutoCleanup.Scope(head: head, tail: tail, middle: "")
     }
 
     /// Splits text on paragraph boundaries, keeping chunks under `maxLength`.

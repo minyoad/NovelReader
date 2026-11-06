@@ -146,7 +146,7 @@ struct SettingsView: View {
                         .disabled(!app.settings.ai.enabled)
                     }
 
-                    Text("打开后，读到一章时会顺带把后面几章下载好、去掉广告，翻页就不用等。只有章节开头和结尾会交给 AI 检查，中间正文不动。")
+                    Text("打开后，读到一章时会顺带把后面几章下载好、去掉广告，翻页就不用等。整章都会交给 AI 检查（广告可能夹在段落中间），分块并发发送，所以不会明显变慢。")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
 
