@@ -12,6 +12,9 @@ struct ReaderView: View {
     @State private var showSettings = false
     @State private var showTOC = false
     @State private var showCacheSheet = false
+    /// The book's detail page, opened from the top menu. Shown as a sheet so
+    /// the reader underneath keeps its place; closing it returns to the page.
+    @State private var showBookInfo = false
     /// Fixed height of the top slot, shared by the chapter title and the
     /// toolbar so a tap swaps them without moving the text underneath.
     ///
@@ -84,9 +87,9 @@ struct ReaderView: View {
                             model: model,
                             theme: theme,
                             onClose: leaveBook,
-                            onShowTOC: { showTOC = true },
                             onShowSettings: { showSettings = true },
-                            onShowCache: { showCacheSheet = true }
+                            onShowCache: { showCacheSheet = true },
+                            onShowBookInfo: { showBookInfo = true }
                         )
                     } else {
                         ChapterHeaderTitle(
@@ -195,6 +198,21 @@ struct ReaderView: View {
                 Task { await model.loadChapter(at: index) }
             }
             .presentationDetents([.medium, .large])
+            .preferredColorScheme(forcedScheme)
+        }
+        .sheet(isPresented: $showBookInfo) {
+            // `BookDetailView` expects a surrounding navigation stack (it sets
+            // a navigation title and pushes from its own rows), so the sheet
+            // supplies one and a way out — without the close button the sheet
+            // would have no exit of its own.
+            NavigationStack {
+                BookDetailView(book: model.book, allowsReading: false)
+                    .toolbar {
+                        ToolbarItem(placement: .topBarTrailing) {
+                            Button("完成") { showBookInfo = false }
+                        }
+                    }
+            }
             .preferredColorScheme(forcedScheme)
         }
         .alert("出错了", isPresented: Binding(
@@ -536,9 +554,11 @@ private struct ReaderTopBar: View {
     @ObservedObject var model: ReaderModel
     let theme: Theme
     var onClose: () -> Void
-    var onShowTOC: () -> Void
     var onShowSettings: () -> Void
     var onShowCache: () -> Void
+    /// The TOC lives in the bottom bar now; this menu keeps the entry points
+    /// that have no button of their own.
+    var onShowBookInfo: () -> Void
     @EnvironmentObject private var app: AppModel
 
     var body: some View {
@@ -567,9 +587,9 @@ private struct ReaderTopBar: View {
 
             Menu {
                 Button {
-                    onShowTOC()
+                    onShowBookInfo()
                 } label: {
-                    Label("目录", systemImage: "list.bullet")
+                    Label("书籍信息", systemImage: "info.circle")
                 }
 
                 Button {

@@ -8,6 +8,10 @@ struct BookDetailView: View {
 
     let book: Book
     var autoOpenReader: Bool = false
+    /// Whether to offer the reader from here. Hidden when the page is shown
+    /// from inside the reader itself: the reader is already open underneath,
+    /// and opening a second one would stack two readers on top of each other.
+    var allowsReading: Bool = true
 
     @State private var chapters: [Chapter] = []
     @State private var isLoadingChapters = false
@@ -136,19 +140,21 @@ struct BookDetailView: View {
 
     private var actions: some View {
         VStack(spacing: 10) {
-            Button {
-                startIndex = currentBook.progress.chapterIndex
-                showReader = true
-            } label: {
-                Label(
-                    currentBook.progress.isStarted ? "继续阅读 · \(currentBook.progress.chapterTitle)" : "开始阅读",
-                    systemImage: "book.fill"
-                )
-                .frame(maxWidth: .infinity)
+            if allowsReading {
+                Button {
+                    startIndex = currentBook.progress.chapterIndex
+                    showReader = true
+                } label: {
+                    Label(
+                        currentBook.progress.isStarted ? "继续阅读 · \(currentBook.progress.chapterTitle)" : "开始阅读",
+                        systemImage: "book.fill"
+                    )
+                    .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(Palette.accent)
+                .disabled(chapters.isEmpty)
             }
-            .buttonStyle(.borderedProminent)
-            .tint(Palette.accent)
-            .disabled(chapters.isEmpty)
 
             HStack(spacing: 10) {
                 Button {
