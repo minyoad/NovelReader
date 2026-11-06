@@ -99,13 +99,24 @@ public struct AIClient {
         var results: [String] = []
         for (index, chunk) in chunks.enumerated() {
             let answer = try await chat(system: system, user: chunk)
-            results.append(AIPrompt.cleanReply(answer))
+            let cleaned = AIPrompt.cleanReply(answer)
+            results.append(cleaned)
             progress?(Double(index + 1) / Double(chunks.count))
         }
         // Chunks are cleaned independently, so the model cannot see paragraph
         // boundaries across a split; re-applying the format here makes the
         // result consistent even when the individual replies disagree.
-        return AIPrompt.apply(format, to: results.joined(separator: "\n\n"))
+        let joined: String
+        if instruction == .stripAds {
+            // A stripped chunk can come back empty (it was nothing but ads).
+            // Joining empties with "\n\n" would leave blank blocks behind, so
+            // drop them: the chapter simply has one block fewer.
+            joined = results.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+                .joined(separator: "\n\n")
+        } else {
+            joined = results.joined(separator: "\n\n")
+        }
+        return AIPrompt.apply(format, to: joined)
     }
 }
 
@@ -124,6 +135,14 @@ public enum AIPrompt {
         case tidy
         case proofread
         case condense
+        /// The automatic pass: only removes what does not belong, never rewrites.
+        ///
+        /// Separate from `tidy` on purpose. `tidy` also re-paragraphs and
+        /// deduplicates, which is fine when the user asks for it but too much
+        /// for text they never chose to send: an automatic pass that quietly
+        /// merges paragraphs makes the whole chapter look wrong, while a stray
+        /// ad line is merely annoying.
+        case stripAds
 
         public var id: String { rawValue }
 
@@ -132,6 +151,7 @@ public enum AIPrompt {
             case .tidy: return "清理排版"
             case .proofread: return "校对纠错"
             case .condense: return "精简去水"
+            case .stripAds: return "去广告"
             }
         }
 
@@ -140,7 +160,17 @@ public enum AIPrompt {
             case .tidy: return "删除广告、站点水印、重复段落，合并被硬换行打断的句子"
             case .proofread: return "在清理基础上修正明显的错别字和标点"
             case .condense: return "在保留剧情的前提下删掉注水内容，篇幅会变短"
+            case .stripAds: return "只删广告代码、与剧情无关的废话、章节末尾附加的话语，正文一字不改"
             }
+        }
+
+        /// Tasks offered in the reader's manual menu.
+        ///
+        /// `stripAds` is automatic only: running it by hand on a chapter that
+        /// has nothing left to strip would cost an API call to return the same
+        /// text.
+        public static var manualTasks: [ChapterTask] {
+            allCases.filter { $0 != .stripAds }
         }
     }
 
@@ -234,6 +264,31 @@ public enum AIPrompt {
             prompt += "\n6. 修正明显的错别字、错误的地得、缺失的标点，但不要润色文笔。"
         case .condense:
             prompt += "\n6. 删掉重复叙述和明显注水的段落，可以缩短篇幅，但保留全部关键情节和对话。"
+        case .stripAds:
+            // Written as an allow-list of what may change: an automatic pass
+            // runs on text the user never chose to send, so the model must not
+            // "improve" anything it is not certain is junk.
+            prompt = """
+            你是一个中文网络小说的正文过滤器。用户从盗版网站抓取的章节里混进了广告和站点的自动附加文字，你只负责把这些删掉，正文保持原样。
+
+            只删除下面三类内容：
+            1. 广告代码与广告文字：网址、域名、QQ 群号、微信号、公众号名、下载 App 的提示、二维码说明、`<script>` 之类残留标签、「本章由某某网站首发」「更多章节请访问……」等推广语。
+            2. 与剧情无关的废话：站点公告、求推荐票 / 收藏 / 月票 / 打赏、更新说明、作者请假或催更回复、无关的读者留言，以及「本站最新网址」「手机阅读请访问」这类穿插在段落中间的干扰句。
+            3. 章节末尾附加的无关话语：正文结束后多出来的求票、预告、声明、下章更新时间、站点口号等。
+
+            必须遵守：
+            1. 只输出过滤后的正文，不要任何解释、标题、代码块或前后缀。
+            2. 除了上述三类，一个字都不要改：不改写、不润色、不合并段落、不调整段落顺序、不修正错别字，保留原有的换行和标点。
+            3. 只能整行或整段删除，不能在保留的句子里删掉半句话。某一段里混着广告时，只删掉广告那一行，保留该段其余文字，不要因此改写周围的句子。
+            4. 拿不准某句话是不是正文时保留它。宁可留下一条广告，也不要删掉一句剧情或人物名字。
+            5. 如果原文里没有上述内容，就原样输出。
+            """
+
+            // The paragraph rules above would conflict with "do not
+            // re-paragraph" for the spaced/continuous formats, so an automatic
+            // strip keeps the site's own line breaks.
+            return prompt
+
         }
 
         switch format {

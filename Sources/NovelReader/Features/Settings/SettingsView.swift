@@ -134,6 +134,13 @@ struct SettingsView: View {
                 Section {
                     Toggle("启用 AI 整理", isOn: $app.settings.ai.enabled)
 
+                    Toggle("自动去广告", isOn: $app.settings.aiAutoClean)
+                        .disabled(!app.settings.ai.enabled)
+
+                    Text("打开后，每章读到时自动删掉广告代码、与剧情无关的废话、章节末尾附加的话语。正文其余部分不改动；每章会多消耗一次 AI 接口调用。")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+
                     Picker("整理后格式", selection: $app.settings.aiOutputFormat) {
                         ForEach(AIPrompt.OutputFormat.allCases) { format in
                             Text(format.displayName).tag(format)

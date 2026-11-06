@@ -590,7 +590,7 @@ private struct ReaderTopBar: View {
                 .disabled(model.mode != .shelf)
 
                 SwiftUI.Section("AI 整理") {
-                    ForEach(AIPrompt.ChapterTask.allCases) { task in
+                    ForEach(AIPrompt.ChapterTask.manualTasks) { task in
                         Button {
                             Task { await model.runAI(task: task) }
                         } label: {

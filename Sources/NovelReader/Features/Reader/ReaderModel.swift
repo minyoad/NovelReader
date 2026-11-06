@@ -249,7 +249,7 @@ final class ReaderModel: ObservableObject {
 
         let chapter = chapters[index]
         do {
-            let fetched = try await app.chapterContent(
+            let fetched = try await app.chapterContentPrepared(
                 book: book,
                 chapter: chapter,
                 cache: mode.cachesChapters

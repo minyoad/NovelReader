@@ -487,6 +487,11 @@ public struct AppSettings: Codable, Hashable, Sendable {
     public var searchAllSources: Bool
     /// Output layout applied after AI cleanup.
     public var aiOutputFormat: AIPrompt.OutputFormat
+    /// Strip ads and site trailers from every chapter automatically.
+    ///
+    /// Off by default: it spends the user's API quota on every chapter, and
+    /// only makes sense once an API is configured at all.
+    public var aiAutoClean: Bool
     /// Recent search keywords, newest first.
     ///
     /// Kept short on purpose: a list long enough to scroll is one the user
@@ -501,6 +506,7 @@ public struct AppSettings: Codable, Hashable, Sendable {
         cache: CacheSettings = CacheSettings(),
         searchAllSources: Bool = true,
         aiOutputFormat: AIPrompt.OutputFormat = .paragraphs,
+        aiAutoClean: Bool = false,
         searchHistory: [String] = []
     ) {
         self.reading = reading
@@ -510,6 +516,7 @@ public struct AppSettings: Codable, Hashable, Sendable {
         self.cache = cache
         self.searchAllSources = searchAllSources
         self.aiOutputFormat = aiOutputFormat
+        self.aiAutoClean = aiAutoClean
         self.searchHistory = searchHistory
     }
 
@@ -521,6 +528,7 @@ public struct AppSettings: Codable, Hashable, Sendable {
         case cache
         case searchAllSources
         case aiOutputFormat
+        case aiAutoClean
         case searchHistory
     }
 
@@ -537,6 +545,9 @@ public struct AppSettings: Codable, Hashable, Sendable {
         searchAllSources = try container.decodeIfPresent(Bool.self, forKey: .searchAllSources) ?? defaults.searchAllSources
         aiOutputFormat = try container.decodeIfPresent(AIPrompt.OutputFormat.self, forKey: .aiOutputFormat)
             ?? defaults.aiOutputFormat
+        // Absent means "the user never turned it on": a settings file written
+        // before this option existed must not start spending API calls.
+        aiAutoClean = try container.decodeIfPresent(Bool.self, forKey: .aiAutoClean) ?? defaults.aiAutoClean
         searchHistory = try container.decodeIfPresent([String].self, forKey: .searchHistory) ?? defaults.searchHistory
     }
 
