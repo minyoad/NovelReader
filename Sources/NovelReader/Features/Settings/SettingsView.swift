@@ -137,9 +137,30 @@ struct SettingsView: View {
                     Toggle("自动去广告", isOn: $app.settings.aiAutoClean)
                         .disabled(!app.settings.ai.enabled)
 
-                    Text("打开后，每章读到时自动删掉广告代码、与剧情无关的废话、章节末尾附加的话语。正文其余部分不改动；每章会多消耗一次 AI 接口调用。")
+                    if app.settings.aiAutoClean {
+                        Stepper(
+                            "提前处理 \(app.settings.aiCleanAhead) 章",
+                            value: $app.settings.aiCleanAhead,
+                            in: 0...10
+                        )
+                        .disabled(!app.settings.ai.enabled)
+                    }
+
+                    Text("打开后，读到一章时会顺带把后面几章下载好、去掉广告，翻页就不用等。只有章节开头和结尾会交给 AI 检查，中间正文不动。")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
+
+                    if app.settings.aiAutoClean && app.settings.aiCleanAhead == 0 {
+                        Text("设为 0 就不会提前处理：翻到新章节时要等 AI 处理完才显示。")
+                            .font(.caption2)
+                            .foregroundStyle(.orange)
+                    }
+
+                    if app.settings.aiAutoClean && app.settings.aiCleanAhead == 0 {
+                        Text("设为 0 就不会提前处理：翻到新章节时要等 AI 处理完才显示。")
+                            .font(.caption2)
+                            .foregroundStyle(.orange)
+                    }
 
                     Picker("整理后格式", selection: $app.settings.aiOutputFormat) {
                         ForEach(AIPrompt.OutputFormat.allCases) { format in

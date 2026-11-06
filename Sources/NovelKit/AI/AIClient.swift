@@ -85,6 +85,11 @@ public struct AIClient {
 
     /// Cleans a whole chapter, chunking long chapters so we stay inside the
     /// model's context window. `progress` is reported in 0...1.
+    ///
+    /// Chunks are sent **concurrently**. Sequentially, a three-chunk chapter
+    /// cost three full round trips before a single character came back, and
+    /// the wait grew with the chapter. The results are rejoined in order, so
+    /// the output is identical — only the waiting is shorter.
     public func cleanChapter(
         _ text: String,
         instruction: AIPrompt.ChapterTask,
@@ -94,15 +99,25 @@ public struct AIClient {
     ) async throws -> String {
         let chunks = AIPrompt.chunk(text, maxLength: configuration.chunkSize)
         guard !chunks.isEmpty else { return text }
-
         let system = AIPrompt.systemPrompt(for: instruction, custom: customInstruction, format: format)
-        var results: [String] = []
-        for (index, chunk) in chunks.enumerated() {
-            let answer = try await chat(system: system, user: chunk)
-            let cleaned = AIPrompt.cleanReply(answer)
-            results.append(cleaned)
-            progress?(Double(index + 1) / Double(chunks.count))
+
+        // Indexed results, filled as each chunk finishes: order in the reply
+        // must be the order of the chapter, not the order of arrival.
+        var results = [String?](repeating: nil, count: chunks.count)
+        var finished = 0
+        try await withThrowingTaskGroup(of: (Int, String).self) { group in
+            for (index, chunk) in chunks.enumerated() {
+                group.addTask {
+                    (index, try await chat(system: system, user: chunk))
+                }
+            }
+            for try await (index, answer) in group {
+                results[index] = AIPrompt.cleanReply(answer)
+                finished += 1
+                progress?(Double(finished) / Double(chunks.count))
+            }
         }
+        let cleaned = results.compactMap { $0 }
         // Chunks are cleaned independently, so the model cannot see paragraph
         // boundaries across a split; re-applying the format here makes the
         // result consistent even when the individual replies disagree.
@@ -111,10 +126,10 @@ public struct AIClient {
             // A stripped chunk can come back empty (it was nothing but ads).
             // Joining empties with "\n\n" would leave blank blocks behind, so
             // drop them: the chapter simply has one block fewer.
-            joined = results.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            joined = cleaned.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
                 .joined(separator: "\n\n")
         } else {
-            joined = results.joined(separator: "\n\n")
+            joined = cleaned.joined(separator: "\n\n")
         }
         return AIPrompt.apply(format, to: joined)
     }
@@ -282,6 +297,11 @@ public enum AIPrompt {
             3. 只能整行或整段删除，不能在保留的句子里删掉半句话。某一段里混着广告时，只删掉广告那一行，保留该段其余文字，不要因此改写周围的句子。
             4. 拿不准某句话是不是正文时保留它。宁可留下一条广告，也不要删掉一句剧情或人物名字。
             5. 如果原文里没有上述内容，就原样输出。
+
+            输入说明：为了节省时间，用户只发来一章的**开头和结尾**，
+            中间用单独一行 `==========` 隔开；这中间不是正文，只是省略号。
+            请把分隔线原样保留在输出里，分隔线前后的部分各自清理，
+            不要把分隔线前的内容搬到后面，也不要补全被省略的部分。
             """
 
             // The paragraph rules above would conflict with "do not
@@ -316,6 +336,36 @@ public enum AIPrompt {
             result = String(result.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
         }
         return result
+    }
+
+    /// The marker the head/tail prompt asks the model to keep.
+    ///
+    /// Without a sentinel the reply is one unbroken stream of paragraphs and
+    /// there is no way to tell where the opening ended and the trailer began —
+    /// putting the head's text back into the middle would silently duplicate
+    /// prose. The marker is a line the model is told to echo verbatim.
+    public static let scopeSeparator = "=========="
+
+    /// Splits a head/tail reply back into its two halves.
+    ///
+    /// A reply with no marker is treated as the head alone: the caller then
+    /// keeps the original trailer, which is the safe side to err on.
+    public static func readScopeReply(_ text: String) -> AutoCleanup.Scope {
+        let cleaned = cleanReply(text)
+        let lines = cleaned.components(separatedBy: "\n")
+        // Accept a run of "=" as the marker: models copy the separator with an
+        // arbitrary number of characters, and a miss here silently loses the
+        // trailer's cleanup.
+        let markerLine: (String) -> Bool = { line in
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            return trimmed.count >= 3 && trimmed.allSatisfy { $0 == "=" }
+        }
+        guard let marker = lines.firstIndex(where: markerLine) else {
+            return AutoCleanup.Scope(head: cleaned, tail: "", middle: "")
+        }
+        let head = lines[..<marker].joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        let tail = lines[(marker + 1)...].joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        return AutoCleanup.Scope(head: head, tail: tail, middle: "")
     }
 
     /// Splits text on paragraph boundaries, keeping chunks under `maxLength`.

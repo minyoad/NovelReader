@@ -492,6 +492,12 @@ public struct AppSettings: Codable, Hashable, Sendable {
     /// Off by default: it spends the user's API quota on every chapter, and
     /// only makes sense once an API is configured at all.
     public var aiAutoClean: Bool
+    /// How many chapters ahead to download and clean while reading.
+    ///
+    /// 0 turns the queue off, which brings back a wait at every page turn.
+    /// Each chapter in the window costs one model call, so this trades quota
+    /// for a page turn that never blocks.
+    public var aiCleanAhead: Int
     /// Recent search keywords, newest first.
     ///
     /// Kept short on purpose: a list long enough to scroll is one the user
@@ -507,6 +513,7 @@ public struct AppSettings: Codable, Hashable, Sendable {
         searchAllSources: Bool = true,
         aiOutputFormat: AIPrompt.OutputFormat = .paragraphs,
         aiAutoClean: Bool = false,
+        aiCleanAhead: Int = 3,
         searchHistory: [String] = []
     ) {
         self.reading = reading
@@ -517,6 +524,7 @@ public struct AppSettings: Codable, Hashable, Sendable {
         self.searchAllSources = searchAllSources
         self.aiOutputFormat = aiOutputFormat
         self.aiAutoClean = aiAutoClean
+        self.aiCleanAhead = aiCleanAhead
         self.searchHistory = searchHistory
     }
 
@@ -529,6 +537,7 @@ public struct AppSettings: Codable, Hashable, Sendable {
         case searchAllSources
         case aiOutputFormat
         case aiAutoClean
+        case aiCleanAhead
         case searchHistory
     }
 
@@ -548,6 +557,7 @@ public struct AppSettings: Codable, Hashable, Sendable {
         // Absent means "the user never turned it on": a settings file written
         // before this option existed must not start spending API calls.
         aiAutoClean = try container.decodeIfPresent(Bool.self, forKey: .aiAutoClean) ?? defaults.aiAutoClean
+        aiCleanAhead = try container.decodeIfPresent(Int.self, forKey: .aiCleanAhead) ?? defaults.aiCleanAhead
         searchHistory = try container.decodeIfPresent([String].self, forKey: .searchHistory) ?? defaults.searchHistory
     }
 

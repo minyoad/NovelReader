@@ -62,6 +62,9 @@ final class ReaderModel: ObservableObject {
     /// What this session may write back to the library.
     let mode: ReadingMode
     private var prefetchTask: Task<Void, Never>?
+    /// Cleans the next chapters ahead of the reader so a page turn never waits
+    /// on the model. Separate from `prefetchTask`: that one only downloads.
+    private var cleanAheadTask: Task<Void, Never>?
     /// Fetches the next chapter's text early, for the speech look-ahead.
     private var nextChapterPrefetchTask: Task<Void, Never>?
     /// Keeps `ReaderModel` translating the speech controller's state changes.
@@ -252,7 +255,11 @@ final class ReaderModel: ObservableObject {
             let fetched = try await app.chapterContentPrepared(
                 book: book,
                 chapter: chapter,
-                cache: mode.cachesChapters
+                cache: mode.cachesChapters,
+                // Reading aloud starts from the text it is given, so the ads
+                // have to be gone before playback; silent reading shows the
+                // chapter at once and relies on the cleaning-ahead queue.
+                synchronous: shouldSpeak
             )
             content = fetched
             // A trial read has no shelf entry to record progress against: the
@@ -273,7 +280,10 @@ final class ReaderModel: ObservableObject {
             }
             // Nothing to prefetch for a trial read: those downloads would be
             // cached files belonging to a book that is not on the shelf.
-            if mode.cachesChapters { schedulePrefetch() }
+            if mode.cachesChapters {
+                schedulePrefetch()
+                scheduleCleanAhead()
+            }
         } catch {
             content = nil
             errorMessage = error.localizedDescription
@@ -415,6 +425,34 @@ final class ReaderModel: ObservableObject {
             await app.store.deleteContent(bookID: bookID, chapterURL: chapters[index].url)
         }
         await refreshCacheStats()
+    }
+
+    /// Cleans the next few chapters while the reader is on this one.
+    ///
+    /// This is the whole reason the automatic option is usable: the model call
+    /// happens during the minutes spent reading, so the next chapter is already
+    /// clean on disk when the page turn happens. Runs after `schedulePrefetch`
+    /// starts downloading, and is cancelled whenever the chapter changes — the
+    /// queue is rebuilt from the new position.
+    private func scheduleCleanAhead() {
+        cleanAheadTask?.cancel()
+        let ahead = app.settings.aiCleanAhead
+        guard app.settings.aiAutoClean, app.settings.ai.isUsable, ahead > 0 else { return }
+        let book = self.book
+        let chapters = self.chapters
+        let index = currentIndex
+        let app = self.app
+        cleanAheadTask = Task { [weak self] in
+            await app.cleanAhead(
+                book: book,
+                chapters: chapters,
+                from: index,
+                ahead: ahead
+            ) { cachedIndex in
+                guard let self, self.currentIndex == index, cachedIndex > index else { return }
+                self.cachedChapterCount += 1
+            }
+        }
     }
 
     /// Downloads every chapter of the book; used by the "缓存全本" action.
@@ -774,6 +812,8 @@ final class ReaderModel: ObservableObject {
     func stopBackgroundWork() {
         prefetchTask?.cancel()
         prefetchTask = nil
+        cleanAheadTask?.cancel()
+        cleanAheadTask = nil
         nextChapterPrefetchTask?.cancel()
         nextChapterPrefetchTask = nil
         nextChapterText = nil

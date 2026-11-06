@@ -1345,23 +1345,144 @@ final class AppModel: ObservableObject {
         return content
     }
 
-    /// Fetches one chapter, strips ads, and writes the result to disk.
+    /// Fetches one chapter. Never waits for the model.
     ///
-    /// The cache is written after the strip so background prefetch and speech
-    /// look-ahead never see the raw body. `cache: false` (a trial read) keeps
-    /// the cleanup in memory only.
+    /// Turning a page must not block on a network round trip to an AI service,
+    /// so this only returns the chapter as fetched (or as cached). Chapters are
+    /// cleaned *ahead* by `cleanAhead`, so the one the reader is about to open
+    /// is already clean on disk and loads at plain download speed.
     ///
-    /// Background prefetch does *not* come through here: it would fire one
-    /// model call per prefetched chapter, and a reader who opens a book and
-    /// closes it would pay for chapters they never read. The first time such a
-    /// chapter is opened, the strip runs then.
+    /// `synchronous` is the one exception — reading aloud. `SpeechController`
+    /// starts from whatever text it is handed, so a chapter that is about to be
+    /// spoken is cleaned before it is returned, otherwise the ad lines get read
+    /// out loud.
     func chapterContentPrepared(
         book: Book,
         chapter: Chapter,
-        cache: Bool = true
+        cache: Bool = true,
+        synchronous: Bool = false
     ) async throws -> ChapterContent {
         let content = try await chapterContent(book: book, chapter: chapter, cache: cache)
-        return await autoCleanIfNeeded(content, chapter: chapter, bookID: book.id, cache: cache)
+        guard synchronous,
+              shouldAutoClean(content, chapter: chapter),
+              settings.aiAutoClean, settings.ai.isUsable else {
+            return content
+        }
+        return await autoClean(content, bookID: book.id) ?? content
+    }
+
+    /// Downloads and cleans the next few chapters while the reader is here.
+    ///
+    /// This is what makes the option feel free: the cost is paid during the
+    /// minutes spent on the current chapter, not at the page turn. It runs one
+    /// chapter at a time, in reading order, and stops as soon as the caller
+    /// cancels it (the reader left the book or skipped ahead).
+    ///
+    /// `onChapterCached` fires after each chapter's body is on disk, cleaned or
+    /// not, so the reader can update its cache count.
+    func cleanAhead(
+        book: Book,
+        chapters: [Chapter],
+        from index: Int,
+        ahead: Int,
+        onChapterCached: (@MainActor (Int) -> Void)? = nil
+    ) async {
+        guard settings.aiAutoClean, settings.ai.isUsable, ahead > 0 else { return }
+        guard let source = sources.first(where: { $0.id == book.sourceID }) else { return }
+
+        // Work out what still needs doing. The cached URL set comes from one
+        // directory scan; only chapters inside the window are opened.
+        let cachedURLs = await store.cachedChapterURLs(bookID: book.id)
+        let window = Array((index + 1)..<min(index + 1 + ahead, chapters.count))
+        var alreadyCleaned: Set<Int> = []
+        for chapterIndex in window where cachedURLs.contains(chapters[chapterIndex].url) {
+            if let cached = await store.loadContent(bookID: book.id, chapterURL: chapters[chapterIndex].url),
+               cached.cleaned {
+                alreadyCleaned.insert(chapterIndex)
+            }
+        }
+        let targets = AutoCleanup.cleanAheadIndices(
+            currentIndex: index,
+            chapterCount: chapters.count,
+            ahead: ahead,
+            alreadyCleaned: alreadyCleaned,
+            failed: []
+        )
+
+        for chapterIndex in targets where chapters.indices.contains(chapterIndex) {
+            if Task.isCancelled { return }
+            let chapter = chapters[chapterIndex]
+            guard !chapter.url.hasPrefix("local://") else { continue }
+            do {
+                let raw: ChapterContent
+                if let cached = await store.loadContent(bookID: book.id, chapterURL: chapter.url) {
+                    raw = cached
+                } else {
+                    raw = try await engine.fetchContent(book: book, chapter: chapter, source: source)
+                }
+                // Write the body first, cleaned or not: the reader's own
+                // prefetch reads from the same files, and a page turn that
+                // lands mid-clean should still find the chapter downloaded.
+                await store.saveContent(raw, bookID: book.id)
+                await MainActor.run { onChapterCached?(chapterIndex) }
+                if Task.isCancelled { return }
+                if let cleaned = await autoClean(raw, bookID: book.id) {
+                    await store.saveContent(cleaned, bookID: book.id)
+                }
+            } catch {
+                // One unreachable chapter must not stop the rest of the queue.
+                continue
+            }
+        }
+    }
+
+    private func shouldAutoClean(_ content: ChapterContent, chapter: Chapter) -> Bool {
+        // Local sample chapters are ours, not scraped: nothing to strip, and an
+        // API call there would only spend quota.
+        guard !chapter.url.hasPrefix("local://") else { return false }
+        return AutoCleanup.shouldRun(
+            content: content,
+            enabled: settings.aiAutoClean && settings.ai.isUsable,
+            chapterTitle: chapter.title
+        )
+    }
+
+    /// Strips the head and tail of a chapter.
+    ///
+    /// Only the edges are sent (see `AutoCleanup.scope`): the middle of a
+    /// chapter is prose, and asking the model about it was what made this slow
+    /// — and what made it risky enough to need a careful prompt in the first
+    /// place.
+    ///
+    /// Returns nil when there was nothing to change. A failure keeps the
+    /// original and reports nothing here: it is normal for one chapter of a
+    /// prefetch to miss while offline, and a banner per chapter would bury the
+    /// one that matters.
+    private func autoClean(_ content: ChapterContent, bookID: UUID) async -> ChapterContent? {
+        let scope = AutoCleanup.scope(for: content.text)
+        guard !scope.prompt.isEmpty else { return nil }
+        do {
+            let client = AIClient(configuration: settings.ai)
+            let reply = try await client.chat(
+                system: AIPrompt.systemPrompt(for: .stripAds),
+                user: scope.prompt
+            )
+            let cleanedScope = AIPrompt.readScopeReply(reply)
+            let text = AutoCleanup.reassemble(scope: scope, cleaned: cleanedScope)
+            let finalText = TextProcessing.cleanupChapterText(text)
+            guard finalText != content.text,
+                  !finalText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                return nil
+            }
+            return ChapterContent(
+                chapterURL: content.chapterURL,
+                text: finalText,
+                cleaned: true,
+                originalText: content.originalText ?? content.text
+            )
+        } catch {
+            return nil
+        }
     }
 
     func aiClean(
@@ -1414,49 +1535,6 @@ final class AppModel: ObservableObject {
     func persistContent(_ content: ChapterContent, for book: Book) {
         let bookID = book.id
         Task { await store.saveContent(content, bookID: bookID) }
-    }
-
-    /// Strips ads and the site's trailers before a chapter is shown.
-    ///
-    /// Runs on the text just downloaded, so the cleaned copy is what gets
-    /// cached and what the reader, the prefetch and the speech look-ahead all
-    /// see — cleaning later would leave every path downstream reading the raw
-    /// body. A failure returns the original: a chapter with an ad line in it is
-    /// still readable, and failing the whole load would be worse.
-    func autoCleanIfNeeded(
-        _ content: ChapterContent,
-        chapter: Chapter,
-        bookID: UUID,
-        cache: Bool
-    ) async -> ChapterContent {
-        // Local sample chapters are ours, not scraped: nothing to strip, and an
-        // API call there would only spend quota.
-        guard !chapter.url.hasPrefix("local://"),
-              AutoCleanup.shouldRun(
-                  content: content,
-                  enabled: settings.aiAutoClean && settings.ai.isUsable,
-                  chapterTitle: chapter.title
-              ) else {
-            return content
-        }
-        do {
-            // A fixed format, not the user's manual choice: the manual options
-            // re-flow paragraphs, which the automatic pass deliberately avoids.
-            let cleaned = try await aiClean(content, task: .stripAds, format: .paragraphs)
-            // The model occasionally returns an empty string (it treated the
-            // whole chapter as junk). Showing a blank page is worse than the
-            // ads, so keep the original in that case.
-            guard !cleaned.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                return content
-            }
-            if cache {
-                await store.saveContent(cleaned, bookID: bookID)
-            }
-            return cleaned
-        } catch {
-            showBanner(AutoCleanup.failureMessage(chapterTitle: chapter.title), isError: true)
-            return content
-        }
     }
 
     func summarizeIntro(_ book: Book) async -> String? {
