@@ -61,6 +61,45 @@ struct AutoCleanupChunkTests {
         }
     }
 
+    @Test("a chapter that fits in one request is sent as one")
+    func oneRequestWhenItFits() {
+        // Splitting a chapter that fits would pay for the system prompt once
+        // per chunk and make the model judge the prose in pieces. The limit
+        // comes from the output budget, so this is the common case.
+        let limit = AutoCleanup.chunkLength(maxTokens: 2048)
+        let text = paragraphs(5, chars: limit / 6).joined(separator: "\n")
+        #expect(text.count <= limit)
+        #expect(AutoCleanup.chunks(for: text, limit: limit).count == 1)
+    }
+
+    @Test("the chunk limit is derived from the output budget, not a guess")
+    func limitFromOutputBudget() {
+        // A reply is as long as what was sent, so a chunk must fit in
+        // max_tokens after the safety margin.
+        for maxTokens in [1024, 2048, 4096, 8192] {
+            let limit = AutoCleanup.chunkLength(maxTokens: maxTokens)
+            let estimated = Double(limit) * AutoCleanup.tokensPerCharacter
+            #expect(estimated <= Double(maxTokens), "\(maxTokens) token 不够输出 \(limit) 字")
+        }
+        // More budget must buy longer chunks, never shorter ones.
+        let budgets = [1024, 2048, 4096].map { AutoCleanup.chunkLength(maxTokens: $0) }
+        #expect(budgets == budgets.sorted())
+        // The old hard-coded 1800 did not fit the default 2048 budget.
+        #expect(AutoCleanup.chunkLength(maxTokens: 2048) < 1800)
+    }
+
+    @Test("the user's chunk size is capped by the output budget")
+    func userSettingCapped() {
+        // The stepper goes up to 4000 while the default budget tops out near
+        // 1100. Taking the user's number at face value would cut replies off.
+        let capped = AutoCleanup.effectiveChunkLength(chunkSize: 4000, maxTokens: 2048)
+        #expect(capped == AutoCleanup.chunkLength(maxTokens: 2048))
+        // A smaller number is respected as-is: it is the safer direction.
+        #expect(AutoCleanup.effectiveChunkLength(chunkSize: 600, maxTokens: 2048) == 600)
+        // A bigger output budget lets the user's number through.
+        #expect(AutoCleanup.effectiveChunkLength(chunkSize: 4000, maxTokens: 8192) == 4000)
+    }
+
     @Test("a short chapter is one chunk")
     func shortChapter() {
         let text = "开头一句。\n结尾一句。"
@@ -91,7 +130,7 @@ struct AutoCleanupChunkTests {
         for chunk in chunks {
             let lines = chunk.components(separatedBy: "\n")
             if lines.count > 1 {
-                #expect(chunk.count <= AutoCleanup.chunkLength + AutoCleanup.overlapParagraphs * 200)
+                #expect(chunk.count <= 1100 + AutoCleanup.overlapParagraphs * 200)
             }
         }
     }
@@ -100,7 +139,7 @@ struct AutoCleanupChunkTests {
     func oversizedParagraphWhole() {
         // Cutting a paragraph gives the model a half-line, which it is told
         // never to delete partially — and which it will happily rewrite.
-        let huge = String(repeating: "长", count: AutoCleanup.chunkLength * 3)
+        let huge = String(repeating: "长", count: AutoCleanup.chunkLength(maxTokens: 2048) * 3)
         let chunks = AutoCleanup.chunks(for: "短\n" + huge + "\n短")
         #expect(chunks.contains { $0.contains(huge) })
     }
@@ -175,6 +214,18 @@ struct AutoCleanupChunkTests {
         // Returning "" makes the caller keep the original; guessing an
         // alignment could splice the wrong paragraphs together.
         #expect(AutoCleanup.reassemble(chunks: ["甲", "乙"], cleaned: ["甲"]) == "")
+    }
+
+    @Test("a truncated reply is an error, not half a chapter")
+    func truncatedIsError() {
+        // Before this, `finish_reason: length` was ignored and the clipped
+        // reply was saved as the cleaned chapter — the ending simply vanished.
+        let error: Error = AIError.truncated(limit: 2048)
+        let message = error.localizedDescription
+        #expect(message.contains("截断"))
+        // The message has to say what to change, since the reader cannot see
+        // which knob is responsible.
+        #expect(message.contains("最大输出") || message.contains("分块大小"))
     }
 }
 

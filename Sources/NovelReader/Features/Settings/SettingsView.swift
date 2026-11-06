@@ -15,6 +15,15 @@ struct SettingsView: View {
     @StateObject private var voiceTester = TTSVoiceTester()
     @State private var showDiagnostics = false
 
+    /// Shown under the chunk-size stepper: the user's number is capped by what
+    /// the output budget can actually return.
+    private var effectiveChunkSize: Int {
+        AutoCleanup.effectiveChunkLength(
+            chunkSize: app.settings.ai.chunkSize,
+            maxTokens: app.settings.ai.maxTokens
+        )
+    }
+
     var body: some View {
         NavigationStack {
             Form {
@@ -262,6 +271,14 @@ struct SettingsView: View {
                             in: 600...4000,
                             step: 200
                         )
+
+                        // The output budget caps how much can come back, so a
+                        // chunk larger than that is guaranteed to be cut off.
+                        // Showing the effective number stops the two settings
+                        // from silently disagreeing.
+                        Text("受「最大输出」限制，实际每块不超过 \(effectiveChunkSize) 字。")
+                            .font(.caption2)
+                            .foregroundStyle(app.settings.ai.chunkSize > effectiveChunkSize ? .orange : .secondary)
 
                         VStack(alignment: .leading, spacing: 4) {
                             Text("额外整理要求")

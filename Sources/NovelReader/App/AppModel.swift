@@ -1450,18 +1450,21 @@ final class AppModel: ObservableObject {
     /// Cleans a whole chapter: ads, site notices and trailers anywhere in it.
     ///
     /// The chapter is split into paragraph-aligned chunks (see
-    /// `AutoCleanup.chunks(for:)`) and the chunks are sent **concurrently**.
-    /// Sending it as one request would make a long chapter wait for its full
-    /// length; sending only the ends would miss the URL some sites paste
-    /// between paragraphs in the middle. Concurrency is what keeps the whole
-    /// chapter affordable: the wait is the slowest chunk, not the sum.
+    /// `AutoCleanup.chunks(for:limit:)`) and the chunks are sent **concurrently**.
+    /// A chapter that fits in one request is sent as one — splitting it would
+    /// only pay for the system prompt twice. The split exists for long chapters
+    /// where a single reply would exceed `maxTokens` and lose its ending.
     ///
     /// Returns nil when there was nothing to change. A failure keeps the
     /// original and reports nothing here: it is normal for one chapter of a
     /// prefetch to miss while offline, and a banner per chapter would bury the
     /// one that matters.
     private func autoClean(_ content: ChapterContent, bookID: UUID) async -> ChapterContent? {
-        let chunks = AutoCleanup.chunks(for: content.text)
+        let limit = AutoCleanup.effectiveChunkLength(
+            chunkSize: settings.ai.chunkSize,
+            maxTokens: settings.ai.maxTokens
+        )
+        let chunks = AutoCleanup.chunks(for: content.text, limit: limit)
         guard !chunks.isEmpty else { return nil }
         let system = AIPrompt.systemPrompt(for: .stripAds)
         let client = AIClient(configuration: settings.ai)

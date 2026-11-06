@@ -9,6 +9,7 @@ public enum AIError: LocalizedError {
     case api(String)
     case emptyResponse
     case decoding(String)
+    case truncated(limit: Int)
 
     public var errorDescription: String? {
         switch self {
@@ -17,6 +18,8 @@ public enum AIError: LocalizedError {
         case .api(let message): return "AI 服务返回错误：\(message)"
         case .emptyResponse: return "AI 没有返回内容"
         case .decoding(let message): return "无法解析 AI 返回结果：\(message)"
+        case .truncated(let limit):
+            return "AI 输出被截断（上限 \(limit) token），请调大「最大输出」或调小「分块大小」"
         }
     }
 }
@@ -77,6 +80,11 @@ public struct AIClient {
         guard let content = json["choices"]?[0]?["message"]?["content"]?.stringValue,
               !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw AIError.emptyResponse
+        }
+        // A reply that ran into the output budget is half a chapter. Treating
+        // it as success would silently save a chapter with a missing ending.
+        if let reason = json["choices"]?[0]?["finish_reason"]?.stringValue, reason == "length" {
+            throw AIError.truncated(limit: configuration.maxTokens)
         }
         return content
     }

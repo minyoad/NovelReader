@@ -15,12 +15,33 @@ import Foundation
 /// chunk, not the sum of all of them.
 public enum AutoCleanup {
 
-    /// Characters per chunk.
+    /// Characters per request, derived from the output budget.
     ///
-    /// Kept well under a model's context window because the *prompt* is sent
-    /// with every chunk, and because longer chunks are where a model starts
-    /// paraphrasing. Paragraphs are never cut in half (see `chunks(for:)`).
-    public static let chunkLength = 1800
+    /// A cleanup reply is as long as what was sent — deleting lines only makes
+    /// it shorter — so the binding limit is **output**, not context window.
+    /// Sending more than `maxTokens` can produce means the tail of the reply
+    /// is cut off and the chapter loses its ending.
+    ///
+    /// Rules of thumb, deliberately conservative:
+    /// - a Chinese character costs about 1.5 tokens (BPE splits punctuation
+    ///   and less common characters);
+    /// - the reply rounds-trips through the same budget, so plan against it,
+    ///   not against the context window;
+    /// - leave a margin for the model keeping a few extra lines.
+    ///
+    /// At the default `maxTokens` of 2048 that gives ~1100 characters, which is
+    /// smaller than the old hard-coded 1800 — that value was a guess, and it
+    /// left almost no headroom.
+    public static func chunkLength(maxTokens: Int) -> Int {
+        let usable = max(maxTokens - outputMargin, 400)
+        return max(400, Int(Double(usable) / tokensPerCharacter))
+    }
+
+    /// Tokens held back from `maxTokens` for layout and tokenizer variance.
+    public static let outputMargin = 300
+
+    /// Approximate tokens per Chinese character.
+    public static let tokensPerCharacter = 1.5
 
     /// Paragraphs of context shared by neighbouring chunks.
     ///
@@ -31,19 +52,32 @@ public enum AutoCleanup {
     /// duplicate when reassembling.
     public static let overlapParagraphs = 1
 
+    /// The chunk size actually used: the user's setting, capped by what the
+    /// output budget can return in one reply.
+    ///
+    /// The ceiling is not a preference — a reply longer than `maxTokens` is cut
+    /// off, and the chapter loses its ending. Exposed so the settings screen
+    /// can show the real number instead of the one being typed in.
+    public static func effectiveChunkLength(chunkSize: Int, maxTokens: Int) -> Int {
+        min(chunkSize, chunkLength(maxTokens: maxTokens))
+    }
+
     /// The chunks to send, in reading order.
     ///
-    /// Each element is the text of one request. Paragraph boundaries are
-    /// respected: a paragraph is never split, because the model deletes whole
-    /// lines and half a line has no clean edge to delete from. A paragraph
-    /// longer than `chunkLength` is sent as its own chunk rather than cut,
-    /// for the same reason.
-    public static func chunks(for text: String) -> [String] {
+    /// `limit` comes from `chunkLength(maxTokens:)`; the chapter is sent in one
+    /// request whenever it fits, because splitting a chapter that fits only
+    /// pays for the system prompt twice.
+    ///
+    /// Paragraph boundaries are respected: a paragraph is never split, because
+    /// the model deletes whole lines and half a line has no clean edge to
+    /// delete from. A paragraph longer than `limit` is sent as its own chunk
+    /// rather than cut, for the same reason.
+    public static func chunks(for text: String, limit: Int = AutoCleanup.chunkLength(maxTokens: 2048)) -> [String] {
         let paragraphs = TextProcessing.normalizeParagraphs(text)
             .components(separatedBy: "\n")
             .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
         guard !paragraphs.isEmpty else { return [] }
-        if paragraphs.reduce(0, { $0 + $1.count }) <= chunkLength {
+        if paragraphs.reduce(0, { $0 + $1.count }) <= limit {
             return [paragraphs.joined(separator: "\n")]
         }
 
@@ -60,7 +94,7 @@ public enum AutoCleanup {
             while end < paragraphs.count {
                 let next = count + paragraphs[end].count + 1
                 // Always take at least one new paragraph, however long it is.
-                if next > chunkLength && !overlapsOnly { break }
+                if next > limit && !overlapsOnly { break }
                 count = next
                 overlapsOnly = false
                 end += 1
