@@ -169,6 +169,9 @@ final class AppModel: ObservableObject {
         var loaded = AppSettings()
         loaded.ai.apiKey = Keychain.get("ai.apiKey") ?? ""
         loaded.tts.remote.apiKey = Keychain.get("tts.apiKey") ?? ""
+        loaded.sync.webdav.password = Keychain.get("sync.webdavPassword") ?? ""
+        loaded.sync.s3.secretKey = Keychain.get("sync.s3SecretKey") ?? ""
+        loaded.sync.s3.sessionToken = Keychain.get("sync.s3SessionToken") ?? ""
         // Settings are loaded asynchronously in bootstrap(); this placeholder only
         // carries the API keys so the first launch is not blocked by disk IO.
         _settings = Published(initialValue: loaded)
@@ -191,6 +194,9 @@ final class AppModel: ObservableObject {
         var loaded = await store.loadSettings()
         loaded.ai.apiKey = Keychain.get("ai.apiKey") ?? ""
         loaded.tts.remote.apiKey = Keychain.get("tts.apiKey") ?? ""
+        loaded.sync.webdav.password = Keychain.get("sync.webdavPassword") ?? ""
+        loaded.sync.s3.secretKey = Keychain.get("sync.s3SecretKey") ?? ""
+        loaded.sync.s3.sessionToken = Keychain.get("sync.s3SessionToken") ?? ""
         loaded = await adoptSystemAppearanceIfNeeded(loaded)
         settings = loaded
         client = HTTPClient(settings: loaded.network)
@@ -348,9 +354,101 @@ final class AppModel: ObservableObject {
         } else {
             Keychain.set(settings.tts.remote.apiKey, for: "tts.apiKey")
         }
+        if settings.sync.webdav.password.isEmpty {
+            Keychain.delete("sync.webdavPassword")
+        } else {
+            Keychain.set(settings.sync.webdav.password, for: "sync.webdavPassword")
+        }
+        if settings.sync.s3.secretKey.isEmpty {
+            Keychain.delete("sync.s3SecretKey")
+        } else {
+            Keychain.set(settings.sync.s3.secretKey, for: "sync.s3SecretKey")
+        }
+        if settings.sync.s3.sessionToken.isEmpty {
+            Keychain.delete("sync.s3SessionToken")
+        } else {
+            Keychain.set(settings.sync.s3.sessionToken, for: "sync.s3SessionToken")
+        }
         let snapshot = settings.strippingSecrets
         Task { await store.saveSettings(snapshot) }
         client.update(settings: settings.network)
+    }
+
+    // MARK: - Sync
+
+    /// Guard against two runs at once (launch and foreground can overlap).
+    private var syncInFlight = false
+
+    /// Syncs books, sources and progress with the configured backend.
+    ///
+    /// Failures are reported once and swallowed: sync runs on launch and on
+    /// backgrounding, and neither is a place to block the user with an alert.
+    @discardableResult
+    func runSync(reportErrors: Bool = false) async -> SyncService.Result? {
+        guard settings.sync.isUsable, !syncInFlight else { return nil }
+        syncInFlight = true
+        defer { syncInFlight = false }
+
+        let transport: SyncTransport
+        switch settings.sync.backend {
+        case .webdav:
+            transport = WebDAVTransport(configuration: settings.sync.webdav)
+        case .s3:
+            transport = S3Transport(configuration: settings.sync.s3)
+        }
+        let service = SyncService(
+            transport: transport,
+            store: store,
+            deviceID: settings.sync.deviceID
+        )
+        do {
+            let result = try await service.run()
+            if result.downloaded {
+                // The merge wrote to disk; reload so the shelf shows it.
+                books = await store.loadBooks()
+                sources = await store.loadSources()
+            }
+            settings.sync.lastSyncedAt = result.remoteUpdatedAt ?? Date()
+            saveSettings()
+            if reportErrors {
+                showBanner("同步完成：\(result.booksAfter) 本书", isError: false)
+            }
+            return result
+        } catch {
+            if reportErrors {
+                showBanner("同步失败：\(error.localizedDescription)", isError: true)
+            }
+            return nil
+        }
+    }
+
+    /// Tests the configured backend without touching the user's data.
+    ///
+    /// Writes the current state only when the file does not exist yet, so a
+    /// wrong URL shows a clear error instead of silently creating files.
+    func testSyncConnection() async -> String {
+        let transport: SyncTransport
+        switch settings.sync.backend {
+        case .webdav:
+            guard settings.sync.webdav.isUsable else { return "请先填写目录地址" }
+            transport = WebDAVTransport(configuration: settings.sync.webdav)
+        case .s3:
+            guard settings.sync.s3.isUsable else { return "请先填写接入点、存储桶和密钥" }
+            transport = S3Transport(configuration: settings.sync.s3)
+        }
+        do {
+            if let data = try await transport.read() {
+                let decoder = JSONDecoder()
+                decoder.dateDecodingStrategy = .iso8601
+                if let payload = try? decoder.decode(SyncPayload.self, from: data) {
+                    return "连接成功，云端有 \(payload.books.count) 本书、\(payload.sources.count) 个书源"
+                }
+                return "连接成功，但云端文件无法解析（\(data.count) 字节）"
+            }
+            return "连接成功，云端还没有同步文件"
+        } catch {
+            return "连接失败：\(error.localizedDescription)"
+        }
     }
 
     // MARK: - Sources

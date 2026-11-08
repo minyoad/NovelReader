@@ -503,6 +503,8 @@ public struct AppSettings: Codable, Hashable, Sendable {
     /// Kept short on purpose: a list long enough to scroll is one the user
     /// scrolls past rather than taps.
     public var searchHistory: [String]
+    /// Cross-device sync of shelf, sources and reading progress.
+    public var sync: SyncSettings
 
     public init(
         reading: ReadingSettings = ReadingSettings(),
@@ -514,7 +516,8 @@ public struct AppSettings: Codable, Hashable, Sendable {
         aiOutputFormat: AIPrompt.OutputFormat = .paragraphs,
         aiAutoClean: Bool = false,
         aiCleanAhead: Int = 3,
-        searchHistory: [String] = []
+        searchHistory: [String] = [],
+        sync: SyncSettings = SyncSettings()
     ) {
         self.reading = reading
         self.tts = tts
@@ -526,6 +529,7 @@ public struct AppSettings: Codable, Hashable, Sendable {
         self.aiAutoClean = aiAutoClean
         self.aiCleanAhead = aiCleanAhead
         self.searchHistory = searchHistory
+        self.sync = sync
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -539,6 +543,7 @@ public struct AppSettings: Codable, Hashable, Sendable {
         case aiAutoClean
         case aiCleanAhead
         case searchHistory
+        case sync
     }
 
     /// Tolerant decoding so adding settings in a new build does not wipe the
@@ -559,6 +564,7 @@ public struct AppSettings: Codable, Hashable, Sendable {
         aiAutoClean = try container.decodeIfPresent(Bool.self, forKey: .aiAutoClean) ?? defaults.aiAutoClean
         aiCleanAhead = try container.decodeIfPresent(Int.self, forKey: .aiCleanAhead) ?? defaults.aiCleanAhead
         searchHistory = try container.decodeIfPresent([String].self, forKey: .searchHistory) ?? defaults.searchHistory
+        sync = (try? container.decodeIfPresent(SyncSettings.self, forKey: .sync)) ?? defaults.sync
     }
 
     /// A copy safe to write as plain JSON: API keys live in the Keychain, never
@@ -571,6 +577,7 @@ public struct AppSettings: Codable, Hashable, Sendable {
         var copy = self
         copy.ai.apiKey = ""
         copy.tts.remote.apiKey = ""
+        copy.sync = sync.strippingSecrets
         return copy
     }
 }

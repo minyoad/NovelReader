@@ -16,6 +16,7 @@ struct NovelReaderApp: App {
 
 struct RootView: View {
     @EnvironmentObject private var app: AppModel
+    @Environment(\.scenePhase) private var scenePhase
     /// Which tab the bar shows. Local to the bar, not shared: search is no
     /// longer a tab, so nothing outside needs to change it.
     @State private var tab: AppTab = .library
@@ -70,7 +71,18 @@ struct RootView: View {
             // Loading the shelf and opening the last book are one flow: the
             // resume decision needs the books that `bootstrap` fetches.
             await app.bootstrap()
+            // Sync before resuming: the progress being resumed may have been
+            // advanced on the other device.
+            await app.runSync()
             resumeLastReading()
+        }
+        .onChange(of: scenePhase) { _, phase in
+            // Backgrounding is the last moment the app is guaranteed to run;
+            // it is where a sync can still reach the network without holding
+            // the user on launch.
+            if phase == .background {
+                Task { await app.runSync() }
+            }
         }
     }
 
