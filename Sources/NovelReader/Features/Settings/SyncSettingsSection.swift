@@ -182,10 +182,14 @@ struct SyncSettingsSection: View {
     @ViewBuilder
     private var actions: some View {
         Button {
+            // Set the visible state synchronously, before any await. If the
+            // button's action never runs at all, this line is what proves it:
+            // the user sees "正在连接…" only when the tap reached the button.
+            testing = true
+            testResult = "正在连接 \(sync.wrappedValue.backend.displayName)…"
             Task {
-                testing = true
-                syncMessage = nil
-                testResult = await app.testSyncConnection()
+                let message = await app.testSyncConnection()
+                testResult = message
                 testing = false
             }
         } label: {
@@ -199,9 +203,9 @@ struct SyncSettingsSection: View {
         .disabled(testing)
 
         Button {
+            syncing = true
+            syncMessage = ("正在同步…", false)
             Task {
-                syncing = true
-                syncMessage = nil
                 let outcome = await app.runSync(reportErrors: true)
                 syncMessage = (outcome.summary, !outcome.isSuccess)
                 syncing = false

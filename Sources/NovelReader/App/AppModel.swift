@@ -468,12 +468,16 @@ final class AppModel: ObservableObject {
         }
         do {
             if let data = try await transport.read() {
-                let decoder = JSONDecoder()
-                decoder.dateDecodingStrategy = .iso8601
-                if let payload = try? decoder.decode(SyncPayload.self, from: data) {
+                // Same tolerance as the real sync: a trailing stray brace must
+                // not read as "cannot parse" when the payload is fine.
+                if let payload = try? SyncService.decodeForPreview(data) {
                     return "连接成功，云端有 \(payload.books.count) 本书、\(payload.sources.count) 个书源"
                 }
-                return "连接成功，但云端文件无法解析（\(data.count) 字节）"
+                let text = String(decoding: data.prefix(160), as: UTF8.self)
+                    .replacingOccurrences(of: "\n", with: " ")
+                let looksJSON = (try? JSONSerialization.jsonObject(with: data)) != nil
+                let kind = looksJSON ? "是 JSON 但字段不匹配" : "不是 JSON"
+                return "连接成功，但云端文件无法解析（\(data.count) 字节，\(kind)）：\(text)"
             }
             return "连接成功，云端还没有同步文件"
         } catch {

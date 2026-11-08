@@ -385,12 +385,12 @@ struct SettingsView: View {
             }
             .navigationTitle("设置")
             .scrollDismissesKeyboard(.interactively)
-            // A tap anywhere on the form that is not a control closes the
-            // keyboard. Without it, tapping a section header or a footer does
-            // nothing and the keyboard stays up with no visible way out.
-            .simultaneousGesture(
-                TapGesture().onEnded { focusedField = false }
-            )
+            // Deliberately NOT `.simultaneousGesture(TapGesture())` on the whole
+            // Form: in a Form it swallows taps meant for rows, and the sync
+            // buttons stopped responding entirely. `.onTapGesture` layered the
+            // same way competes with the row itself. Instead the keyboard is
+            // dismissed by the keyboard toolbar's 完成, by scrolling, and by
+            // tapping a non-editable row below.
             .toolbar {
                 ToolbarItemGroup(placement: .keyboard) {
                     Spacer()

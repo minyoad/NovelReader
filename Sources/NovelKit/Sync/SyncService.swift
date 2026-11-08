@@ -66,17 +66,18 @@ public actor SyncService {
         var remote: SyncPayload?
         if let remoteData {
             do {
-                let decoded = try decoder.decode(SyncPayload.self, from: remoteData)
-                guard decoded.isSupported else {
-                    throw SyncError.unsupportedVersion(decoded.version)
-                }
-                remote = decoded
+                remote = try decodePayload(remoteData)
             } catch let error as SyncError {
                 throw error
             } catch {
                 // A corrupt or foreign file must not be silently overwritten
                 // with this device's data: that would destroy whatever it was.
-                throw SyncError.decoding(error.localizedDescription)
+                // Include the head of the body: "this is an HTML page" and
+                // "this is our JSON but a field changed shape" need completely
+                // different fixes.
+                let head = String(decoding: remoteData.prefix(120), as: UTF8.self)
+                    .replacingOccurrences(of: "\n", with: " ")
+                throw SyncError.decoding("\(error.localizedDescription)｜内容开头：\(head)")
             }
         }
 
@@ -120,6 +121,87 @@ public actor SyncService {
             sourcesAfter: outcome.sources.count,
             remoteUpdatedAt: needsUpload ? Date() : remote.updatedAt
         )
+    }
+
+    /// Decodes the remote file, tolerating a trailing extra closing brace.
+    ///
+    /// Real files in the wild pick up a stray `}` — a hand edit on the
+    /// provider's web UI, a sync tool that appends, a truncated-then-resumed
+    /// upload. The payload inside is intact and losing every book over one
+    /// character is far worse than accepting it. Anything less specific than a
+    /// trailing brace still fails, because guessing deeper would risk merging
+    /// the wrong data.
+    private func decodePayload(_ data: Data) throws -> SyncPayload {
+        try Self.decodeForPreview(data)
+    }
+
+    /// Shared by the real sync and the settings screen's connection test, so
+    /// the two can never disagree about whether a file is readable.
+    static func decodeForPreview(_ data: Data) throws -> SyncPayload {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+
+        if let payload = try? decoder.decode(SyncPayload.self, from: data) {
+            guard payload.isSupported else {
+                throw SyncError.unsupportedVersion(payload.version)
+            }
+            return payload
+        }
+
+        // Find the end of the first complete value and try again on that.
+        if let trimmed = trimToFirstValue(data), trimmed.count < data.count {
+            let payload = try decoder.decode(SyncPayload.self, from: trimmed)
+            guard payload.isSupported else {
+                throw SyncError.unsupportedVersion(payload.version)
+            }
+            return payload
+        }
+
+        // Re-decode for the error so the caller sees the real reason.
+        let payload = try decoder.decode(SyncPayload.self, from: data)
+        guard payload.isSupported else {
+            throw SyncError.unsupportedVersion(payload.version)
+        }
+        return payload
+    }
+
+    /// Returns the bytes up to the end of the first balanced top-level value,
+    /// or nil when the text does not start with `{`.
+    ///
+    /// A brace counter that respects strings is enough here: the payload is
+    /// always one object, so the first time depth returns to zero is its end.
+    static func trimToFirstValue(_ data: Data) -> Data? {
+        let bytes = [UInt8](data)
+        guard bytes.first == UInt8(ascii: "{") else { return nil }
+        var depth = 0
+        var inString = false
+        var escaped = false
+        for (index, byte) in bytes.enumerated() {
+            if inString {
+                if escaped {
+                    escaped = false
+                } else if byte == UInt8(ascii: "\\") {
+                    escaped = true
+                } else if byte == UInt8(ascii: "\"") {
+                    inString = false
+                }
+                continue
+            }
+            switch byte {
+            case UInt8(ascii: "\""):
+                inString = true
+            case UInt8(ascii: "{"):
+                depth += 1
+            case UInt8(ascii: "}"):
+                depth -= 1
+                if depth == 0 {
+                    return Data(bytes[0...index])
+                }
+            default:
+                break
+            }
+        }
+        return nil
     }
 
     private func upload(_ payload: SyncPayload) async throws {
