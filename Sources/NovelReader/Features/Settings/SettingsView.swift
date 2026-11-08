@@ -14,6 +14,10 @@ struct SettingsView: View {
     @State private var speechSize: Int64 = 0
     @StateObject private var voiceTester = TTSVoiceTester()
     @State private var showDiagnostics = false
+    /// Clearing this dismisses the keyboard. Keeping it on the view rather than
+    /// per field lets one tap close whatever field is active, which is what a
+    /// settings page needs: the fields are small and spread across sections.
+    @FocusState private var focusedField: Bool
 
     /// Shown under the chunk-size stepper: the user's number is capped by what
     /// the output budget can actually return.
@@ -202,6 +206,7 @@ struct SettingsView: View {
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
                             .keyboardType(.URL)
+                            .focused($focusedField)
                     }
 
                     LabeledContent("模型") {
@@ -209,6 +214,7 @@ struct SettingsView: View {
                             .multilineTextAlignment(.trailing)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
+                            .focused($focusedField)
                     }
 
                     if app.settings.ai.preset.needsAPIKey || !app.settings.ai.apiKey.isEmpty {
@@ -219,6 +225,7 @@ struct SettingsView: View {
                                 .multilineTextAlignment(.trailing)
                                 .textInputAutocapitalization(.never)
                                 .autocorrectionDisabled()
+                                .focused($focusedField)
                         }
                     }
 
@@ -287,6 +294,7 @@ struct SettingsView: View {
                             TextEditor(text: $app.settings.ai.customInstruction)
                                 .font(.footnote)
                                 .frame(minHeight: 70)
+                                .focused($focusedField)
                         }
                     }
                 } header: {
@@ -307,6 +315,7 @@ struct SettingsView: View {
                             .lineLimit(2...3)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
+                            .focused($focusedField)
                     }
 
                     Stepper(
@@ -350,7 +359,7 @@ struct SettingsView: View {
                 // MARK: 同步
 
                 Section {
-                    SyncSettingsSection()
+                    SyncSettingsSection(focus: $focusedField)
                 } header: {
                     Text("同步")
                 } footer: {
@@ -375,12 +384,26 @@ struct SettingsView: View {
                 }
             }
             .navigationTitle("设置")
+            .scrollDismissesKeyboard(.interactively)
+            // A tap anywhere on the form that is not a control closes the
+            // keyboard. Without it, tapping a section header or a footer does
+            // nothing and the keyboard stays up with no visible way out.
+            .simultaneousGesture(
+                TapGesture().onEnded { focusedField = false }
+            )
+            .toolbar {
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button("完成") { focusedField = false }
+                }
+            }
             .sheet(isPresented: $showAIDocs) {
                 RuleDocsView()
             }
             .sheet(isPresented: $showDiagnostics) {
                 EdgeDiagnosticsView(proxy: app.settings.tts.proxy)
-            }            .onChange(of: app.settings) { _, _ in
+            }
+            .onChange(of: app.settings) { _, _ in
                 app.saveSettings()
             }
             .onAppear { Task { await refreshCacheStats() } }

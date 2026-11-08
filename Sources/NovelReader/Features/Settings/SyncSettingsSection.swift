@@ -9,6 +9,10 @@ import NovelKit
 struct SyncSettingsSection: View {
     @EnvironmentObject private var app: AppModel
 
+    /// Owned by `SettingsView` so one "完成" button in the keyboard toolbar
+    /// closes any field on the page, including these.
+    var focus: FocusState<Bool>.Binding
+
     @State private var testing = false
     @State private var testResult: String?
     @State private var syncing = false
@@ -55,19 +59,23 @@ struct SyncSettingsSection: View {
                 .multilineTextAlignment(.trailing)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
+                .focused(focus)
         }
         LabeledContent("密码") {
             HStack {
                 Group {
                     if showWebDAVPassword {
                         TextField("应用密码", text: sync.webdav.password)
+                            .focused(focus)
                     } else {
                         SecureField("应用密码", text: sync.webdav.password)
+                            .focused(focus)
                     }
                 }
                 .multilineTextAlignment(.trailing)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
+                .focused(focus)
 
                 Button {
                     showWebDAVPassword.toggle()
@@ -83,6 +91,7 @@ struct SyncSettingsSection: View {
                 .multilineTextAlignment(.trailing)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
+                .focused(focus)
         }
         Text("坚果云需要在「账户信息 → 安全选项」里生成第三方应用密码，不能直接用登录密码。目录不存在时会自动创建。")
             .font(.caption2)
@@ -105,37 +114,44 @@ struct SyncSettingsSection: View {
                 .multilineTextAlignment(.trailing)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
+                .focused(focus)
         }
         LabeledContent("存储桶") {
             TextField("my-bucket", text: sync.s3.bucket)
                 .multilineTextAlignment(.trailing)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
+                .focused(focus)
         }
         LabeledContent("文件路径") {
             TextField("nightread-sync.json", text: sync.s3.keyPath)
                 .multilineTextAlignment(.trailing)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
+                .focused(focus)
         }
         LabeledContent("Access Key") {
             TextField("AKIA...", text: sync.s3.accessKeyID)
                 .multilineTextAlignment(.trailing)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
+                .focused(focus)
         }
         LabeledContent("Secret Key") {
             HStack {
                 Group {
                     if showS3Secret {
                         TextField("密钥", text: sync.s3.secretKey)
+                            .focused(focus)
                     } else {
                         SecureField("密钥", text: sync.s3.secretKey)
+                            .focused(focus)
                     }
                 }
                 .multilineTextAlignment(.trailing)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
+                .focused(focus)
 
                 Button {
                     showS3Secret.toggle()
@@ -151,6 +167,7 @@ struct SyncSettingsSection: View {
                 .multilineTextAlignment(.trailing)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
+                .focused(focus)
         }
         Text("用路径式访问（bucket 在地址里）。Cloudflare R2 的区域填 auto，接入点形如 https://<账号>.r2.cloudflarestorage.com。")
             .font(.caption2)
