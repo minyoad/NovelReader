@@ -505,6 +505,13 @@ public struct AppSettings: Codable, Hashable, Sendable {
     public var searchHistory: [String]
     /// Cross-device sync of shelf, sources and reading progress.
     public var sync: SyncSettings
+    /// Sources the user pinned to the top of the source list.
+    ///
+    /// Stored as ids, in the order they were pinned: with two hundred imported
+    /// sources, the five that actually work are the ones worth reaching without
+    /// scrolling past the other hundred and ninety-five. Order is the user's,
+    /// not alphabetical, so the ones used most can be kept at the very top.
+    public var pinnedSourceIDs: [UUID]
 
     public init(
         reading: ReadingSettings = ReadingSettings(),
@@ -517,7 +524,8 @@ public struct AppSettings: Codable, Hashable, Sendable {
         aiAutoClean: Bool = false,
         aiCleanAhead: Int = 3,
         searchHistory: [String] = [],
-        sync: SyncSettings = SyncSettings()
+        sync: SyncSettings = SyncSettings(),
+        pinnedSourceIDs: [UUID] = []
     ) {
         self.reading = reading
         self.tts = tts
@@ -530,6 +538,7 @@ public struct AppSettings: Codable, Hashable, Sendable {
         self.aiCleanAhead = aiCleanAhead
         self.searchHistory = searchHistory
         self.sync = sync
+        self.pinnedSourceIDs = pinnedSourceIDs
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -544,6 +553,7 @@ public struct AppSettings: Codable, Hashable, Sendable {
         case aiCleanAhead
         case searchHistory
         case sync
+        case pinnedSourceIDs
     }
 
     /// Tolerant decoding so adding settings in a new build does not wipe the
@@ -565,6 +575,8 @@ public struct AppSettings: Codable, Hashable, Sendable {
         aiCleanAhead = try container.decodeIfPresent(Int.self, forKey: .aiCleanAhead) ?? defaults.aiCleanAhead
         searchHistory = try container.decodeIfPresent([String].self, forKey: .searchHistory) ?? defaults.searchHistory
         sync = (try? container.decodeIfPresent(SyncSettings.self, forKey: .sync)) ?? defaults.sync
+        pinnedSourceIDs = try container.decodeIfPresent([UUID].self, forKey: .pinnedSourceIDs)
+            ?? defaults.pinnedSourceIDs
     }
 
     /// A copy safe to write as plain JSON: API keys live in the Keychain, never

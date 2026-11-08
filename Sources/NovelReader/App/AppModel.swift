@@ -437,6 +437,9 @@ final class AppModel: ObservableObject {
                 // The merge wrote to disk; reload so the shelf shows it.
                 books = await store.loadBooks()
                 sources = await store.loadSources()
+                // The other device's deletions are now this device's too, so a
+                // pin can point at a source that is gone.
+                prunePinnedSources()
             }
             settings.sync.lastSyncedAt = result.remoteUpdatedAt ?? Date()
             saveSettings()
@@ -617,6 +620,49 @@ final class AppModel: ObservableObject {
         guard let index = sources.firstIndex(where: { $0.id == source.id }) else { return }
         sources[index].enabled.toggle()
         persistSources()
+    }
+
+    // MARK: - Pinned sources
+
+    /// Whether this source is pinned to the top of the source list.
+    func isPinned(_ source: BookSource) -> Bool {
+        settings.pinnedSourceIDs.contains(source.id)
+    }
+
+    /// Pins or unpins a source.
+    ///
+    /// New pins go to the *end* of the list rather than the front: pinning a
+    /// few sources in a row would otherwise leave them in reverse order of
+    /// when they were pinned, which reads as random.
+    func togglePin(_ source: BookSource) {
+        if let index = settings.pinnedSourceIDs.firstIndex(of: source.id) {
+            settings.pinnedSourceIDs.remove(at: index)
+        } else {
+            settings.pinnedSourceIDs.append(source.id)
+        }
+        saveSettings()
+    }
+
+    /// Moves a pinned source one place up or down in the pinned block.
+    func movePinned(_ source: BookSource, by offset: Int) {
+        guard let index = settings.pinnedSourceIDs.firstIndex(of: source.id) else { return }
+        let target = index + offset
+        guard settings.pinnedSourceIDs.indices.contains(target) else { return }
+        settings.pinnedSourceIDs.swapAt(index, target)
+        saveSettings()
+    }
+
+    /// Drops pins for sources that no longer exist.
+    ///
+    /// Called after deletions and after a sync merges another device's
+    /// sources in: without it, `pinnedSourceIDs` grows with ids that match
+    /// nothing, and the pinned block quietly gains empty rows over time.
+    func prunePinnedSources() {
+        let existing = Set(sources.map(\.id))
+        let kept = settings.pinnedSourceIDs.filter { existing.contains($0) }
+        guard kept.count != settings.pinnedSourceIDs.count else { return }
+        settings.pinnedSourceIDs = kept
+        saveSettings()
     }
 
     private func persistSources() {

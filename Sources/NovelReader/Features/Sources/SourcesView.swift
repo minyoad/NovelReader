@@ -17,7 +17,14 @@ struct SourcesView: View {
     @State private var pendingDelete: BookSource?
     /// What the reader typed into the source list's search field.
     @State private var query = ""
-    /// Whether the list is in multi-select mode.
+    /// Which half of the list to show: everything, only what is switched on,
+    /// or only what is switched off.
+    @State private var filter: SourceFilter = .all
+    /// Groups the reader opened. Everything not in here is collapsed.
+    @State private var expandedGroups: Set<String> = []
+    /// Whether the collapsed groups are being recomputed after a filter change.
+    @State private var groupsPrepared = false
+    /// Whether drag-to-select is active.
     @State private var isBatchSelecting = false
     @State private var selection: Set<UUID> = []
     /// The action waiting behind the confirmation dialog.
@@ -35,18 +42,62 @@ struct SourcesView: View {
         query.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    /// Sources matching the search field, grouped the way the list shows them.
+    /// The three ways to narrow the list before searching it.
+    private enum SourceFilter: String, CaseIterable, Identifiable {
+        case all
+        case enabled
+        case disabled
+
+        var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .all: return "全部"
+            case .enabled: return "已启用"
+            case .disabled: return "已停用"
+            }
+        }
+
+        func matches(_ source: BookSource) -> Bool {
+            switch self {
+            case .all: return true
+            case .enabled: return source.enabled
+            case .disabled: return !source.enabled
+            }
+        }
+    }
+
+    /// Pinned sources, in the order the reader put them.
+    ///
+    /// Kept out of the groups below: a pinned source is shown once, at the top,
+    /// and not repeated in its own group, or the point of pinning — reaching it
+    /// without scrolling — is lost.
+    private var pinnedSources: [BookSource] {
+        let byID = Dictionary(uniqueKeysWithValues: app.sources.map { ($0.id, $0) })
+        return app.settings.pinnedSourceIDs.compactMap { byID[$0] }
+            .filter { trimmedQuery.isEmpty || matchesQuery($0) }
+            .filter { filter.matches($0) }
+    }
+
+    private func matchesQuery(_ source: BookSource) -> Bool {
+        let needle = trimmedQuery
+        guard !needle.isEmpty else { return true }
+        return source.name.localizedCaseInsensitiveContains(needle)
+            || source.baseURL.localizedCaseInsensitiveContains(needle)
+            || source.group.localizedCaseInsensitiveContains(needle)
+    }
+
+    /// Sources matching the search field and the filter, grouped the way the
+    /// list shows them, with pinned sources removed.
     ///
     /// Matches the name, the host and the group: a hundred imported sources
     /// share prefixes like `🎉` and many names repeat, so the host is often the
     /// only thing that tells two entries apart, and the group is how someone
     /// who never renamed anything finds their way around.
     private var grouped: [(String, [BookSource])] {
-        let needle = trimmedQuery
-        let matching = needle.isEmpty ? app.sources : app.sources.filter { source in
-            source.name.localizedCaseInsensitiveContains(needle)
-                || source.baseURL.localizedCaseInsensitiveContains(needle)
-                || source.group.localizedCaseInsensitiveContains(needle)
+        let pinned = Set(pinnedSources.map(\.id))
+        let matching = app.sources.filter { source in
+            !pinned.contains(source.id) && filter.matches(source) && matchesQuery(source)
         }
         let dictionary = Dictionary(grouping: matching) { source in
             source.group.isEmpty ? "未分组" : source.group
@@ -56,9 +107,39 @@ struct SourcesView: View {
             .sorted { $0.0 < $1.0 }
     }
 
+    /// Groups with more rows than this start folded.
+    ///
+    /// Six rows fit on one screen; anything past that is a group the reader has
+    /// to scroll through anyway, so starting it open just hides the groups
+    /// below it. Smaller groups are shown in full — folding three rows away
+    /// costs a tap and reveals nothing.
+    private static let foldingThreshold = 6
+
+    private func isExpanded(_ group: String) -> Bool {
+        expandedGroups.contains(group)
+    }
+
+    /// Folds the big groups the first time the list is built, and again when
+    /// the filter changes.
+    ///
+    /// A group the reader opened stays open until they switch filters; at that
+    /// point the set of groups on screen is different enough that keeping old
+    /// open/closed state would leave "已停用" showing four rows and a thousand
+    /// closed ones.
+    private func prepareGroups() {
+        guard !groupsPrepared else { return }
+        groupsPrepared = true
+        let groups = grouped
+        expandedGroups = Set(groups.filter { $0.1.count <= Self.foldingThreshold }.map(\.0))
+    }
+
     /// Every source currently on screen, flat, for the select-all control.
+    ///
+    /// Includes folded and pinned sources: the list is a view of the setting,
+    /// and "全选" meaning "the forty rows I can see" when a filter is on would
+    /// silently skip everything the filter kept but the fold hid.
     private var visibleSources: [BookSource] {
-        grouped.flatMap(\.1)
+        pinnedSources + grouped.flatMap(\.1)
     }
 
     private var allVisibleSelected: Bool {
@@ -68,6 +149,73 @@ struct SourcesView: View {
     /// Shelf books whose source is among the selected ones.
     private var affectedBooks: [Book] {
         app.booksOnShelf(from: selection)
+    }
+
+    /// One section's rows, in the plain-row shape the selection drag measures.
+    ///
+    /// A `LazyVStack` of plain rows instead of `List` rows: a `List` decides
+    /// for itself when a drag is a scroll and when it belongs to a row, and a
+    /// sideways row gesture made it stop scrolling for a while afterwards.
+    /// Plain rows have plain frames, so the selection drag can be measured
+    /// against them and the list keeps scrolling.
+    @ViewBuilder
+    private func sourceRows(_ sources: [BookSource], pinned: Bool = false) -> some View {
+        LazyVStack(spacing: 0) {
+            ForEach(sources) { source in
+                SourceRow(
+                    source: source,
+                    isSelecting: isBatchSelecting,
+                    isSelected: selection.contains(source.id),
+                    isPinned: pinned,
+                    onToggle: {
+                        if isBatchSelecting {
+                            toggleSelection(source)
+                        } else {
+                            app.toggleSourceEnabled(source)
+                        }
+                    },
+                    onOpen: {
+                        guard !isBatchSelecting else {
+                            toggleSelection(source)
+                            return
+                        }
+                        editingSource = source
+                    },
+                    onSelect: {
+                        selection = [source.id]
+                        isBatchSelecting = true
+                    },
+                    onMoveToggle: { toggleSelection(source) }
+                )
+                .modifier(
+                    SourceRowChrome(
+                        isBatchSelecting: isBatchSelecting,
+                        isPinned: pinned,
+                        onDelete: { pendingDelete = source },
+                        onEdit: { editingSource = source },
+                        onBatch: {
+                            selection = [source.id]
+                            isBatchSelecting = true
+                        },
+                        onTogglePin: { app.togglePin(source) },
+                        onMovePinUp: { app.movePinned(source, by: -1) },
+                        onMovePinDown: { app.movePinned(source, by: 1) }
+                    )
+                )
+                if source.id != sources.last?.id {
+                    Divider()
+                        .padding(.leading, 16)
+                }
+            }
+        }
+    }
+
+    private func count(of option: SourceFilter) -> Int {
+        switch option {
+        case .all: return app.sources.count
+        case .enabled: return app.sources.filter(\.enabled).count
+        case .disabled: return app.sources.filter { !$0.enabled }.count
+        }
     }
 
     /// A few names, for a dialog that should read as a sentence.
@@ -91,64 +239,87 @@ struct SourcesView: View {
                     }
                 }
 
-                ForEach(grouped, id: \.0) { group, sources in
-                    Section(group) {
-                        // A `LazyVStack` of plain rows instead of `List` rows.
-                        //
-                        // A `List` decides for itself when a drag is a scroll and
-                        // when it belongs to a row, and a sideways row gesture
-                        // made it stop scrolling for a while afterwards. Plain
-                        // rows have plain frames, so the selection drag can be
-                        // measured against them and the list keeps scrolling.
-                        LazyVStack(spacing: 0) {
-                            ForEach(sources) { source in
-                                SourceRow(
-                                    source: source,
-                                    isSelecting: isBatchSelecting,
-                                    isSelected: selection.contains(source.id),
-                                    onToggle: {
-                                        if isBatchSelecting {
-                                            toggleSelection(source)
-                                        } else {
-                                            app.toggleSourceEnabled(source)
-                                        }
-                                    },
-                                    onOpen: {
-                                        guard !isBatchSelecting else {
-                                            toggleSelection(source)
-                                            return
-                                        }
-                                        editingSource = source
-                                    },
-                                    onSelect: {
-                                        selection = [source.id]
-                                        isBatchSelecting = true
-                                    },
-                                    onMoveToggle: { toggleSelection(source) }
-                                )
-                                .modifier(
-                                    SourceRowChrome(
-                                        isBatchSelecting: isBatchSelecting,
-                                        onDelete: { pendingDelete = source },
-                                        onEdit: { editingSource = source },
-                                        onBatch: {
-                                            selection = [source.id]
-                                            isBatchSelecting = true
-                                        }
-                                    )
-                                )
-                                Divider()
-                                    .padding(.leading, 16)
+                if !app.sources.isEmpty && !isBatchSelecting {
+                    Section {
+                        HStack(spacing: 8) {
+                            Image(systemName: "magnifyingglass")
+                                .foregroundStyle(.secondary)
+                            TextField("搜索书名、网址或分组", text: $query)
+                                .textInputAutocapitalization(.never)
+                                .autocorrectionDisabled()
+                                .submitLabel(.search)
+                            if !query.isEmpty {
+                                Button {
+                                    query = ""
+                                } label: {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .foregroundStyle(.secondary)
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityLabel("清除搜索")
                             }
                         }
+
+                        Picker("筛选", selection: $filter) {
+                            ForEach(SourceFilter.allCases) { option in
+                                Text("\(option.title) \(count(of: option))").tag(option)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
+                    } footer: {
+                        Text("分组超过 \(Self.foldingThreshold) 个书源时默认折叠，点分组名展开或收起。长按书源可以置顶，置顶的会排在最上面。")
                     }
                 }
 
-                if !app.sources.isEmpty && grouped.isEmpty {
+                if !pinnedSources.isEmpty {
+                    Section {
+                        sourceRows(pinnedSources, pinned: true)
+                    } header: {
+                        Label("置顶", systemImage: "pin.fill")
+                    }
+                }
+
+                ForEach(grouped, id: \.0) { group, sources in
+                    Section {
+                        if isExpanded(group) {
+                            sourceRows(sources)
+                        }
+                    } header: {
+                        Button {
+                            withAnimation(.snappy(duration: 0.22)) {
+                                if isExpanded(group) {
+                                    expandedGroups.remove(group)
+                                } else {
+                                    expandedGroups.insert(group)
+                                }
+                            }
+                        } label: {
+                            HStack {
+                                Image(systemName: isExpanded(group) ? "chevron.down" : "chevron.right")
+                                    .font(.caption2.weight(.semibold))
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 10)
+                                Text(group)
+                                Spacer()
+                                Text("\(sources.count)")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .monospacedDigit()
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+
+                if !app.sources.isEmpty && grouped.isEmpty && pinnedSources.isEmpty {
                     ContentUnavailableView {
-                        Label("没有匹配的书源", systemImage: "magnifyingglass")
+                        Label(filter == .all ? "没有匹配的书源" : "这个筛选下没有书源", systemImage: "magnifyingglass")
                     } description: {
-                        Text("试试书源名、网址或分组名的一部分。")
+                        Text(filter == .all
+                             ? "试试书源名、网址或分组名的一部分。"
+                             : "切到「全部」，或先启用一些书源。")
                     }
                 }
 
@@ -204,6 +375,20 @@ struct SourcesView: View {
                         Text("逐个打开书源的发现页：能打开的取消选中，打不开的会被选中，之后由你决定停用还是删除。发现页打不开不代表书源不能用——搜索和阅读可能是好的，所以默认建议先停用。")
                     }
                 }
+            }
+            .onChange(of: filter) { _, _ in
+                groupsPrepared = false
+            }
+            .onChange(of: app.sources.count) { _, _ in
+                // A new import adds groups; fold the big ones rather than
+                // dropping a hundred new rows onto the reader at once.
+                groupsPrepared = false
+            }
+            .onChange(of: grouped.count) { _, _ in
+                prepareGroups()
+            }
+            .onAppear {
+                prepareGroups()
             }
             .coordinateSpace(name: SourceRowLayout.space)
             .onPreferenceChange(RowFramesKey.self) { rowFrames = $0 }
@@ -671,6 +856,8 @@ private struct SourceRow: View {
     /// it toggles the selection.
     var isSelecting: Bool = false
     var isSelected: Bool = false
+    /// Drawn in the pinned block rather than in its own group.
+    var isPinned: Bool = false
     var onToggle: () -> Void
     /// Opens the source's detail screen. Deliberately bound to the text block
     /// rather than the whole row: a row-wide gesture also fires when the switch
@@ -694,6 +881,11 @@ private struct SourceRow: View {
             }
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
+                    if isPinned {
+                        Image(systemName: "pin.fill")
+                            .font(.system(size: 9))
+                            .foregroundStyle(.orange)
+                    }
                     Text(source.name)
                         .font(.subheadline.weight(.medium))
                         .lineLimit(1)
@@ -825,9 +1017,14 @@ private struct RowFramesKey: PreferenceKey {
 /// opens the details, a long press offers edit, delete and batch select.
 private struct SourceRowChrome: ViewModifier {
     let isBatchSelecting: Bool
+    /// The row is in the pinned block, so its menu offers "取消置顶" first.
+    var isPinned: Bool = false
     var onDelete: () -> Void
     var onEdit: () -> Void
     var onBatch: () -> Void
+    var onTogglePin: () -> Void = {}
+    var onMovePinUp: () -> Void = {}
+    var onMovePinDown: () -> Void = {}
 
     func body(content: Content) -> some View {
         content
@@ -836,6 +1033,23 @@ private struct SourceRowChrome: ViewModifier {
             .contentShape(Rectangle())
             .contextMenu {
                 if !isBatchSelecting {
+                    Button {
+                        onTogglePin()
+                    } label: {
+                        Label(isPinned ? "取消置顶" : "置顶", systemImage: isPinned ? "pin.slash" : "pin")
+                    }
+                    if isPinned {
+                        Button {
+                            onMovePinUp()
+                        } label: {
+                            Label("上移", systemImage: "arrow.up")
+                        }
+                        Button {
+                            onMovePinDown()
+                        } label: {
+                            Label("下移", systemImage: "arrow.down")
+                        }
+                    }
                     Button {
                         onEdit()
                     } label: {
