@@ -577,22 +577,11 @@ private struct ReaderTopBar: View {
             }
             .accessibilityLabel("返回书架")
 
-            // The chapter title stays, small, right after the chevron.
-            //
-            // With the bars up this is the only place it appears at all: the
-            // page draws the chapter name nowhere else, because printing it both
-            // in the header and above the first paragraph used to show it twice.
-            // Dropping it here instead would leave no way to tell which chapter
-            // is open.
-            Text(model.currentChapter?.title ?? model.book.name)
-                .font(.caption2)
-                .foregroundStyle(theme.secondaryText)
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .frame(maxWidth: 72, alignment: .leading)
-                // Gives way before the buttons do: the words are a reminder,
-                // the buttons are how the reader moves.
-                .layoutPriority(-1)
+            // No chapter title here. It was tried small, next to the chevron,
+            // and the strip cannot hold both it and the buttons: at 72 pt it
+            // truncates "第452章 修罗天帝" to something unreadable, and it was
+            // the buttons that had to give way to make room. Where you are is
+            // what the TOC answers; this strip is for moving.
 
             topActions
 
@@ -714,15 +703,15 @@ private struct TopBarButton: View {
         Button(action: action) {
             VStack(spacing: 1) {
                 Image(systemName: systemImage)
-                    .font(.system(size: 16))
+                    .font(.system(size: 17))
                     .frame(height: 20)
                 Text(title)
-                    .font(.system(size: 9))
+                    .font(.system(size: 10))
                     .foregroundStyle(theme.secondaryText)
                     .lineLimit(1)
             }
-            .frame(minWidth: 44)
-            .padding(.horizontal, 4)
+            .frame(minWidth: 56)
+            .padding(.horizontal, 6)
             .frame(height: 40)
             .contentShape(Rectangle())
         }
