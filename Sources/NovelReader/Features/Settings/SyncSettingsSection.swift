@@ -15,6 +15,9 @@ struct SyncSettingsSection: View {
 
     @State private var testing = false
     @State private var testResult: String?
+    /// Result of the last manual sync, shown under the button. A sync failure
+    /// used to go to a banner on the shelf screen, which is invisible here.
+    @State private var syncMessage: (text: String, isError: Bool)?
     @State private var syncing = false
     @State private var showWebDAVPassword = false
     @State private var showS3Secret = false
@@ -181,6 +184,7 @@ struct SyncSettingsSection: View {
         Button {
             Task {
                 testing = true
+                syncMessage = nil
                 testResult = await app.testSyncConnection()
                 testing = false
             }
@@ -192,12 +196,14 @@ struct SyncSettingsSection: View {
                 Text("测试连接")
             }
         }
-        .disabled(testing || !sync.wrappedValue.isUsable)
+        .disabled(testing)
 
         Button {
             Task {
                 syncing = true
-                await app.runSync(reportErrors: true)
+                syncMessage = nil
+                let outcome = await app.runSync(reportErrors: true)
+                syncMessage = (outcome.summary, !outcome.isSuccess)
                 syncing = false
             }
         } label: {
@@ -208,12 +214,24 @@ struct SyncSettingsSection: View {
                 Text("立即同步")
             }
         }
-        .disabled(syncing || !sync.wrappedValue.isUsable)
+        .disabled(syncing)
+
+        if !sync.wrappedValue.isUsable {
+            Text("配置还不完整：需要打开开关，并填好地址和账号。")
+                .font(.footnote)
+                .foregroundStyle(.orange)
+        }
 
         if let testResult {
             Text(testResult)
                 .font(.footnote)
                 .foregroundStyle(testResult.hasPrefix("连接成功") ? .green : .red)
+        }
+
+        if let syncMessage {
+            Text(syncMessage.text)
+                .font(.footnote)
+                .foregroundStyle(syncMessage.isError ? .red : .green)
         }
 
         if let last = sync.wrappedValue.lastSyncedAt {

@@ -379,13 +379,43 @@ final class AppModel: ObservableObject {
     /// Guard against two runs at once (launch and foreground can overlap).
     private var syncInFlight = false
 
+    /// What a manual sync produced. Carries the failure reason so the settings
+    /// screen can say why, instead of a button that silently does nothing.
+    enum SyncRunOutcome: Sendable {
+        case succeeded(SyncService.Result)
+        case failed(String)
+
+        var isSuccess: Bool {
+            if case .succeeded = self { return true }
+            return false
+        }
+
+        /// One line for the settings screen.
+        var summary: String {
+            switch self {
+            case .succeeded(let result):
+                return "同步完成：\(result.booksAfter) 本书、\(result.sourcesAfter) 个书源"
+            case .failed(let message):
+                return "同步失败：\(message)"
+            }
+        }
+    }
+
     /// Syncs books, sources and progress with the configured backend.
     ///
     /// Failures are reported once and swallowed: sync runs on launch and on
     /// backgrounding, and neither is a place to block the user with an alert.
+    /// A manual run instead returns a message the settings screen shows inline
+    /// — a banner elsewhere in the app is invisible from that screen, which
+    /// made a failed press look like a dead button.
     @discardableResult
-    func runSync(reportErrors: Bool = false) async -> SyncService.Result? {
-        guard settings.sync.isUsable, !syncInFlight else { return nil }
+    func runSync(reportErrors: Bool = false) async -> SyncRunOutcome {
+        guard settings.sync.isUsable else {
+            return .failed("同步还没配置好：打开开关，并填完整地址和账号")
+        }
+        guard !syncInFlight else {
+            return .failed("上一次同步还没结束，请稍等")
+        }
         syncInFlight = true
         defer { syncInFlight = false }
 
@@ -413,12 +443,12 @@ final class AppModel: ObservableObject {
             if reportErrors {
                 showBanner("同步完成：\(result.booksAfter) 本书", isError: false)
             }
-            return result
+            return .succeeded(result)
         } catch {
             if reportErrors {
                 showBanner("同步失败：\(error.localizedDescription)", isError: true)
             }
-            return nil
+            return .failed(error.localizedDescription)
         }
     }
 
