@@ -89,6 +89,7 @@ struct ReaderView: View {
                             onClose: leaveBook,
                             onShowSettings: { showSettings = true },
                             onShowCache: { showCacheSheet = true },
+                            onShowTOC: { showTOC = true },
                             onShowBookInfo: { showBookInfo = true }
                         )
                     } else {
@@ -122,7 +123,6 @@ struct ReaderView: View {
                         model: model,
                         theme: theme,
                         forcedScheme: forcedScheme,
-                        onShowTOC: { showTOC = true },
                         onShowCache: { showCacheSheet = true }
                     )
                 }
@@ -556,108 +556,177 @@ private struct ReaderTopBar: View {
     var onClose: () -> Void
     var onShowSettings: () -> Void
     var onShowCache: () -> Void
-    /// The TOC lives in the bottom bar now; this menu keeps the entry points
-    /// that have no button of their own.
+    /// Opens the chapter list. Shown here rather than in the bottom bar: that
+    /// bar is what tips the page over, this one is where you go to move.
+    var onShowTOC: () -> Void
+    /// The overflow menu keeps the entry points that have no button of their
+    /// own: book info, cache, AI cleanup and the output format.
     var onShowBookInfo: () -> Void
     @EnvironmentObject private var app: AppModel
 
     var body: some View {
-        HStack(spacing: 14) {
+        HStack(spacing: 6) {
+            // Back to the shelf, with a chevron rather than the old down arrow:
+            // this bar is a way out of the book, and the arrow now points the
+            // way the gesture and every other app's back button point.
             Button(action: onClose) {
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 17, weight: .medium))
+                Image(systemName: "chevron.left")
+                    .font(.system(size: 17, weight: .semibold))
+                    .frame(width: 40, height: 36)
+                    .contentShape(Rectangle())
             }
-            .accessibilityLabel("退出阅读")
+            .accessibilityLabel("返回书架")
 
+            // The chapter title stays, small, right after the chevron.
+            //
+            // With the bars up this is the only place it appears at all: the
+            // page draws the chapter name nowhere else, because printing it both
+            // in the header and above the first paragraph used to show it twice.
+            // Dropping it here instead would leave no way to tell which chapter
+            // is open.
             Text(model.currentChapter?.title ?? model.book.name)
-                // The title is the reason this bar exists; when space is short it
-                // must be the icons that give way, not the words.
-                .font(.footnote.weight(.medium))
+                .font(.caption2)
+                .foregroundStyle(theme.secondaryText)
                 .lineLimit(1)
                 .truncationMode(.middle)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .layoutPriority(1)
+                .frame(maxWidth: 72, alignment: .leading)
+                // Gives way before the buttons do: the words are a reminder,
+                // the buttons are how the reader moves.
+                .layoutPriority(-1)
+
+            topActions
+
+            Spacer(minLength: 4)
 
             if model.mode == .preview {
                 Text("试读")
                     .font(.caption2)
                     .foregroundStyle(theme.accent)
                     .fixedSize()
+                    .padding(.trailing, 4)
             }
 
-            Menu {
-                Button {
-                    onShowBookInfo()
-                } label: {
-                    Label("书籍信息", systemImage: "info.circle")
-                }
-
-                Button {
-                    model.showSourcePicker = true
-                } label: {
-                    Label("换源", systemImage: "arrow.left.arrow.right")
-                }
-                .disabled(model.mode != .shelf)
-
-                Button {
-                    onShowCache()
-                } label: {
-                    Label(
-                        model.cachedChapterCount > 0 ? "缓存（已存 \(model.cachedChapterCount) 章）" : "缓存本章",
-                        systemImage: "arrow.down.circle"
-                    )
-                }
-                .disabled(model.mode != .shelf)
-
-                SwiftUI.Section("AI 整理") {
-                    ForEach(AIPrompt.ChapterTask.manualTasks) { task in
-                        Button {
-                            Task { await model.runAI(task: task) }
-                        } label: {
-                            Text("\(task.title) — \(task.detail)")
-                        }
-                    }
-                }
-
-                SwiftUI.Section("格式") {
-                    ForEach(AIPrompt.OutputFormat.allCases) { format in
-                        Button {
-                            app.settings.aiOutputFormat = format
-                            app.saveSettings()
-                        } label: {
-                            if app.settings.aiOutputFormat == format {
-                                Label(format.displayName, systemImage: "checkmark")
-                            } else {
-                                Text(format.displayName)
-                            }
-                        }
-                    }
-                }
-
-                if model.content?.originalText != nil {
-                    SwiftUI.Section {
-                        Button {
-                            Task { await model.restoreOriginalText() }
-                        } label: {
-                            Label("还原为站点原文", systemImage: "arrow.uturn.backward")
-                        }
-                    }
-                }
-
-                SwiftUI.Section {
-                    Button(action: onShowSettings) {
-                        Label("阅读设置", systemImage: "textformat.size")
-                    }
-                }
-            } label: {
-                Image(systemName: "ellipsis.circle")
-                    .font(.system(size: 18))
-            }
-            .accessibilityLabel("更多操作")
+            overflowMenu
         }
         .foregroundStyle(theme.text)
-        .padding(.horizontal, 20)
+        .padding(.horizontal, 8)
         .background(.ultraThinMaterial)
+    }
+
+    /// The few actions worth a tap from the reading screen.
+    ///
+    /// Ordered by how often they are wanted mid-chapter: the chapter list and
+    /// the chapter's own settings first, then switching sources — the one move
+    /// that fixes a page that loaded wrong.
+    private var topActions: some View {
+        HStack(spacing: 2) {
+            TopBarButton(title: "目录", systemImage: "list.bullet", theme: theme) {
+                onShowTOC()
+            }
+
+            TopBarButton(title: "设置", systemImage: "textformat.size", theme: theme) {
+                onShowSettings()
+            }
+
+            TopBarButton(title: "换源", systemImage: "arrow.left.arrow.right", theme: theme) {
+                model.showSourcePicker = true
+            }
+            .disabled(model.mode != .shelf)
+            .opacity(model.mode == .shelf ? 1 : 0.35)
+        }
+    }
+
+    /// What is left once the common actions have their own buttons.
+    private var overflowMenu: some View {
+        Menu {
+            Button {
+                onShowBookInfo()
+            } label: {
+                Label("书籍信息", systemImage: "info.circle")
+            }
+
+            Button {
+                onShowCache()
+            } label: {
+                Label(
+                    model.cachedChapterCount > 0 ? "缓存（已存 \(model.cachedChapterCount) 章）" : "缓存本章",
+                    systemImage: "arrow.down.circle"
+                )
+            }
+            .disabled(model.mode != .shelf)
+
+            SwiftUI.Section("AI 整理") {
+                ForEach(AIPrompt.ChapterTask.manualTasks) { task in
+                    Button {
+                        Task { await model.runAI(task: task) }
+                    } label: {
+                        Text("\(task.title) — \(task.detail)")
+                    }
+                }
+            }
+
+            SwiftUI.Section("格式") {
+                ForEach(AIPrompt.OutputFormat.allCases) { format in
+                    Button {
+                        app.settings.aiOutputFormat = format
+                        app.saveSettings()
+                    } label: {
+                        if app.settings.aiOutputFormat == format {
+                            Label(format.displayName, systemImage: "checkmark")
+                        } else {
+                            Text(format.displayName)
+                        }
+                    }
+                }
+            }
+
+            if model.content?.originalText != nil {
+                SwiftUI.Section {
+                    Button {
+                        Task { await model.restoreOriginalText() }
+                    } label: {
+                        Label("还原为站点原文", systemImage: "arrow.uturn.backward")
+                    }
+                }
+            }
+        } label: {
+            Image(systemName: "ellipsis")
+                .font(.system(size: 17, weight: .medium))
+                .frame(width: 40, height: 36)
+                .contentShape(Rectangle())
+        }
+        .accessibilityLabel("更多操作")
+    }
+}
+
+/// An icon plus its name, sized to fit the 44 pt header slot.
+///
+/// Smaller and tighter than `ReaderBarButton`: five of these share a strip that
+/// is one row tall, so the label has to sit directly under a 20 pt icon rather
+/// than under a 40 pt tap target.
+private struct TopBarButton: View {
+    let title: String
+    let systemImage: String
+    let theme: Theme
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 1) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 16))
+                    .frame(height: 20)
+                Text(title)
+                    .font(.system(size: 9))
+                    .foregroundStyle(theme.secondaryText)
+                    .lineLimit(1)
+            }
+            .frame(minWidth: 44)
+            .padding(.horizontal, 4)
+            .frame(height: 40)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 }
 
@@ -666,7 +735,8 @@ private struct ReaderBottomBar: View {
     let theme: Theme
     /// Pinned appearance for this bar's own sheet; see `ReaderView.forcedScheme`.
     let forcedScheme: ColorScheme?
-    var onShowTOC: () -> Void
+    /// The TOC moved to the top bar, which now carries the actions reached
+    /// mid-chapter; only the cache sheet is still launched from here.
     var onShowCache: () -> Void
     @State private var showSpeechSettings = false
 
@@ -738,10 +808,6 @@ private struct ReaderBottomBar: View {
             }
             .disabled(model.currentIndex == 0)
             .opacity(model.currentIndex == 0 ? 0.35 : 1)
-
-            ReaderBarButton(title: "目录", systemImage: "list.bullet", theme: theme) {
-                onShowTOC()
-            }
 
             Button {
                 model.toggleSpeech()
