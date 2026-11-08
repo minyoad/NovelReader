@@ -92,17 +92,86 @@ public enum SyncMerge {
         }
 
         // Books: union, with the winner chosen by reading progress.
+        //
+        // Two keys, not one. `id` is a UUID minted when the book was added, so
+        // the same book added separately on two devices gets two different ids
+        // and the union shows it twice. That is not hypothetical: a shelf ended
+        // up with the same novel twice, one copy at chapter 300 and one never
+        // opened, purely because each device had added it. So a book is also
+        // identified by where it comes from — same source rule and same detail
+        // page URL is the same book — and the duplicate is folded away.
         var bookMap = Dictionary(uniqueKeysWithValues: local.books.map { ($0.id, $0) })
+        var booksByOrigin: [OriginKey: UUID] = [:]
+        for book in local.books {
+            // First one wins when the local shelf is *already* duplicated; the
+            // fold below cleans that up against the remote copy.
+            guard let key = OriginKey(book: book) else { continue }
+            booksByOrigin[key] = booksByOrigin[key] ?? book.id
+        }
+
         for remoteBook in remote.books {
-            guard let localBook = bookMap[remoteBook.id] else {
+            // An id match is authoritative: it is the same record.
+            if let localBook = bookMap[remoteBook.id] {
+                if let winner = winner(localBook, remoteBook), winner == remoteBook {
+                    let merged = mergeCopy(winning: remoteBook, local: localBook)
+                    // Only a real difference counts: the id path also sees
+                    // books the cross-device path already folded, and claiming
+                    // a change there makes every sync re-upload forever.
+                    if merged != localBook {
+                        bookMap[remoteBook.id] = merged
+                        changed = true
+                    }
+                }
+                continue
+            }
+
+            guard let key = OriginKey(book: remoteBook) else {
+                // No detail URL: nothing identifies it, so id is all there is.
                 bookMap[remoteBook.id] = remoteBook
                 changed = true
                 continue
             }
-            if let winner = winner(localBook, remoteBook), winner == remoteBook {
-                bookMap[remoteBook.id] = mergeCopy(winning: remoteBook, local: localBook)
-                changed = true
+            if let existingID = booksByOrigin[key], let localBook = bookMap[existingID] {
+                // Same book under another id. Keep whichever copy the progress
+                // rules prefer, filed under the id this device already uses so
+                // the local shelf does not churn, and never keep both.
+                //
+                // `addedAt` here is the earliest of *both* copies: the remote
+                // one may be the older record, and carrying only the local date
+                // forward would make the book look re-added on every merge.
+                let kept = winner(localBook, remoteBook) ?? localBook
+                var merged = mergeCopy(winning: kept, local: localBook)
+                merged.addedAt = min(localBook.addedAt, remoteBook.addedAt)
+                if merged != localBook {
+                    bookMap[existingID] = merged
+                    changed = true
+                }
+                continue
             }
+
+            bookMap[remoteBook.id] = remoteBook
+            booksByOrigin[key] = remoteBook.id
+            changed = true
+        }
+
+        // Fold duplicates within the local shelf itself. Without this, two
+        // copies the merge failed to collapse earlier stay forever, because
+        // every later merge treats them as two unrelated books.
+        var seenOrigins: [OriginKey: UUID] = [:]
+        for (id, book) in bookMap.sorted(by: { $0.key.uuidString < $1.key.uuidString }) {
+            guard let key = OriginKey(book: book) else { continue }
+            guard let keptID = seenOrigins[key], let kept = bookMap[keptID] else {
+                seenOrigins[key] = id
+                continue
+            }
+            let keptBook = mergeCopy(winning: winner(kept, book) ?? kept, local: kept)
+            var folded = keptBook
+            folded.addedAt = min(kept.addedAt, book.addedAt)
+            if folded != kept {
+                bookMap[keptID] = folded
+            }
+            bookMap.removeValue(forKey: id)
+            changed = true
         }
 
         return Outcome(
@@ -110,6 +179,29 @@ public enum SyncMerge {
             sources: sourceMap.values.sorted { $0.id.uuidString < $1.id.uuidString },
             localChanged: changed
         )
+    }
+
+    /// What makes two records the same book across devices.
+    ///
+    /// `sourceID` alone is too coarse — one source lists thousands of novels —
+    /// and `detailURL` alone would trust a URL that a source rule could serve
+    /// for several entries. Together they name one page on one site.
+    ///
+    /// A book with no detail URL (or an empty one) gets no origin key: there is
+    /// nothing to say two such books are the same, and merging on a title would
+    /// fold genuinely different books — "青山" exists on more than one site.
+    private struct OriginKey: Hashable {
+        let sourceID: UUID
+        let detailURL: String
+
+        init?(book: Book) {
+            let url = book.detailURL.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !url.isEmpty else { return nil }
+            self.sourceID = book.sourceID
+            // Compare normalized: trailing slashes and case in the host vary
+            // between how a link was copied and how the source rule built it.
+            self.detailURL = url.hasSuffix("/") ? String(url.dropLast()) : url
+        }
     }
 
     private static func mergeCopy(winning: Book, local: Book) -> Book {
