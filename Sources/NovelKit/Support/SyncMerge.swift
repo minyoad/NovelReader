@@ -78,17 +78,68 @@ public enum SyncMerge {
 
         // Sources: remote fills gaps, and replaces an existing source only when
         // the two disagree — meaning one side re-imported or edited it.
+        //
+        // Two keys, for the same reason as books below. A source's id is minted
+        // when it is imported, so the same collection imported on two devices
+        // gives every source two ids, and keying on id alone made the union keep
+        // both: a shelf of 211 sources was really 100-odd sources and their
+        // twins. The identifying pair is the name and the site — the two things
+        // a person would use to say "this is the same source" — with the URL
+        // normalized first, because the importer strips a trailing `#🎃` that
+        // some collections leave on the URL.
         var sourceMap = Dictionary(uniqueKeysWithValues: local.sources.map { ($0.id, $0) })
+        var sourcesByIdentity: [SourceIdentity: UUID] = [:]
+        for source in local.sources {
+            sourcesByIdentity[SourceIdentity(of: source)] = sourcesByIdentity[SourceIdentity(of: source)] ?? source.id
+        }
+
         for source in remote.sources {
             if let existing = sourceMap[source.id] {
                 if existing != source {
                     sourceMap[source.id] = source
                     changed = true
                 }
-            } else {
-                sourceMap[source.id] = source
-                changed = true
+                continue
             }
+
+            // Same source under another id.
+            let identity = SourceIdentity(of: source)
+            if let existingID = sourcesByIdentity[identity], let existing = sourceMap[existingID] {
+                // Keep this device's id — books point at it — but take the
+                // newer rules. Rules do not carry a timestamp, so the remote
+                // copy wins only when the local one has nothing: a collection
+                // re-imported on the other device should refresh this one, and
+                // this device's own edits should not be silently undone.
+                var merged = existing
+                if merged.searchURL.isEmpty && !source.searchURL.isEmpty {
+                    merged = source
+                    merged.id = existing.id
+                    // This device had it switched on or off deliberately.
+                    merged.enabled = existing.enabled
+                    sourceMap[existingID] = merged
+                    changed = true
+                }
+                continue
+            }
+
+            sourceMap[source.id] = source
+            sourcesByIdentity[identity] = source.id
+            changed = true
+        }
+
+        // Fold duplicates already on the local list, and record which id took
+        // each one's place so book references can follow.
+        var seenIdentities: [SourceIdentity: UUID] = [:]
+        var replacedIDs: [UUID: UUID] = [:]
+        for (id, source) in sourceMap.sorted(by: { $0.key.uuidString < $1.key.uuidString }) {
+            let identity = SourceIdentity(of: source)
+            guard let keptID = seenIdentities[identity] else {
+                seenIdentities[identity] = id
+                continue
+            }
+            sourceMap.removeValue(forKey: id)
+            replacedIDs[id] = keptID
+            changed = true
         }
 
         // Books: union, with the winner chosen by reading progress.
@@ -172,6 +223,18 @@ public enum SyncMerge {
             }
             bookMap.removeValue(forKey: id)
             changed = true
+        }
+
+        // Books whose source id was folded away point at a source that is no
+        // longer on the list: they would lose their rules and show as
+        // "书源已删除". Re-point them at whichever copy survived.
+        if !replacedIDs.isEmpty {
+            for (id, book) in bookMap where replacedIDs[book.sourceID] != nil {
+                var fixed = book
+                fixed.sourceID = replacedIDs[book.sourceID]!
+                bookMap[id] = fixed
+                changed = true
+            }
         }
 
         return Outcome(

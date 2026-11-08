@@ -531,17 +531,20 @@ final class AppModel: ObservableObject {
 
     /// Imports a legado bundle and merges it into the shelf.
     ///
-    /// Sources are matched by `baseURL`, so re-importing the same collection
-    /// refreshes the rules in place instead of piling up duplicates — that
-    /// matters here because collections are re-downloaded whenever the site
-    /// re-verifies them.
+    /// A source is matched by name and site, the same pair the sync merge uses,
+    /// so re-importing a collection refreshes the rules in place instead of
+    /// piling up duplicates. Matching the URL alone was enough while every
+    /// import came from one device; it is not enough now that two devices can
+    /// import the same collection and the second one has to recognise what is
+    /// already there.
     @discardableResult
     func importSources(from data: Data) -> (added: Int, warnings: [String]) {
         do {
             let result = try LegadoImporter.importSources(from: data)
             var added = 0
             for var source in result.sources {
-                if let index = sources.firstIndex(where: { $0.baseURL == source.baseURL }) {
+                let identity = SourceIdentity(of: source)
+                if let index = sources.firstIndex(where: { SourceIdentity(of: $0) == identity }) {
                     // Refresh in place: keep the identity (books point at it)
                     // and whatever the user chose about enabling it.
                     source.id = sources[index].id

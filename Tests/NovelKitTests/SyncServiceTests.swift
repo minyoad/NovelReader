@@ -122,8 +122,10 @@ struct SyncMergeTests {
     @Test("sources are unioned, no field-level blending")
     func sourcesUnion() {
         let sharedID = UUID()
-        let localOnly = makeSource()
-        let remoteOnly = makeSource()
+        // Distinct sites: two sources with the same name and URL are the same
+        // source and get folded, which is not what this test is about.
+        let localOnly = makeSource(name: "甲")
+        let remoteOnly = makeSource(name: "乙")
         let localShared = makeSource(id: sharedID, name: "旧规则")
         let remoteShared = makeSource(id: sharedID, name: "新规则")
         let outcome = SyncMerge.merge(
