@@ -2,375 +2,95 @@
 import SwiftUI
 import NovelKit
 
+/// The settings tab's top level: one row per topic, each opening a page.
+///
+/// This used to be a single `Form` with roughly forty rows in ten sections.
+/// That works until it does not: finding the User-Agent field meant scrolling
+/// past every reading slider and every TTS voice, and the one field someone
+/// changes twice a year was buried in the middle of the longest page in the
+/// app. Splitting by topic means the first screen is a short list of names —
+/// the thing a person actually knows they are looking for — and the rows live
+/// one level down.
+///
+/// Deliberately `NavigationLink` and not a search field: with six topics, the
+/// list is shorter than a keyboard is tall, and typing a search term to find
+/// "同步" is more work than tapping it.
 struct SettingsView: View {
     @EnvironmentObject private var app: AppModel
-
-    @State private var testing = false
-    @State private var testResult: (text: String, isError: Bool)?
     @State private var showAIDocs = false
-    @State private var cachedChapters = 0
-    @State private var cacheSize: Int64 = 0
-    @State private var speechCount = 0
-    @State private var speechSize: Int64 = 0
-    @StateObject private var voiceTester = TTSVoiceTester()
-    @State private var showDiagnostics = false
-    /// Clearing this dismisses the keyboard. Keeping it on the view rather than
-    /// per field lets one tap close whatever field is active, which is what a
-    /// settings page needs: the fields are small and spread across sections.
-    @FocusState private var focusedField: Bool
-
-    /// Shown under the chunk-size stepper: the user's number is capped by what
-    /// the output budget can actually return.
-    private var effectiveChunkSize: Int {
-        AutoCleanup.effectiveChunkLength(
-            chunkSize: app.settings.ai.chunkSize,
-            maxTokens: app.settings.ai.maxTokens
-        )
-    }
 
     var body: some View {
         NavigationStack {
-            Form {
-                // MARK: 阅读
-
+            List {
                 Section {
-                    ReaderSettingSections.typography($app.settings.reading)
-                } header: {
-                    Text("排版")
-                } footer: {
-                    Text("小说正文用衬线或宋体更耐读；楷体适合短篇。选中的字体缺字时会自动回退到系统字体。")
-                }
-
-                Section {
-                    ReaderSettingSections.pageTurn($app.settings.reading)
-                } header: {
-                    Text("翻页")
-                } footer: {
-                    Text("「仿真」需要左右翻页模式才有意义；滚动模式下这一项不起作用。")
-                }
-
-                Section {
-                    ReaderSettingSections.background($app.settings.reading)
-                } header: {
-                    Text("背景")
-                } footer: {
-                    Text("开启「跟随系统深色模式」时，白天用所选主题，系统切到深色后自动换成相对应的深色主题（纸白/米黄 → 深灰）。关闭后固定使用所选主题。")
-                }
-
-                Section {
-                    ReaderSettingSections.startup($app.settings.reading)
-                } header: {
-                    Text("启动")
-                } footer: {
-                    Text("打开 App 时直接回到上次读到的位置；关闭后从书架开始。")
-                }
-
-                // MARK: 朗读
-
-                Section {
-                    TTSSettingSections.engine($app.settings.tts)
-                } header: {
-                    Text("语音朗读")
-                } footer: {
-                    Text("系统朗读完全离线；Edge 音色更自然但需要联网；自定义接口可以指向本地部署的语音模型。")
-                }
-
-                Section {
-                    TTSSettingSections.engineOptions($app.settings.tts)
-
-                    Button {
-                        voiceTester.preview(app.settings.tts)
+                    NavigationLink {
+                        ReadingSettingsPage()
                     } label: {
-                        HStack {
-                            Label("试听", systemImage: "play.circle")
-                            Spacer()
-                            switch voiceTester.state {
-                            case .idle:
-                                EmptyView()
-                            case .loading:
-                                ProgressView().controlSize(.small)
-                            case .failed:
-                                Image(systemName: "exclamationmark.triangle")
-                                    .foregroundStyle(.orange)
-                            }
-                        }
-                    }
-                    .disabled(voiceTester.state == .loading)
-
-                    if case .failed(let message) = voiceTester.state {
-                        Text(message)
-                            .font(.caption2)
-                            .foregroundStyle(.orange)
+                        SettingsRow(
+                            icon: "textformat.size",
+                            tint: .blue,
+                            title: "阅读",
+                            detail: readingSummary
+                        )
                     }
 
-                    // Only meaningful for the Edge engine, which is the one
-                    // with a host to reach. A failing custom endpoint says
-                    // everything in its own error already.
-                    if app.settings.tts.engine == .edge {
-                        Button {
-                            showDiagnostics = true
-                        } label: {
-                            Label("朗读网络诊断", systemImage: "stethoscope")
-                        }
-                    }
-                } header: {
-                    Text(app.settings.tts.engine == .system ? "系统声音" : "音色与接口")
-                }
-
-                Section {
-                    TTSSettingSections.cache($app.settings.tts)
-                    LabeledContent("已缓存朗读", value: "\(speechCount) 句 · \(CacheSheet.formatted(speechSize))")
-                    Button {
-                        clearSpeechCache()
+                    NavigationLink {
+                        SpeechSettingsPage()
                     } label: {
-                        Label("清理朗读缓存", systemImage: "waveform.slash")
-                    }
-                    .disabled(speechSize == 0)
-                } header: {
-                    Text("朗读缓存")
-                } footer: {
-                    Text("音频按句缓存，重复听同一段不会再联网。切换音色或语速会重新合成。")
-                }
-
-                if app.settings.tts.engine == .edge {
-                    Section {
-                        TTSSettingSections.proxy($app.settings.tts)
-                    } header: {
-                        Text("网络")
-                    } footer: {
-                        Text("默认直连，通常不需要填。注意：如果手机系统里开着代理 / VPN，Edge 朗读反而可能握手失败（报 TLS 错误）——那种情况和这里无关，关掉系统的代理即可。这一步只影响朗读，不影响抓书源。")
-                    }
-                }
-
-                // MARK: AI
-
-                Section {
-                    Toggle("启用 AI 整理", isOn: $app.settings.ai.enabled)
-
-                    Toggle("自动去广告", isOn: $app.settings.aiAutoClean)
-                        .disabled(!app.settings.ai.enabled)
-
-                    if app.settings.aiAutoClean {
-                        Stepper(
-                            "提前处理 \(app.settings.aiCleanAhead) 章",
-                            value: $app.settings.aiCleanAhead,
-                            in: 0...10
+                        SettingsRow(
+                            icon: "waveform",
+                            tint: .indigo,
+                            title: "朗读",
+                            detail: speechSummary
                         )
-                        .disabled(!app.settings.ai.enabled)
                     }
 
-                    Text("打开后，读到一章时会顺带把后面几章下载好、去掉广告，翻页就不用等。整章都会交给 AI 检查（广告可能夹在段落中间），分块并发发送，所以不会明显变慢。")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-
-                    if app.settings.aiAutoClean && app.settings.aiCleanAhead == 0 {
-                        Text("设为 0 就不会提前处理：翻到新章节时要等 AI 处理完才显示。")
-                            .font(.caption2)
-                            .foregroundStyle(.orange)
-                    }
-
-                    if app.settings.aiAutoClean && app.settings.aiCleanAhead == 0 {
-                        Text("设为 0 就不会提前处理：翻到新章节时要等 AI 处理完才显示。")
-                            .font(.caption2)
-                            .foregroundStyle(.orange)
-                    }
-
-                    Picker("整理后格式", selection: $app.settings.aiOutputFormat) {
-                        ForEach(AIPrompt.OutputFormat.allCases) { format in
-                            Text(format.displayName).tag(format)
-                        }
-                    }
-
-                    Text(app.settings.aiOutputFormat.detail)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-
-                    Picker("服务", selection: Binding(
-                        get: { app.settings.ai.preset },
-                        set: { preset in
-                            app.settings.ai.preset = preset
-                            if preset != .custom {
-                                app.settings.ai.baseURL = preset.defaultBaseURL
-                                app.settings.ai.model = preset.defaultModel
-                            }
-                        }
-                    )) {
-                        ForEach(AIProviderPreset.allCases) { preset in
-                            Text(preset.displayName).tag(preset)
-                        }
-                    }
-
-                    LabeledContent("接口地址") {
-                        TextField("https://api.example.com/v1", text: $app.settings.ai.baseURL)
-                            .multilineTextAlignment(.trailing)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                            .keyboardType(.URL)
-                            .focused($focusedField)
-                    }
-
-                    LabeledContent("模型") {
-                        TextField("gpt-4o-mini", text: $app.settings.ai.model)
-                            .multilineTextAlignment(.trailing)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                            .focused($focusedField)
-                    }
-
-                    if app.settings.ai.preset.needsAPIKey || !app.settings.ai.apiKey.isEmpty {
-                        HStack {
-                            Text("API Key")
-                            Spacer()
-                            SecureField("sk-…", text: $app.settings.ai.apiKey)
-                                .multilineTextAlignment(.trailing)
-                                .textInputAutocapitalization(.never)
-                                .autocorrectionDisabled()
-                                .focused($focusedField)
-                        }
-                    }
-
-                    HStack {
-                        Button {
-                            Task { await testConnection() }
-                        } label: {
-                            if testing {
-                                HStack(spacing: 6) {
-                                    ProgressView().controlSize(.small)
-                                    Text("测试中…")
-                                }
-                            } else {
-                                Label("测试连接", systemImage: "bolt.horizontal")
-                            }
-                        }
-                        .disabled(testing || app.settings.ai.baseURL.isEmpty || app.settings.ai.model.isEmpty)
-
-                        Spacer()
-
-                        if let testResult {
-                            Text(testResult.text)
-                                .font(.caption)
-                                .foregroundStyle(testResult.isError ? .red : .green)
-                                .lineLimit(2)
-                                .multilineTextAlignment(.trailing)
-                        }
-                    }
-
-                    DisclosureGroup("高级参数") {
-                        HStack {
-                            Text("Temperature")
-                            Spacer()
-                            Text(String(format: "%.2f", app.settings.ai.temperature))
-                                .foregroundStyle(.secondary)
-                                .monospacedDigit()
-                        }
-                        Slider(value: $app.settings.ai.temperature, in: 0...1.5, step: 0.05)
-
-                        Stepper(
-                            "最大输出 \(app.settings.ai.maxTokens) tokens",
-                            value: $app.settings.ai.maxTokens,
-                            in: 256...8192,
-                            step: 256
-                        )
-
-                        Stepper(
-                            "分块大小 \(app.settings.ai.chunkSize) 字",
-                            value: $app.settings.ai.chunkSize,
-                            in: 600...4000,
-                            step: 200
-                        )
-
-                        // The output budget caps how much can come back, so a
-                        // chunk larger than that is guaranteed to be cut off.
-                        // Showing the effective number stops the two settings
-                        // from silently disagreeing.
-                        Text("受「最大输出」限制，实际每块不超过 \(effectiveChunkSize) 字。")
-                            .font(.caption2)
-                            .foregroundStyle(app.settings.ai.chunkSize > effectiveChunkSize ? .orange : .secondary)
-
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("额外整理要求")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            TextEditor(text: $app.settings.ai.customInstruction)
-                                .font(.footnote)
-                                .frame(minHeight: 70)
-                                .focused($focusedField)
-                        }
-                    }
-                } header: {
-                    Text("AI 整理")
-                } footer: {
-                    Text("使用 OpenAI 兼容接口（/chat/completions）。AI Key 保存在系统钥匙串，不写入普通配置文件。整理结果会覆盖当前章节的缓存。")
-                }
-
-                // MARK: 网络
-
-                Section("网络") {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("User-Agent")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        TextField("User-Agent", text: $app.settings.network.userAgent, axis: .vertical)
-                            .font(.system(.caption2, design: .monospaced))
-                            .lineLimit(2...3)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                            .focused($focusedField)
-                    }
-
-                    Stepper(
-                        "超时 \(Int(app.settings.network.timeout)) 秒",
-                        value: $app.settings.network.timeout,
-                        in: 5...60,
-                        step: 5
-                    )
-
-                    Toggle("使用 Cookie", isOn: $app.settings.network.useCookies)
-
-                    Toggle("搜索时使用全部书源", isOn: $app.settings.searchAllSources)
-                }
-
-                // MARK: 数据
-
-                Section("数据与缓存") {
-                    LabeledContent("已缓存章节", value: "\(cachedChapters) 章")
-                    LabeledContent("缓存占用", value: CacheSheet.formatted(cacheSize))
-
-                    Button {
-                        clearChapterCache()
+                    NavigationLink {
+                        AISettingsPage()
                     } label: {
-                        Label("清理章节缓存", systemImage: "trash.slash")
-                    }
-                    if let banner = app.banner {
-                        Text(banner.text)
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
+                        SettingsRow(
+                            icon: "sparkles",
+                            tint: .purple,
+                            title: "AI 整理",
+                            detail: app.settings.ai.enabled ? "已启用" : "已关闭"
+                        )
                     }
                 }
 
                 Section {
-                    ReaderSettingSections.cache($app.settings.cache)
-                } header: {
-                    Text("缓存")
-                } footer: {
-                    Text("预缓存会在后台下载接下来的几章，断网时仍可继续读。设为 0 章即关闭。每本上限为 0 表示不自动清理。")
+                    NavigationLink {
+                        NetworkSettingsPage()
+                    } label: {
+                        SettingsRow(
+                            icon: "network",
+                            tint: .teal,
+                            title: "网络",
+                            detail: "\(Int(app.settings.network.timeout)) 秒超时"
+                        )
+                    }
+
+                    NavigationLink {
+                        SyncSettingsPage()
+                    } label: {
+                        SettingsRow(
+                            icon: "arrow.triangle.2.circlepath",
+                            tint: .green,
+                            title: "同步",
+                            detail: syncSummary
+                        )
+                    }
+
+                    NavigationLink {
+                        StorageSettingsPage()
+                    } label: {
+                        SettingsRow(
+                            icon: "internaldrive",
+                            tint: .orange,
+                            title: "缓存与数据",
+                            detail: nil
+                        )
+                    }
                 }
-
-                // MARK: 同步
-
-                Section {
-                    SyncSettingsSection(focus: $focusedField)
-                } header: {
-                    Text("同步")
-                } footer: {
-                    Text("""
-                    同步书架、书源和阅读进度，在启动和退到后台时自动进行。两台设备的书会合并而不是互相覆盖；同一本书按阅读位置较新的那份为准。
-
-                    章节正文不同步：它能从书源重新下载，同步它会让每次同步都很慢。
-                    """)
-                }
-
-                // MARK: 关于
 
                 Section("关于") {
                     LabeledContent("版本", value: appVersion)
@@ -384,52 +104,36 @@ struct SettingsView: View {
                 }
             }
             .navigationTitle("设置")
-            .scrollDismissesKeyboard(.interactively)
-            // Deliberately NOT `.simultaneousGesture(TapGesture())` on the whole
-            // Form: in a Form it swallows taps meant for rows, and the sync
-            // buttons stopped responding entirely. `.onTapGesture` layered the
-            // same way competes with the row itself. Instead the keyboard is
-            // dismissed by the keyboard toolbar's 完成, by scrolling, and by
-            // tapping a non-editable row below.
-            .toolbar {
-                ToolbarItemGroup(placement: .keyboard) {
-                    Spacer()
-                    Button("完成") { focusedField = false }
-                }
-            }
+            // Back-from-a-page should say where you came from, not "设置"
+            // twice in a row.
+            .navigationBarTitleDisplayMode(.inline)
             .sheet(isPresented: $showAIDocs) {
                 RuleDocsView()
             }
-            .sheet(isPresented: $showDiagnostics) {
-                EdgeDiagnosticsView(proxy: app.settings.tts.proxy)
-            }
-            .onChange(of: app.settings) { _, _ in
-                app.saveSettings()
-            }
-            .onAppear { Task { await refreshCacheStats() } }
-            .onDisappear {
-                app.saveSettings()
-                voiceTester.stop()
-            }
+            .onDisappear { app.saveSettings() }
         }
     }
 
-    private func refreshCacheStats() async {
-        var chapters = 0
-        for book in app.books {
-            chapters += await app.store.cachedChapterCount(bookID: book.id)
-        }
-        cachedChapters = chapters
-        cacheSize = await app.store.totalCachedSize()
-        speechCount = await app.store.speechCacheCount()
-        speechSize = await app.store.speechCacheSize()
+    /// One line of context per topic, so the list answers "is it on?" without
+    /// opening anything.
+    private var readingSummary: String {
+        let count = app.settings.reading.fontSize
+        return "字号 \(Int(count)) pt"
     }
 
-    private func clearSpeechCache() {
-        Task {
-            let result = await app.store.clearSpeechCache()
-            await refreshCacheStats()
-            app.showBanner("已删除 \(result.removed) 段朗读缓存，释放 \(CacheSheet.formatted(result.freed))", isError: false)
+    private var speechSummary: String {
+        switch app.settings.tts.engine {
+        case .system: return "系统声音"
+        case .edge: return "Edge 音色"
+        case .openAICompatible: return "自定义接口"
+        }
+    }
+
+    private var syncSummary: String {
+        guard app.settings.sync.enabled, app.settings.sync.isUsable else { return "未开启" }
+        switch app.settings.sync.backend {
+        case .webdav: return "WebDAV"
+        case .s3: return "S3"
         }
     }
 
@@ -438,35 +142,37 @@ struct SettingsView: View {
         let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "1"
         return "\(version) (\(build))"
     }
+}
 
-    private func testConnection() async {
-        testing = true
-        testResult = nil
-        defer { testing = false }
+/// One row in the settings list: a tinted icon, a name, and a status.
+///
+/// The system's `Label` with a tint is the same idea but the icon colours in a
+/// list of six blur together; a fixed 28 pt tile gives each topic a shape the
+/// eye can land on without reading.
+private struct SettingsRow: View {
+    let icon: String
+    let tint: Color
+    let title: String
+    let detail: String?
 
-        app.saveSettings()
-        var configuration = app.settings.ai
-        configuration.enabled = true
-        let client = AIClient(configuration: configuration)
-        do {
-            let answer = try await client.chat(
-                system: "你是一个测试助手。只回复两个字：正常。",
-                user: "测试"
-            )
-            let trimmed = answer.trimmingCharacters(in: .whitespacesAndNewlines)
-            testResult = (text: "连接正常：\(trimmed.prefix(20))", isError: false)
-        } catch {
-            testResult = (text: error.localizedDescription, isError: true)
-        }
-    }
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 28, height: 28)
+                .background(tint.gradient, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
 
-    private func clearChapterCache() {
-        Task {
-            for book in app.books {
-                await app.store.clearChapterCache(bookID: book.id)
+            Text(title)
+
+            Spacer(minLength: 8)
+
+            if let detail {
+                Text(detail)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
-            await refreshCacheStats()
-            app.showBanner("章节缓存已清理，下次阅读会重新下载", isError: false)
         }
     }
 }

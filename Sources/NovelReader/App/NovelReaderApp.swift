@@ -95,8 +95,17 @@ struct RootView: View {
             // it is where a sync can still reach the network without holding
             // the user on launch.
             if phase == .background {
+                app.saveSettings()
                 Task { await app.runSync() }
             }
+        }
+        .onChange(of: app.settings) { _, _ in
+            // Settings changed from somewhere other than a page's own save
+            // hook — a reading slider dragged from the reader, a sheet closed by
+            // swiping. Persisting here rather than in each page is what stops
+            // the settings tab's split into pages from losing a change made on
+            // one of them right before the app is backgrounded.
+            app.saveSettings()
         }
     }
 
