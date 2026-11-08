@@ -583,9 +583,13 @@ private struct ReaderTopBar: View {
             // the buttons that had to give way to make room. Where you are is
             // what the TOC answers; this strip is for moving.
 
-            topActions
-
+            // The actions sit at the trailing edge, under the thumb that
+            // reaches for them one-handed. The gap left over by the missing
+            // title belongs between the back chevron and them, not in front of
+            // the overflow menu.
             Spacer(minLength: 4)
+
+            topActions
 
             if model.mode == .preview {
                 Text("试读")
