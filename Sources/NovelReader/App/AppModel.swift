@@ -452,6 +452,37 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// The launch-time sync, capped so a dead server cannot hold up the resume.
+    ///
+    /// The reader is opened after this returns, and that order matters: it is
+    /// what makes the resumed position the newer of the two devices. But the
+    /// sync is bounded, because waiting minutes on the shelf is worse than
+    /// resuming one chapter early and correcting on the next sync.
+    func runStartupSync() async {
+        guard settings.sync.isUsable else { return }
+        let syncTask = Task { @MainActor in
+            _ = await self.runSync()
+        }
+        // A detached deadline rather than racing inside a task group: `runSync`
+        // is not cancellation-aware once it is inside URLSession, so the only
+        // reliable way to stop waiting is to stop waiting.
+        await withTaskGroup(of: Bool.self) { group in
+            group.addTask { @MainActor in
+                await syncTask.value
+                return true
+            }
+            group.addTask {
+                try? await Task.sleep(for: .seconds(8))
+                return false
+            }
+            _ = await group.next()
+            group.cancelAll()
+        }
+        // If the sync finished, `runSync` already reloaded the shelf. If the
+        // deadline won, the work continues in the background and its own
+        // reload will land then.
+    }
+
     /// Tests the configured backend without touching the user's data.
     ///
     /// Writes the current state only when the file does not exist yet, so a

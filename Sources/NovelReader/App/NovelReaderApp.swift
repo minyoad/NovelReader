@@ -28,6 +28,10 @@ struct RootView: View {
     /// The resume runs once per process: `.task` can fire again after the scene
     /// is rebuilt, and reopening the reader mid-session would be hostile.
     @State private var didResume = false
+    /// Set when the user switches away from the shelf before the launch task
+    /// finishes. Sync can take seconds; if the tap lands on 设置 first, the
+    /// reader must not pop up over it afterwards.
+    @State private var userLeftShelf = false
 
     var body: some View {
         TabView(selection: $tab) {
@@ -72,9 +76,19 @@ struct RootView: View {
             // resume decision needs the books that `bootstrap` fetches.
             await app.bootstrap()
             // Sync before resuming: the progress being resumed may have been
-            // advanced on the other device.
-            await app.runSync()
+            // advanced on the other device. Bounded, because a slow or
+            // unreachable server must not leave the app on the shelf for
+            // minutes while the user wonders whether it launched at all.
+            await app.runStartupSync()
             resumeLastReading()
+        }
+        .onChange(of: tab) { _, newTab in
+            // Any deliberate navigation beats a deferred auto-resume. Once the
+            // user is on 设置 or 发现, opening a book over that screen is
+            // taking the app away from them.
+            if newTab != .library {
+                userLeftShelf = true
+            }
         }
         .onChange(of: scenePhase) { _, phase in
             // Backgrounding is the last moment the app is guaranteed to run;
@@ -95,6 +109,9 @@ struct RootView: View {
     private func resumeLastReading() {
         guard !didResume else { return }
         didResume = true
+        // The user got somewhere on their own while sync was running; do not
+        // yank them into a book from under it.
+        guard !userLeftShelf else { return }
         guard app.settings.reading.resumeLastReading,
               let book = ReadingRecents.mostRecent(in: app.books) else { return }
         resumedBook = book

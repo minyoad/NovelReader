@@ -137,7 +137,7 @@ public actor SyncService {
 
     /// Shared by the real sync and the settings screen's connection test, so
     /// the two can never disagree about whether a file is readable.
-    static func decodeForPreview(_ data: Data) throws -> SyncPayload {
+    public static func decodeForPreview(_ data: Data) throws -> SyncPayload {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
 
