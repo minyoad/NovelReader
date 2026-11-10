@@ -329,6 +329,23 @@ struct SourcesView: View {
                     } label: {
                         Label("浏览在线书源合集", systemImage: "square.grid.2x2")
                     }
+                    NavigationLink {
+                        SourceSubscriptionsView()
+                    } label: {
+                        Label {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("书源订阅")
+                                let count = app.subscriptions.count
+                                if count > 0 {
+                                    Text("\(count) 个订阅，启动和退到后台时自动更新")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                        } icon: {
+                            Image(systemName: "dot.radiowaves.left.and.right")
+                        }
+                    }
                     Button {
                         showImport = true
                     } label: {
@@ -895,6 +912,16 @@ private struct SourceRow: View {
                             .padding(.horizontal, 5)
                             .padding(.vertical, 2)
                             .background(Color.secondary.opacity(0.15), in: Capsule())
+                    }
+                    if source.subscriptionID != nil {
+                        // Says where it came from in one glyph: a source the
+                        // list owns will be updated (or removed) by the list,
+                        // and knowing that is why its rules may change under
+                        // the user's feet.
+                        Image(systemName: "dot.radiowaves.left.and.right")
+                            .font(.system(size: 9))
+                            .foregroundStyle(.pink)
+                            .accessibilityLabel("来自订阅")
                     }
                     if !source.enabled {
                         Text("已停用")

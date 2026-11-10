@@ -17,6 +17,13 @@ public struct SyncPayload: Codable, Sendable, Equatable {
     public var deviceID: String
     public var books: [Book]
     public var sources: [BookSource]
+    /// Subscriptions travel with the sources they own.
+    ///
+    /// Without them a device would receive sources tagged with a subscription
+    /// id it has never heard of: it could not refresh them, and the tag would
+    /// never resolve. Optional so a file written by a build without
+    /// subscriptions still decodes.
+    public var subscriptions: [SourceSubscription]?
 
     public static let currentVersion = 1
 
@@ -25,13 +32,15 @@ public struct SyncPayload: Codable, Sendable, Equatable {
         updatedAt: Date = Date(),
         deviceID: String,
         books: [Book],
-        sources: [BookSource]
+        sources: [BookSource],
+        subscriptions: [SourceSubscription]? = nil
     ) {
         self.version = version
         self.updatedAt = updatedAt
         self.deviceID = deviceID
         self.books = books
         self.sources = sources
+        self.subscriptions = subscriptions
     }
 
     /// Whether this file is from a version this build understands.
@@ -45,13 +54,20 @@ public enum SyncMerge {
     public struct Outcome: Sendable, Equatable {
         public var books: [Book]
         public var sources: [BookSource]
+        public var subscriptions: [SourceSubscription]
         /// True when the merged result differs from `local`, so the caller
         /// knows it has to save and re-upload.
         public var localChanged: Bool
 
-        public init(books: [Book], sources: [BookSource], localChanged: Bool) {
+        public init(
+            books: [Book],
+            sources: [BookSource],
+            subscriptions: [SourceSubscription] = [],
+            localChanged: Bool
+        ) {
             self.books = books
             self.sources = sources
+            self.subscriptions = subscriptions
             self.localChanged = localChanged
         }
     }
@@ -237,9 +253,37 @@ public enum SyncMerge {
             }
         }
 
+        // Subscriptions are a union by id, newest record wins.
+        //
+        // They are few (a person follows a handful of lists) and carry no
+        // per-field conflicts worth resolving: an enabled flag and a timestamp
+        // are the whole mutable surface. The newest `lastUpdatedAt` wins, and
+        // a local-only subscription is never dropped by a device that has not
+        // heard of it.
+        var subscriptionMap: [UUID: SourceSubscription] = [:]
+        for subscription in local.subscriptions ?? [] {
+            subscriptionMap[subscription.id] = subscription
+        }
+        for subscription in remote.subscriptions ?? [] {
+            if let existing = subscriptionMap[subscription.id] {
+                let incoming = (subscription.lastUpdatedAt ?? .distantPast)
+                let current = (existing.lastUpdatedAt ?? .distantPast)
+                let winner = incoming > current ? subscription : existing
+                if winner != existing {
+                    subscriptionMap[subscription.id] = winner
+                    changed = true
+                }
+            } else {
+                subscriptionMap[subscription.id] = subscription
+                changed = true
+            }
+        }
+        let subscriptions = subscriptionMap.values.sorted { $0.addedAt < $1.addedAt }
+
         return Outcome(
             books: bookMap.values.sorted { $0.id.uuidString < $1.id.uuidString },
             sources: sourceMap.values.sorted { $0.id.uuidString < $1.id.uuidString },
+            subscriptions: subscriptions,
             localChanged: changed
         )
     }

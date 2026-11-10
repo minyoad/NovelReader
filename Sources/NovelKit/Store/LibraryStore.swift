@@ -63,6 +63,22 @@ public actor LibraryStore {
         write(sources, to: "sources.json")
     }
 
+    // MARK: - Source subscriptions
+
+    /// The subscription links, not the sources they deliver.
+    ///
+    /// Kept apart from `sources.json` on purpose: the sources are what the app
+    /// reads every launch, the links are what a refresh reads once. A device
+    /// that never subscribes has no such file, and one that unsubscribes from
+    /// everything still keeps its sources.
+    public func loadSubscriptions() -> [SourceSubscription] {
+        read([SourceSubscription].self, from: "subscriptions.json") ?? []
+    }
+
+    public func saveSubscriptions(_ subscriptions: [SourceSubscription]) {
+        write(subscriptions, to: "subscriptions.json")
+    }
+
     // MARK: - Settings
 
     public func loadSettings() -> AppSettings {

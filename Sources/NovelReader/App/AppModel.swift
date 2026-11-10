@@ -124,6 +124,16 @@ final class AppModel: ObservableObject {
     @Published var settings: AppSettings
     @Published var books: [Book] = []
     @Published var sources: [BookSource] = []
+    /// Book-source subscriptions: the links, not the sources they deliver.
+    @Published var subscriptions: [SourceSubscription] = []
+    /// What the last refresh of each subscription did, by subscription id.
+    ///
+    /// Kept in memory for the sources screen and the shelf banner; anything
+    /// that must outlive the launch (the last result, the last update time) is
+    /// also written onto the subscription itself.
+    @Published var subscriptionReports: [UUID: SubscriptionRefreshResult] = [:]
+    /// True while any subscription is being fetched.
+    @Published var isRefreshingSubscriptions = false
     @Published var searchState: SearchState = .idle
     @Published var searchResults: [SearchResult] = []
     /// State of the discover page. Separate from `searchState` so switching
@@ -202,6 +212,7 @@ final class AppModel: ObservableObject {
         client = HTTPClient(settings: loaded.network)
         books = await store.loadBooks()
         sources = await store.loadSources()
+        subscriptions = await store.loadSubscriptions()
         loadExploreAvailability()
 
         if sources.isEmpty {
@@ -437,6 +448,7 @@ final class AppModel: ObservableObject {
                 // The merge wrote to disk; reload so the shelf shows it.
                 books = await store.loadBooks()
                 sources = await store.loadSources()
+                subscriptions = await store.loadSubscriptions()
                 // The other device's deletions are now this device's too, so a
                 // pin can point at a source that is gone.
                 prunePinnedSources()
@@ -462,28 +474,40 @@ final class AppModel: ObservableObject {
     /// sync is bounded, because waiting minutes on the shelf is worse than
     /// resuming one chapter early and correcting on the next sync.
     func runStartupSync() async {
-        guard settings.sync.isUsable else { return }
-        let syncTask = Task { @MainActor in
-            _ = await self.runSync()
-        }
-        // A detached deadline rather than racing inside a task group: `runSync`
-        // is not cancellation-aware once it is inside URLSession, so the only
-        // reliable way to stop waiting is to stop waiting.
-        await withTaskGroup(of: Bool.self) { group in
-            group.addTask { @MainActor in
-                await syncTask.value
+        // Subscriptions first, so the sync that follows uploads sources that
+        // are already up to date rather than a list this device is about to
+        // replace. Both are deadline-bounded, so a slow or dead host costs at
+        // most the deadline, not the launch.
+        if !subscriptions.isEmpty {
+            await withDeadline(seconds: 8) {
+                await self.refreshSubscriptions()
                 return true
             }
+        }
+        guard settings.sync.isUsable else { return }
+        await withDeadline(seconds: 8) {
+            await self.runSync()
+            return true
+        }
+    }
+
+    /// Runs `work` but stops waiting after `seconds`.
+    ///
+    /// A detached deadline rather than racing inside the work itself: once it
+    /// is inside `URLSession` it is not cancellation-aware, so the only
+    /// reliable way to stop waiting is to stop waiting. The work keeps running
+    /// and its own completion still lands.
+    private func withDeadline(seconds: Double, _ work: @escaping @MainActor () async -> Bool) async {
+        let task = Task { @MainActor in await work() }
+        await withTaskGroup(of: Bool.self) { group in
+            group.addTask { await task.value }
             group.addTask {
-                try? await Task.sleep(for: .seconds(8))
+                try? await Task.sleep(for: .seconds(seconds))
                 return false
             }
             _ = await group.next()
             group.cancelAll()
         }
-        // If the sync finished, `runSync` already reloaded the shelf. If the
-        // deadline won, the work continues in the background and its own
-        // reload will land then.
     }
 
     /// Tests the configured backend without touching the user's data.
@@ -675,6 +699,156 @@ final class AppModel: ObservableObject {
 
     func source(for book: Book) -> BookSource? {
         sources.first { $0.id == book.sourceID }
+    }
+
+    // MARK: - Source subscriptions
+
+    /// Subscription ids whose sources have been deleted and whose books can no
+    /// longer be read until a new source is picked.
+    ///
+    /// A book keeps its `sourceName` after the source is gone, so it still
+    /// shows on the shelf — and taps straight into a reader with no rules. The
+    /// shelf banner is what tells the reader why, and what to do about it.
+    var booksWithMissingSource: [Book] {
+        let ids = Set(sources.map(\.id))
+        return books.filter { !ids.contains($0.sourceID) }
+    }
+
+    /// Adds a subscription and fetches it once immediately.
+    ///
+    /// Fetching on add rather than waiting for the next launch is what makes
+    /// the button feel like it did something: a URL that is wrong, points at
+    /// HTML, or lists nothing reports that right away instead of leaving an
+    /// empty row until tomorrow.
+    @discardableResult
+    func addSubscription(name: String, url: String) async -> String {
+        let trimmed = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let parsed = URL(string: trimmed),
+              parsed.scheme?.hasPrefix("http") == true else {
+            return "请输入以 http(s) 开头的链接"
+        }
+        guard !subscriptions.contains(where: { $0.url == trimmed }) else {
+            return "这个地址已经订阅过了"
+        }
+
+        let subscription = SourceSubscription(name: name, url: trimmed)
+        subscriptions.append(subscription)
+        persistSubscriptions()
+
+        let result = await refreshSubscription(id: subscription.id)
+        if let error = result.error {
+            // A link that does not work is removed again rather than left as a
+            // dead row: the user can paste it again once it is fixed, and an
+            // empty subscription would otherwise be re-fetched forever.
+            subscriptions.removeAll { $0.id == subscription.id }
+            persistSubscriptions()
+            return error
+        }
+        return result.summary
+    }
+
+    func removeSubscription(_ subscription: SourceSubscription) {
+        // The sources stay. Unsubscribing means "stop following this list",
+        // not "delete everything it ever gave me" — a book on the shelf may
+        // still be reading from one of them, and their rules do not expire.
+        for index in sources.indices where sources[index].subscriptionID == subscription.id {
+            sources[index].subscriptionID = nil
+        }
+        subscriptions.removeAll { $0.id == subscription.id }
+        subscriptionReports[subscription.id] = nil
+        persistSubscriptions()
+        persistSources()
+    }
+
+    func setSubscriptionEnabled(_ subscription: SourceSubscription, _ enabled: Bool) {
+        guard let index = subscriptions.firstIndex(where: { $0.id == subscription.id }) else { return }
+        subscriptions[index].isEnabled = enabled
+        persistSubscriptions()
+    }
+
+    /// Refreshes every enabled subscription, one after another.
+    ///
+    /// Sequential rather than in parallel: a list of ten subscriptions hitting
+    /// ten hosts at once on a phone is more likely to get throttled than to
+    /// finish sooner, and the whole refresh is bounded by the launch deadline
+    /// anyway.
+    @discardableResult
+    func refreshSubscriptions() async -> [UUID: SubscriptionRefreshResult] {
+        guard !isRefreshingSubscriptions else { return subscriptionReports }
+        isRefreshingSubscriptions = true
+        defer { isRefreshingSubscriptions = false }
+
+        for subscription in subscriptions where subscription.isEnabled {
+            // Read the list again each time: `subscriptions` is reassigned as
+            // each result lands, and a captured copy would lose the last one.
+            guard subscriptions.contains(where: { $0.id == subscription.id }) else { continue }
+            _ = await refreshSubscription(id: subscription.id)
+        }
+        return subscriptionReports
+    }
+
+    /// Refreshes one subscription and applies what it delivered.
+    @discardableResult
+    func refreshSubscription(id: UUID) async -> SubscriptionRefreshResult {
+        guard let index = subscriptions.firstIndex(where: { $0.id == id }) else {
+            return SubscriptionRefreshResult(error: "订阅不存在")
+        }
+        let subscription = subscriptions[index]
+        let client = SourceSubscriptionClient(client: client)
+
+        let delivered: [BookSource]
+        do {
+            delivered = try await client.fetch(subscription)
+        } catch {
+            var failed = SubscriptionRefreshResult(error: error.localizedDescription)
+            failed.summary = "刷新失败"
+            applyReport(failed, to: id)
+            return failed
+        }
+
+        let shelfSourceIDs = Set(books.map(\.sourceID))
+        var shelfBookNames: [UUID: [String]] = [:]
+        for book in books {
+            shelfBookNames[book.sourceID, default: []].append(book.name)
+        }
+
+        let outcome = SourceSubscriptionSync.apply(
+            current: sources,
+            delivered: delivered,
+            subscriptionID: id,
+            shelfSourceIDs: shelfSourceIDs,
+            shelfBookNames: shelfBookNames
+        )
+
+        if outcome.changed {
+            sources = outcome.sources
+            persistSources()
+            // A removed source may be a pinned one, or the one the discover
+            // page was showing.
+            prunePinnedSources()
+            if let exploreSourceID, !sources.contains(where: { $0.id == exploreSourceID }) {
+                self.exploreSourceID = nil
+            }
+        }
+
+        applyReport(outcome.report, to: id)
+        return outcome.report
+    }
+
+    private func applyReport(_ report: SubscriptionRefreshResult, to id: UUID) {
+        subscriptionReports[id] = report
+        if let index = subscriptions.firstIndex(where: { $0.id == id }) {
+            if !report.isFailure {
+                subscriptions[index].lastUpdatedAt = Date()
+            }
+            subscriptions[index].lastResult = report.error ?? report.summary
+            persistSubscriptions()
+        }
+    }
+
+    private func persistSubscriptions() {
+        let snapshot = subscriptions
+        Task { await store.saveSubscriptions(snapshot) }
     }
 
     // MARK: - Collections

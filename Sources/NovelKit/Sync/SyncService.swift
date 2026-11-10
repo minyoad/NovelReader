@@ -55,11 +55,13 @@ public actor SyncService {
     public func run() async throws -> Result {
         let localBooks = await store.loadBooks()
         let localSources = await store.loadSources()
+        let localSubscriptions = await store.loadSubscriptions()
         let local = SyncPayload(
             updatedAt: Date(),
             deviceID: deviceID,
             books: localBooks,
-            sources: localSources
+            sources: localSources,
+            subscriptions: localSubscriptions
         )
 
         let remoteData = try await transport.read()
@@ -97,6 +99,7 @@ public actor SyncService {
         if outcome.localChanged {
             await store.saveBooks(outcome.books)
             await store.saveSources(outcome.sources)
+            await store.saveSubscriptions(outcome.subscriptions)
         }
 
         // Upload whenever anything differs from the remote file, so the other
@@ -109,7 +112,8 @@ public actor SyncService {
                 updatedAt: Date(),
                 deviceID: deviceID,
                 books: outcome.books,
-                sources: outcome.sources
+                sources: outcome.sources,
+                subscriptions: outcome.subscriptions
             )
             try await upload(merged)
         }
@@ -214,6 +218,12 @@ public actor SyncService {
     private func sameContent(_ outcome: SyncMerge.Outcome, _ remote: SyncPayload) -> Bool {
         let remoteBooks = remote.books.sorted { $0.id.uuidString < $1.id.uuidString }
         let remoteSources = remote.sources.sorted { $0.id.uuidString < $1.id.uuidString }
-        return remoteBooks == outcome.books && remoteSources == outcome.sources
+        // A remote file written before subscriptions existed decodes with the
+        // field absent; comparing nil against an empty list would re-upload on
+        // every sync forever.
+        let remoteSubscriptions = (remote.subscriptions ?? []).sorted { $0.addedAt < $1.addedAt }
+        return remoteBooks == outcome.books
+            && remoteSources == outcome.sources
+            && remoteSubscriptions == outcome.subscriptions
     }
 }

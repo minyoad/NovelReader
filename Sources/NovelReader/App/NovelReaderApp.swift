@@ -96,6 +96,7 @@ struct RootView: View {
             // the user on launch.
             if phase == .background {
                 app.saveSettings()
+                Task { await app.refreshSubscriptions() }
                 Task { await app.runSync() }
             }
         }

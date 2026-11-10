@@ -163,6 +163,12 @@ public struct BookSource: Identifiable, Codable, Hashable, Sendable {
     /// Kept verbatim so the user can inspect / re-export a source.
     public var originalJSON: String?
     public var lastUsedAt: Date?
+    /// The subscription this source came from, if any.
+    ///
+    /// `nil` means the user put it here by hand (pasted JSON, a collection, a
+    /// preset). The distinction is what keeps a refresh from deleting sources
+    /// it never delivered: a subscription may only remove its own.
+    public var subscriptionID: UUID?
 
     public init(
         id: UUID = UUID(),
@@ -183,7 +189,8 @@ public struct BookSource: Identifiable, Codable, Hashable, Sendable {
         content: ContentRule = ContentRule(),
         isBuiltIn: Bool = false,
         originalJSON: String? = nil,
-        lastUsedAt: Date? = nil
+        lastUsedAt: Date? = nil,
+        subscriptionID: UUID? = nil
     ) {
         self.id = id
         self.name = name
@@ -204,6 +211,40 @@ public struct BookSource: Identifiable, Codable, Hashable, Sendable {
         self.isBuiltIn = isBuiltIn
         self.originalJSON = originalJSON
         self.lastUsedAt = lastUsedAt
+        self.subscriptionID = subscriptionID
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, baseURL, group, comment, type, enabled, enabledExplore
+        case header, searchURL, exploreURL, search, explore, bookInfo, toc, content
+        case isBuiltIn, originalJSON, lastUsedAt, subscriptionID
+    }
+
+    /// Tolerant decoding, as for settings: `sources.json` written before
+    /// subscriptions existed has no `subscriptionID`, and the memberwise
+    /// decoder would reject the whole file over one missing key.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        baseURL = try c.decodeIfPresent(String.self, forKey: .baseURL) ?? ""
+        group = try c.decodeIfPresent(String.self, forKey: .group) ?? ""
+        comment = try c.decodeIfPresent(String.self, forKey: .comment) ?? ""
+        type = try c.decodeIfPresent(SourceType.self, forKey: .type) ?? .text
+        enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+        enabledExplore = try c.decodeIfPresent(Bool.self, forKey: .enabledExplore) ?? false
+        header = try c.decodeIfPresent(String.self, forKey: .header) ?? ""
+        searchURL = try c.decodeIfPresent(String.self, forKey: .searchURL) ?? ""
+        exploreURL = try c.decodeIfPresent(String.self, forKey: .exploreURL) ?? ""
+        search = try c.decodeIfPresent(SearchRule.self, forKey: .search) ?? SearchRule()
+        explore = try c.decodeIfPresent(SearchRule.self, forKey: .explore) ?? SearchRule()
+        bookInfo = try c.decodeIfPresent(BookInfoRule.self, forKey: .bookInfo) ?? .empty
+        toc = try c.decodeIfPresent(TOCRule.self, forKey: .toc) ?? TOCRule()
+        content = try c.decodeIfPresent(ContentRule.self, forKey: .content) ?? ContentRule()
+        isBuiltIn = try c.decodeIfPresent(Bool.self, forKey: .isBuiltIn) ?? false
+        originalJSON = try c.decodeIfPresent(String.self, forKey: .originalJSON)
+        lastUsedAt = try c.decodeIfPresent(Date.self, forKey: .lastUsedAt)
+        subscriptionID = try c.decodeIfPresent(UUID.self, forKey: .subscriptionID)
     }
 
     public var host: String {

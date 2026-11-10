@@ -81,6 +81,17 @@ struct SettingsView: View {
                     }
 
                     NavigationLink {
+                        SourceSubscriptionsView()
+                    } label: {
+                        SettingsRow(
+                            icon: "dot.radiowaves.left.and.right",
+                            tint: .pink,
+                            title: "书源订阅",
+                            detail: subscriptionSummary
+                        )
+                    }
+
+                    NavigationLink {
                         StorageSettingsPage()
                     } label: {
                         SettingsRow(
@@ -135,6 +146,13 @@ struct SettingsView: View {
         case .webdav: return "WebDAV"
         case .s3: return "S3"
         }
+    }
+
+    private var subscriptionSummary: String {
+        let enabled = app.subscriptions.filter(\.isEnabled).count
+        guard enabled > 0 else { return app.subscriptions.isEmpty ? "无" : "全部停用" }
+        let delivered = app.sources.filter { $0.subscriptionID != nil }.count
+        return "\(enabled) 个订阅 · \(delivered) 个书源"
     }
 
     private var appVersion: String {
