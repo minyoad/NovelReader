@@ -226,50 +226,74 @@ struct PagedReader: View {
         if reading.pageTurnEffect == .curl {
             return AnyView(curlLayers(box: box))
         }
+        return AnyView(slideLayers(box: box))
+    }
 
-        // The page under the finger slides; the page revealed underneath stays
-        // in place. This is the "lift the sheet and look underneath" model, and
-        // it is the one that reads well: what moves is the sheet the reader is
-        // touching, not a belt carrying two pages.
-        //
-        // Each layer reads its own cache slot, so a turn is pure offset and
-        // text lookup: nothing in here restyles a page while the page moves.
-        return AnyView(
-            ZStack {
-                if let resting = restingIndex() {
-                    pageImage(text: text(at: resting), paper: theme.background)
-                } else if let boundaryPreview {
+    /// The cover model, with every participant of a turn mounted for the whole
+    /// chapter: the current sheet, and both neighbours parked a page-width off
+    /// the side they would be revealed from.
+    ///
+    /// A drag then only moves offsets. The earlier version inserted the
+    /// revealed page into the hierarchy on the first frame the finger moved —
+    /// creating that view, and running its first CoreText draw, mid-gesture is
+    /// what made every turn start with a hitch and trail the finger.
+    private func slideLayers(box: CGSize) -> some View {
+        let forward = isForward
+        let moving = abs(pageOffset) > 0.5 || isAnimating
+        // Stable identities: the sheet the finger holds and its two neighbours
+        // keep their views across commits, so a turn moves offsets only — no
+        // view is created or redrawn while the finger is down. The page
+        // revealed underneath sits at the origin; its twin is parked a
+        // page-width off the far side, and both twins swap places on the first
+        // frame of a gesture while the sheet still covers the screen.
+        return ZStack {
+            ForEach(slots(forward: forward), id: \.self) { index in
+                pageImage(text: text(at: index), paper: theme.background)
+                    .offset(x: slotOffset(index, box: box, forward: forward, moving: moving))
+                    .zIndex(index == pageIndex ? 2 : 1)
+            }
+
+            if moving {
+                if let boundaryPreview {
                     pageImage(text: boundaryPreview, paper: theme.background)
-                } else if abs(pageOffset) > 0.5 || isAnimating {
+                        .zIndex(1)
+                } else if neighbor(forward: forward) == nil {
                     // End of chapter: the hint card is what comes next.
-                    chapterHint(forward: turnForward ?? isForward, box: box)
-                }
-
-                if let top = topIndex() {
-                    pageImage(text: topText, paper: theme.background)
-                        .offset(x: reading.pageTurnEffect == .slide ? pageOffset : 0)
-                        .opacity(reading.pageTurnEffect == .fade ? Double(1 - dragProgress) : 1)
+                    chapterHint(forward: forward, box: box)
+                        .zIndex(1)
                 }
             }
-            .frame(width: box.width, height: box.height)
-        )
+        }
+        .frame(width: box.width, height: box.height)
+        // The parked neighbours live a page-width off to each side. Without a
+        // clip here they keep drawing in the screen's margins — the reader
+        // would see the last column of the previous page and the first column
+        // of the next one down either edge.
+        .clipped()
     }
 
-    /// The page drawn with no offset: the one a turn has settled onto, or the
-    /// page revealed by the finger.
-    private func restingIndex() -> Int? {
-        guard !pages.isEmpty else { return nil }
-        if let turnTarget { return turnTarget }
-        guard abs(pageOffset) > 0.5 || isAnimating else { return nil }
-        return revealedIndex()
+    /// The three pages that can take part in a turn: the sheet on the finger
+    /// and the neighbours on either side.
+    private func slots(forward: Bool) -> [Int] {
+        var result = [pageIndex]
+        if let target = turnTarget { result.append(target) }
+        for candidate in [pageIndex - 1, pageIndex + 1] where pages.indices.contains(candidate) {
+            if !result.contains(candidate) { result.append(candidate) }
+        }
+        return result
     }
 
-    /// The page on the finger. A turn no longer changes it: `pageIndex` only
-    /// moves once the animation has finished and the destination is already
-    /// underneath, so the top layer keeps the same text for the whole turn and
-    /// its canvas never repaints mid-gesture.
-    private func topIndex() -> Int? {
-        pages.isEmpty ? nil : pageIndex
+    /// Where a participant of the cover model sits this frame.
+    private func slotOffset(
+        _ index: Int,
+        box: CGSize,
+        forward: Bool,
+        moving: Bool
+    ) -> CGFloat {
+        if index == pageIndex { return pageOffset }
+        let revealed = turnTarget ?? (pageIndex + (forward ? 1 : -1))
+        if moving, index == revealed, pages.indices.contains(revealed) { return 0 }
+        return index < pageIndex ? -box.width : box.width
     }
 
     /// Text for the top layer. A chapter-boundary swipe keeps drawing the page
