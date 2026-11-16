@@ -174,6 +174,19 @@ struct ReaderView: View {
         .preferredColorScheme(forcedScheme)
         .onAppear { model.beginReadingSession() }
         .task { await model.start() }
+        .onAppear { ScreenAwake.apply(app.settings.reading.keepScreenAwake) }
+        .onChange(of: app.settings.reading.keepScreenAwake) { _, enabled in
+            ScreenAwake.apply(enabled)
+        }
+        // The phone must not stay lit while the app is in the background: the
+        // idle timer only belongs to the screen the reader is on.
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active {
+                ScreenAwake.apply(app.settings.reading.keepScreenAwake)
+            } else {
+                ScreenAwake.release()
+            }
+        }
         .modifier(SyncedProgressPrompt(
             advance: model.mode.recordsProgress ? app.pendingProgressAdvances[model.book.id] : nil,
             enabled: scenePhase == .active && !model.isLoading && model.errorMessage == nil
@@ -244,6 +257,7 @@ struct ReaderView: View {
             Text(model.errorMessage ?? "")
         }
         .onDisappear {
+            ScreenAwake.release()
             model.endReadingSession()
             model.stopBackgroundWork()
             app.saveSettings()

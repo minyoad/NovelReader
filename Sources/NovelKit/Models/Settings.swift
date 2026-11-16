@@ -118,6 +118,13 @@ public struct ReadingSettings: Codable, Hashable, Sendable {
     /// Off is for readers who want the shelf first: the resume happens before
     /// they can tap anything, so it has to be an explicit choice.
     public var resumeLastReading: Bool
+    /// Keep the display awake while a book is open.
+    ///
+    /// On by default: the system sleeps the screen after two idle minutes, and
+    /// a slow reader who has not touched the page for that long is dropped out
+    /// of the reader mid-chapter. Only the reader raises this — the shelf, the
+    /// settings and every other screen leave the idle timer alone.
+    public var keepScreenAwake: Bool
 
     public init(
         fontSize: Double = 26,
@@ -131,7 +138,8 @@ public struct ReadingSettings: Codable, Hashable, Sendable {
         firstLineIndent: Bool = true,
         alignment: BodyAlignment = .justify,
         followSystemAppearance: Bool = true,
-        resumeLastReading: Bool = true
+        resumeLastReading: Bool = true,
+        keepScreenAwake: Bool = true
     ) {
         self.fontSize = fontSize
         self.lineSpacing = lineSpacing
@@ -145,6 +153,7 @@ public struct ReadingSettings: Codable, Hashable, Sendable {
         self.alignment = alignment
         self.followSystemAppearance = followSystemAppearance
         self.resumeLastReading = resumeLastReading
+        self.keepScreenAwake = keepScreenAwake
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -160,6 +169,7 @@ public struct ReadingSettings: Codable, Hashable, Sendable {
         case alignment
         case followSystemAppearance
         case resumeLastReading
+        case keepScreenAwake
     }
 
     /// Tolerant decoding: settings written before pagination (or before the
@@ -182,6 +192,8 @@ public struct ReadingSettings: Codable, Hashable, Sendable {
             ?? defaults.followSystemAppearance
         resumeLastReading = try container.decodeIfPresent(Bool.self, forKey: .resumeLastReading)
             ?? defaults.resumeLastReading
+        keepScreenAwake = try container.decodeIfPresent(Bool.self, forKey: .keepScreenAwake)
+            ?? defaults.keepScreenAwake
     }
 
     /// The paper and ink to draw with.

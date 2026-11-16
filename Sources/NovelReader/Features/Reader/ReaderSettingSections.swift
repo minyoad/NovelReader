@@ -113,10 +113,12 @@ enum ReaderSettingSections {
 
     // MARK: - Startup
 
-    /// What the app opens to on launch.
+    /// What the app opens to on launch, and how the screen behaves while a book
+    /// is open.
     @ViewBuilder
     static func startup(_ reading: Binding<ReadingSettings>) -> some View {
         Toggle("启动时继续上次阅读", isOn: reading.resumeLastReading)
+        Toggle("阅读时保持屏幕常亮", isOn: reading.keepScreenAwake)
     }
 
     // MARK: - Cache
