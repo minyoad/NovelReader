@@ -239,28 +239,41 @@ struct PagedReader: View {
     /// what made every turn start with a hitch and trail the finger.
     private func slideLayers(box: CGSize) -> some View {
         let forward = isForward
-        let moving = abs(pageOffset) > 0.5 || isAnimating
-        // Stable identities: the sheet the finger holds and its two neighbours
-        // keep their views across commits, so a turn moves offsets only — no
-        // view is created or redrawn while the finger is down. The page
-        // revealed underneath sits at the origin; its twin is parked a
-        // page-width off the far side, and both twins swap places on the first
-        // frame of a gesture while the sheet still covers the screen.
+        // A chapter-boundary turn has no page of this chapter underneath: the
+        // sheet slides off `leaving` and the chapter hint (or the prepared
+        // first/last page of the neighbour) is what is revealed. Mounting the
+        // same-chapter neighbours here as well would put two unrelated pages
+        // under the sheet and swap them on commit, which is what made the
+        // boundary turn land with no animation at all.
+        let boundary = boundaryTargetURL != nil
         return ZStack {
-            ForEach(slots(forward: forward), id: \.self) { index in
-                pageImage(text: text(at: index), paper: theme.background)
-                    .offset(x: slotOffset(index, box: box, forward: forward, moving: moving))
-                    .zIndex(index == pageIndex ? 2 : 1)
-            }
-
-            if moving {
+            if boundary {
                 if let boundaryPreview {
                     pageImage(text: boundaryPreview, paper: theme.background)
-                        .zIndex(1)
-                } else if neighbor(forward: forward) == nil {
-                    // End of chapter: the hint card is what comes next.
+                } else {
+                    // No prepared neighbour: while the sheet is still on
+                    // screen the hint card is what it uncovers, and once the
+                    // animation has finished the sheet itself is the only
+                    // thing left to show, parked at the edge it slid to. A
+                    // blank page in between is the "reader went black" frame.
                     chapterHint(forward: forward, box: box)
-                        .zIndex(1)
+                        .offset(x: forward ? box.width : -box.width)
+                }
+                pageImage(text: leaving ?? text(at: safeIndex(pageIndex)), paper: theme.background)
+                    .offset(x: pageOffset)
+                    .zIndex(2)
+            } else {
+                // Stable identities: the sheet the finger holds and its two
+                // neighbours keep their views across commits, so a turn moves
+                // offsets only — no view is created or redrawn while the
+                // finger is down. The page revealed underneath sits at the
+                // origin; its twin is parked a page-width off the far side,
+                // and both twins swap places on the first frame of a gesture
+                // while the sheet still covers the screen.
+                ForEach(slots(forward: forward), id: \.self) { index in
+                    pageImage(text: text(at: index), paper: theme.background)
+                        .offset(x: slotOffset(index, box: box, forward: forward))
+                        .zIndex(index == pageIndex ? 2 : 1)
                 }
             }
         }
@@ -287,12 +300,12 @@ struct PagedReader: View {
     private func slotOffset(
         _ index: Int,
         box: CGSize,
-        forward: Bool,
-        moving: Bool
+        forward: Bool
     ) -> CGFloat {
         if index == pageIndex { return pageOffset }
         let revealed = turnTarget ?? (pageIndex + (forward ? 1 : -1))
-        if moving, index == revealed, pages.indices.contains(revealed) { return 0 }
+        if isAnimating || abs(pageOffset) > 0.5,
+           index == revealed, pages.indices.contains(revealed) { return 0 }
         return index < pageIndex ? -box.width : box.width
     }
 
@@ -340,7 +353,7 @@ struct PagedReader: View {
     /// The page on screen, from the cache; `preparePages` fills it before an
     /// index is committed, so this never styles a page inside a frame.
     private var currentText: NSAttributedString {
-        leaving ?? text(at: pageIndex)
+        leaving ?? text(at: safeIndex(pageIndex))
     }
 
     /// Styled page text for the page at `index`, from the page cache.
@@ -656,18 +669,14 @@ struct PagedReader: View {
             boundaryPreview = preparedBoundary(forward: forward, box: box)
             snapBack()
 
-            // When the next sheet is ready, finish the same gesture onto it.
-            // Commit the chapter only after the animation completes so changing
-            // the model cannot replace the outgoing text halfway through a fold.
-            if boundaryPreview != nil {
-                withAnimation(.easeOut(duration: 0.22), completionCriteria: .removed) {
-                    turn = forward ? -box.width : box.width
-                } completion: {
-                    Task { @MainActor in await enterAdjacentChapter(forward: forward) }
-                }
-            } else {
-                // A cold network request keeps the current sheet visible.
-                withAnimation(.easeOut(duration: 0.18)) { turn = 0 }
+            // The sheet slides off in every case. A cold network request used
+            // to bounce back to zero instead, which killed the animation and
+            // left the reader looking at a dead page until the chapter
+            // arrived; the hint card is a better thing to reveal while the
+            // next chapter is fetched.
+            withAnimation(.easeOut(duration: 0.22), completionCriteria: .removed) {
+                turn = forward ? -box.width : box.width
+            } completion: {
                 Task { @MainActor in await enterAdjacentChapter(forward: forward) }
             }
         }
@@ -753,6 +762,24 @@ struct PagedReader: View {
             return
         }
 
+        // A sync jump, a source switch or a setting change can rerun this while
+        // a swipe is still on the screen. Replacing the pages under a live
+        // gesture zeroes `drag`/`turn` in a no-animation transaction, and the
+        // sheet snaps to its destination with no turn at all — the "some turns
+        // have no animation after a sync" report. Let the finger lift and the
+        // finish animation land first; the layout underneath is then swapped in
+        // one quiet frame, which reads as a normal page change.
+        //
+        // A chapter-boundary swipe is exempt: it holds `isAnimating` until this
+        // function installs the new chapter, so waiting on it here would wait
+        // on itself and leave the reader stuck on the last page. The wait is
+        // also capped: a flag that never clears must never freeze the reader.
+        let waitDeadline = Date().addingTimeInterval(0.6)
+        while !boundaryTargetURLIsPending, (isAnimating || drag != 0 || turn != 0),
+              !Task.isCancelled, Date() < waitDeadline {
+            try? await Task.sleep(nanoseconds: 40_000_000)
+        }
+
         // The page on screen in raw-chapter coordinates, captured before the
         // new layout replaces it. Both branches below need it: reading aloud
         // stays on the page being spoken, and idle repagination reopens where
@@ -827,19 +854,26 @@ struct PagedReader: View {
         // Restyle with the finished layout, in the same pass that installs it,
         // so the next frame has the text ready and the turn never waits on a
         // CoreText pass at the moment the page should already be gone.
-        leaving = nil
-        boundaryPreview = nil
-        boundaryTargetURL = nil
-        turnForward = nil
-        isAnimating = false
-        if !opensAtEnd || layout.isEmpty {
-            refreshStaging()
-        }
+        //
+        // The sheet that is still sliding off a chapter-boundary turn has to
+        // land in the same frame as everything else: `leaving` is what it is
+        // drawing, so releasing it while `turn` is still mid-flight would show
+        // the new chapter's page sliding from the old position — or, with the
+        // index already moved, nothing at all. One no-animation transaction
+        // retires the sheet, the offset and the boundary markers together.
         var resetTransaction = Transaction()
         resetTransaction.disablesAnimations = true
         withTransaction(resetTransaction) {
+            leaving = nil
+            boundaryPreview = nil
+            boundaryTargetURL = nil
+            turnForward = nil
+            isAnimating = false
             drag = 0
             turn = 0
+        }
+        if !opensAtEnd || layout.isEmpty {
+            refreshStaging()
         }
         // A new chapter's offsets are relative to its own text, so a value left
         // over from the previous one would suppress the first save here.
@@ -852,6 +886,25 @@ struct PagedReader: View {
             model.pendingOffset = doc.characterOffset(atAttributed: range.location)
         }
         saveProgress()
+    }
+
+    /// An index that always addresses a real page. During a chapter-boundary
+    /// commit the old index can briefly point past the new chapter's pages;
+    /// `text(at:)` would hand back an empty sheet and the sheet on the finger
+    /// would flash blank for a frame.
+    private func safeIndex(_ index: Int) -> Int {
+        guard !pages.isEmpty else { return 0 }
+        return min(max(index, 0), pages.count - 1)
+    }
+
+    /// A chapter-boundary swipe has started and is going to be finished by the
+    /// chapter switch that is about to run `paginate`. The boundary markers are
+    /// only cleared by `paginate` itself, so their presence says the wait below
+    /// must not hold this layout back — it would be waiting on itself.
+    private var boundaryTargetURLIsPending: Bool {
+        guard isAnimating else { return false }
+        guard let url = boundaryTargetURL else { return false }
+        return document?.chapterURL != url
     }
 
     /// Character offset of the page's first character, in raw-chapter terms.
