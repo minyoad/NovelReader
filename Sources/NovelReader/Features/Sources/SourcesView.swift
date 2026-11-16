@@ -1074,44 +1074,22 @@ private extension SourceCompatibility {
     var badge: CompatibilityBadge? {
         switch level {
         case .supported:
-            return nil
+            return hasJavaScript ? CompatibilityBadge(title: "基础 JS", color: .secondary) : nil
         case .degraded:
             // Names the cause, not the symptom: "部分" alone would read as
             // "this source is half-broken", when in fact it reads fine and only
             // loses some metadata.
-            return CompatibilityBadge(title: "JS 已跳过", color: .secondary)
+            return CompatibilityBadge(title: "JS 部分受限", color: .secondary)
         case .unreadable:
-            return CompatibilityBadge(title: "JS 必需", color: .orange)
+            return CompatibilityBadge(title: "规则不兼容", color: .orange)
         }
     }
 
     /// One line naming what is lost, or `nil` when nothing is.
-    var shortNote: String? {
-        guard hasJavaScript else { return nil }
-        if !blockingRoles.isEmpty {
-            return "\(blockingRoles.joined(separator: "、"))规则必须用 JS，无法读取"
-        }
-        return "\(roles.joined(separator: "、"))用到 JS，已跳过，不影响阅读"
-    }
+    var shortNote: String? { javaScriptNote }
 
-    /// The full explanation shown on the source's detail page.
-    var detail: String {
-        var lines: [String] = []
-        if !blockingRoles.isEmpty {
-            lines.append("\(blockingRoles.joined(separator: "、"))的规则是纯 JavaScript，本应用不能执行，所以这个书源读不出章节。换一个书源即可。")
-        }
-        let soft = roles.filter { !blockingRoles.contains($0) }
-        if !soft.isEmpty {
-            lines.append("\(soft.joined(separator: "、"))的规则里带 JavaScript，已跳过。这些字段会缺失或保持原文，不影响阅读。")
-        }
-        if usesNetwork || usesDOM {
-            var needs: [String] = []
-            if usesDOM { needs.append("解析页面结构") }
-            if usesNetwork { needs.append("再次请求页面") }
-            lines.append("其中的 JavaScript 还需要\(needs.joined(separator: "、"))，执行环境更复杂。")
-        }
-        return lines.joined(separator: "\n\n")
-    }
+    var detail: String { javaScriptNote ?? "" }
+
 }
 
 // MARK: - Import
@@ -1297,7 +1275,7 @@ struct SourceEditorView: View {
                                   ? "exclamationmark.triangle.fill"
                                   : "info.circle")
                                 .foregroundStyle(compatibility.level == .unreadable ? Color.orange : Color.secondary)
-                            Text(compatibility.level == .unreadable ? "这个书源无法读取" : "部分规则已跳过")
+                            Text(compatibility.level == .supported ? "支持基础 JS" : (compatibility.level == .unreadable ? "部分关键规则不兼容" : "部分 JS 能力受限"))
                                 .font(.footnote.weight(.medium))
                         }
                         Text(compatibility.detail)

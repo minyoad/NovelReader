@@ -260,7 +260,7 @@ struct ExploreParserTests {
         #expect(source.openableExploreCategories.count == 2)
     }
 
-    @Test("a source whose rules need JavaScript is not offered")
+    @Test("a source whose rules need unimplemented host APIs is not offered")
     func javaScriptRulesRejected() {
         // 🎉搜狗阅读 ships an obfuscated `@js:` list. The engine cannot run it,
         // so every tab would come back empty.
@@ -269,7 +269,7 @@ struct ExploreParserTests {
             baseURL: "https://example.com",
             enabledExplore: true,
             exploreURL: "玄幻::/xuanhuan/{{page}}.html",
-            search: SearchRule(bookList: ".list li@js:var O=[\"x\"];"),
+            search: SearchRule(bookList: ".list li@js:java.getElements('li')"),
             explore: SearchRule(bookList: "")
         )
         #expect(source.canExplore == false)

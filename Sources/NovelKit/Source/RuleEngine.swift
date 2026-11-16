@@ -11,16 +11,20 @@ public struct RuleScope {
 
     public var payload: Payload
     public var baseURL: URL?
+    /// Original HTTP response for whole-document JS rules. Selected child
+    /// scopes instead expose their own HTML or native JSON value.
+    public var sourceText: String?
 
-    public init(payload: Payload, baseURL: URL? = nil) {
+    public init(payload: Payload, baseURL: URL? = nil, sourceText: String? = nil) {
         self.payload = payload
         self.baseURL = baseURL
+        self.sourceText = sourceText
     }
 
     public static func html(_ html: String, baseURL: URL?) -> RuleScope {
         let document = (try? SwiftSoup.parse(html)) ?? Document("")
         let root = document.body() ?? document
-        return RuleScope(payload: .element(root), baseURL: baseURL)
+        return RuleScope(payload: .element(root), baseURL: baseURL, sourceText: html)
     }
 
     public var plainText: String {
@@ -59,10 +63,11 @@ public struct RuleScope {
 /// - legado path syntax: `class.foo@tag.li@tag.a@href`, `id.content@html`, `text.下一页@href`
 /// - `{{variable}}` interpolation
 ///
-/// JavaScript rules (`@js:`, `<js>`) are not supported and reported as warnings.
+/// Basic JavaScript transforms run in an isolated, resource-limited interpreter.
 public struct RuleEngine {
     public var variables: [String: String]
     public var onWarning: ((String) -> Void)?
+    let scriptBudget = JavaScriptRuleBudget()
 
     public init(variables: [String: String] = [:], onWarning: ((String) -> Void)? = nil) {
         self.variables = variables
@@ -73,6 +78,7 @@ public struct RuleEngine {
 
     /// All nodes matched by a list rule (book list, chapter list, ...).
     public func scopes(for rule: String, in scope: RuleScope) -> [RuleScope] {
+        if let scripted = javascriptScopes(rule, in: scope, list: true) { return scripted }
         let (base, _, _) = splitPostProcessing(rule)
 
         // A list rule may carry an exclusion suffix such as `!0` (drop the
@@ -146,6 +152,9 @@ public struct RuleEngine {
 
     /// Every string produced by a rule.
     public func values(_ rule: String, in scope: RuleScope) -> [String] {
+        if let scripted = javascriptScopes(rule, in: scope, list: false) {
+            return scripted.map(scriptText).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        }
         let (base, regex, replacement) = splitPostProcessing(rule)
 
         // legado: `a||b` tries a, then b; `a&&b` concatenates both.
@@ -270,10 +279,6 @@ public struct RuleEngine {
         }
         if rule.hasPrefix("@jsonpath:") {
             return selectJSON(String(rule.dropFirst(10)), in: scope)
-        }
-        if rule.hasPrefix("@js:") || rule.contains("<js>") || rule.contains("@js<") {
-            onWarning?("暂不支持 JavaScript 规则：\(rule.prefix(60))")
-            return []
         }
         if rule.hasPrefix(":") {
             return selectRegex(String(rule.dropFirst()), in: scope)
@@ -435,10 +440,6 @@ public struct RuleEngine {
         var text = rule.trimmingCharacters(in: .whitespacesAndNewlines)
         if text.isEmpty { return ([], nil) }
 
-        if text.hasPrefix("@js:") || text.contains("<js>") || text.contains("@js<") {
-            onWarning?("暂不支持 JavaScript 规则：\(text.prefix(60))")
-            return ([], nil)
-        }
         if text.hasPrefix("@css:") {
             text = String(text.dropFirst(5))
         } else if text.hasPrefix("@XPath:") || text.hasPrefix("@xpath:") {

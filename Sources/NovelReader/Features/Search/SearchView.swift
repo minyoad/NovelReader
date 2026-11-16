@@ -267,7 +267,7 @@ struct SearchView: View {
     private func emptyResultMessage(failed: [String], skipped: [String]) -> String {
         var parts: [String] = []
         if !skipped.isEmpty {
-            parts.append("\(skipped.joined(separator: "、")) 的搜索规则是纯 JavaScript，本应用无法执行。")
+            parts.append("\(skipped.joined(separator: "、")) 的搜索规则依赖尚未支持的 JS 能力。")
         }
         if !failed.isEmpty {
             parts.append("这些书源搜索失败：\(failed.joined(separator: "、"))。")
@@ -304,7 +304,7 @@ struct SearchView: View {
                     // Shown with the results, not only when the search comes up
                     // empty: this is why one of the sources returned nothing, and
                     // it stays true for every future search.
-                    Text("\(skipped.joined(separator: "、")) 的搜索规则是纯 JavaScript，本应用无法执行，已在「书源」里标出。")
+                    Text("\(skipped.joined(separator: "、")) 的搜索规则依赖尚未支持的 JS 能力，已在「书源」里标出。")
                         .font(.caption2)
                 }
             }

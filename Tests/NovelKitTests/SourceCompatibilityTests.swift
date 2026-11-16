@@ -33,7 +33,7 @@ final class SourceCompatibilityTests: XCTestCase {
     // MARK: - Clean sources
 
     func testSourceWithoutJavaScriptIsSupported() {
-        let compatibility = source().compatibility
+        let compatibility = source().compatibilityWithoutRuntime
         XCTAssertEqual(compatibility.level, .supported)
         XCTAssertFalse(compatibility.hasJavaScript)
         XCTAssertTrue(compatibility.roles.isEmpty)
@@ -45,7 +45,7 @@ final class SourceCompatibilityTests: XCTestCase {
         // legado actually uses start one.
         var source = self.source()
         source.content.replaceRegex = "<js>广告@@"
-        XCTAssertEqual(source.compatibility.level, .supported)
+        XCTAssertEqual(source.compatibilityWithoutRuntime.level, .supported)
     }
 
     // MARK: - Degraded: JS is skipped, but something still works
@@ -55,7 +55,7 @@ final class SourceCompatibilityTests: XCTestCase {
         // the post-processing is lost. The engine then falls back to guessing a
         // body element, so the book reads.
         let source = self.source(content: "article@html@js:java.t2s(result)")
-        let compatibility = source.compatibility
+        let compatibility = source.compatibilityWithoutRuntime
         XCTAssertEqual(compatibility.level, .degraded)
         XCTAssertEqual(compatibility.roles, ["正文"])
         XCTAssertTrue(compatibility.blockingRoles.isEmpty)
@@ -64,7 +64,7 @@ final class SourceCompatibilityTests: XCTestCase {
     func testJavaScriptOnlyTOCURLOnlyCostsTheTOCShortcut() {
         // A missing TOC URL falls back to the detail page, which is what many
         // sites need anyway.
-        let compatibility = self.source(tocURL: "<js> var id = 1; '/read/' + id; </js>").compatibility
+        let compatibility = self.source(tocURL: "<js> var id = 1; '/read/' + id; </js>").compatibilityWithoutRuntime
         XCTAssertEqual(compatibility.level, .degraded)
         XCTAssertEqual(compatibility.roles, ["目录地址"])
         XCTAssertTrue(compatibility.blockingRoles.isEmpty)
@@ -74,7 +74,7 @@ final class SourceCompatibilityTests: XCTestCase {
         let compatibility = self.source(
             intro: "class.intro@text<js> result.replace(/^/, '    ') </js>",
             cover: "<js> 'https://example.com/nocover.jpg' </js>"
-        ).compatibility
+        ).compatibilityWithoutRuntime
         XCTAssertEqual(compatibility.level, .degraded)
         XCTAssertEqual(Set(compatibility.roles), ["简介", "封面"])
         XCTAssertTrue(compatibility.blockingRoles.isEmpty)
@@ -93,7 +93,7 @@ final class SourceCompatibilityTests: XCTestCase {
         lis;
         </js>
         """)
-        let compatibility = source.compatibility
+        let compatibility = source.compatibilityWithoutRuntime
         XCTAssertEqual(compatibility.level, .unreadable)
         XCTAssertEqual(compatibility.blockingRoles, ["目录"])
     }
@@ -101,14 +101,14 @@ final class SourceCompatibilityTests: XCTestCase {
     func testBareAppendMarkerIsNotASelector() {
         // legado's `+` means "append to the previous value". On its own it
         // selects nothing, so a `+<js>...` chapter list is JS-only too.
-        let compatibility = self.source(tocChapterList: "+<js> var a; a = 1; </js>").compatibility
+        let compatibility = self.source(tocChapterList: "+<js> var a; a = 1; </js>").compatibilityWithoutRuntime
         XCTAssertEqual(compatibility.level, .unreadable)
         XCTAssertEqual(compatibility.blockingRoles, ["目录"])
     }
 
     func testJavaScriptOnlySearchListMakesTheSourceUnreadable() {
         // Nothing matches, so the source never produces a result to tap.
-        let compatibility = self.source(searchBookList: "<js> return getElements(); </js>").compatibility
+        let compatibility = self.source(searchBookList: "<js> return getElements(); </js>").compatibilityWithoutRuntime
         XCTAssertEqual(compatibility.level, .unreadable)
         XCTAssertEqual(compatibility.blockingRoles, ["搜索列表"])
     }
@@ -117,7 +117,7 @@ final class SourceCompatibilityTests: XCTestCase {
         // One blocking failure is enough, and the level must say so even when
         // other rules are merely degraded.
         let source = self.source(tocChapterList: "<js> 1 </js>", content: "article@html@js:x")
-        let compatibility = source.compatibility
+        let compatibility = source.compatibilityWithoutRuntime
         XCTAssertEqual(compatibility.level, .unreadable)
         XCTAssertEqual(compatibility.blockingRoles, ["目录"])
         XCTAssertTrue(compatibility.roles.contains("正文"))
@@ -126,18 +126,18 @@ final class SourceCompatibilityTests: XCTestCase {
     // MARK: - What the JavaScript would need
 
     func testDetectsDOMPandNetworkDependencies() {
-        let dom = self.source(content: "@js: org.jsoup.Jsoup.parse(result).text()").compatibility
+        let dom = self.source(content: "@js: org.jsoup.Jsoup.parse(result).text()").compatibilityWithoutRuntime
         XCTAssertTrue(dom.usesDOM)
         XCTAssertFalse(dom.usesNetwork)
 
-        let network = self.source(content: "@js: java.ajax(baseUrl)").compatibility
+        let network = self.source(content: "@js: java.ajax(baseUrl)").compatibilityWithoutRuntime
         XCTAssertFalse(network.usesDOM)
         XCTAssertTrue(network.usesNetwork)
 
-        let state = self.source(content: "@js: java.put('id', 1)").compatibility
+        let state = self.source(content: "@js: java.put('id', 1)").compatibilityWithoutRuntime
         XCTAssertTrue(state.usesNetwork)
 
-        let plain = self.source(content: "article@html@js: java.t2s(result)").compatibility
+        let plain = self.source(content: "article@html@js: java.t2s(result)").compatibilityWithoutRuntime
         XCTAssertFalse(plain.usesDOM)
         XCTAssertFalse(plain.usesNetwork)
     }
@@ -162,6 +162,12 @@ final class SourceCompatibilityTests: XCTestCase {
          "ruleToc":{"chapterList":"<js>org.jsoup.Jsoup.parse(result)</js>"},
          "bookSourceComment":"需要 js"}
         """
-        XCTAssertEqual(source.compatibility.level, .supported)
+        XCTAssertEqual(source.compatibilityWithoutRuntime.level, .supported)
+    }
+}
+
+private extension BookSource {
+    var compatibilityWithoutRuntime: SourceCompatibility {
+        SourceCompatibility.analyze(self, supportsJavaScript: false)
     }
 }

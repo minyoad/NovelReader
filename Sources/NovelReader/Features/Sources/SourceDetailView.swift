@@ -68,9 +68,7 @@ struct SourceDetailView: View {
                 LabeledContent("发现页规则", value: source.openableExploreCategories.isEmpty ? "未配置可检测页面" : "已配置")
                 LabeledContent("兼容情况", value: compatibilityTitle(source))
                 if source.compatibility.hasJavaScript {
-                    Text(source.compatibility.level == .unreadable
-                         ? "阅读所需的部分规则依赖 JavaScript，当前应用无法执行，建议选择其他书源。"
-                         : "部分规则依赖 JavaScript，相关字段可能缺失；规则兼容情况不能代替实际阅读检测。")
+                    Text(source.compatibility.javaScriptNote ?? "")
                         .font(.footnote).foregroundStyle(.secondary)
                 }
                 Button {
@@ -139,7 +137,7 @@ struct SourceDetailView: View {
 
     private func compatibilityTitle(_ source: BookSource) -> String {
         switch source.compatibility.level {
-        case .supported: return "规则受支持"
+        case .supported: return source.compatibility.hasJavaScript ? "支持基础 JS" : "规则受支持"
         case .degraded: return "部分功能受限"
         case .unreadable: return "阅读规则不兼容"
         }

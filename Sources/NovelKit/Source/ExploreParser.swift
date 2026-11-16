@@ -81,21 +81,11 @@ public struct ExploreCategory: Identifiable, Hashable, Sendable {
         return rule?["bookList"]?.stringValue ?? ""
     }
 
-    /// Whether a selector needs JavaScript to produce anything.
-    ///
-    /// Legado lets a source compute its list with `@js:` — 🎉搜狗阅读 ships a
-    /// fully obfuscated script there, appended to a plain selector as
-    /// `.list li@js:...`. The engine cannot run either form, so the category
-    /// would always come back empty; offering such a tab is the exact failure
-    /// the reader complains about.
-    ///
-    /// A rule that merely *mentions* `@js:` in a string literal is rare enough
-    /// that treating it as unsupported is the safer side of the trade.
+    /// Basic JS list rules can run; only missing runtime/host capabilities or
+    /// malformed script syntax should hide a category before an actual probe.
     public static func isUnsupported(_ rule: String) -> Bool {
         let trimmed = rule.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.contains("@js:")
-            || trimmed.contains("<js>")
-            || trimmed.contains("@js<")
+        return JavaScriptRuleSyntax.requiresUnavailableRuntime(trimmed)
     }
 }
 

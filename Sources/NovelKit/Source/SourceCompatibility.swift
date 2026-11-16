@@ -1,38 +1,19 @@
 import Foundation
 
-/// Whether a source's rules can actually be executed by this build.
-///
-/// The rule engine implements the declarative half of legado — CSS, XPath,
-/// JSONPath, `##` replacements — and skips JavaScript rules. Skipping is not
-/// equally harmful everywhere:
-///
-/// * `class.cover@img@src<js> ...` loses a transformation on something
-///   cosmetic. The book still reads.
-/// * `<js> ...` as the *whole* chapter-list rule loses the selector too, so
-///   there is nothing left to match and the source cannot produce a single
-///   chapter.
-///
-/// Before this existed the difference was invisible until a book failed to
-/// open, and the error said "书源规则可能已失效" — which is wrong and sends the
-/// user looking for a new source instead of a different one. Importing showed a
-/// warning, but it scrolled away with the alert.
-///
-/// The analysis is derived from the parsed rules, never from `originalJSON`:
-/// the raw JSON of every legado source mentions JS somewhere in its comments and
-/// metadata, and treating that as a problem would mark all 55 sources.
+/// Capability hints derived from the executable rule fields, not raw metadata.
+/// Basic JS runs in the isolated interpreter. Host APIs and rule locations not
+/// wired into that interpreter remain restricted; this is not a network health
+/// verdict and cannot statically prove that an arbitrary script will succeed.
 public struct SourceCompatibility: Equatable, Sendable {
 
-    /// How much of the source still works without JavaScript.
+    /// How much of the source the available rule runtimes can execute.
     public enum Level: Int, Comparable, Sendable {
-        /// No JavaScript in any rule.
+        /// Declarative rules and/or basic JS with no known missing capabilities.
         case supported = 0
-        /// JavaScript is skipped, but every rule keeps a selector that still
-        /// produces something. Reading works; some field may be plainer than
-        /// the site intended (a cover URL missing, a translated body left in
-        /// traditional characters).
+        /// Some rule slots require unavailable capabilities. Critical selectors
+        /// remain, but actual readability still needs to be tested.
         case degraded = 1
-        /// A rule the reader cannot do without is JavaScript-only, so no amount
-        /// of fallback gets a chapter out of this source.
+        /// A critical rule has no selector and requires an unavailable capability.
         case unreadable = 2
 
         public static func < (lhs: Level, rhs: Level) -> Bool {
@@ -41,11 +22,9 @@ public struct SourceCompatibility: Equatable, Sendable {
     }
 
     public var level: Level
-    /// Roles whose JavaScript is skipped, in the order a reader meets them.
-    /// Empty when `level == .supported`.
+    /// All roles containing JS, including supported JS. Empty for declarative sources.
     public var roles: [String]
-    /// The subset of `roles` that has no selector left once the JavaScript is
-    /// removed — the ones that actually break something.
+    /// Critical roles with unavailable capabilities and no declarative selector.
     public var blockingRoles: [String]
     /// Whether any rule calls into `org.jsoup`, which needs a DOM bridge.
     public var usesDOM: Bool
@@ -53,7 +32,21 @@ public struct SourceCompatibility: Equatable, Sendable {
     /// a second request or cross-request state.
     public var usesNetwork: Bool
 
-    public var hasJavaScript: Bool { level != .supported }
+    /// JS presence and compatibility are separate: supported JS is still JS.
+    public var hasJavaScript: Bool { !roles.isEmpty }
+    public var unsupportedRoles: [String] = []
+    public var unsupportedFeatures: [String] = []
+
+    public var javaScriptNote: String? {
+        guard hasJavaScript else { return nil }
+        if unsupportedRoles.isEmpty {
+            return "基础 JS 可执行；书源是否可用仍需实际检测。"
+        }
+        let features = unsupportedFeatures.joined(separator: "、")
+        return "\(unsupportedRoles.joined(separator: "、"))的 JS 尚不兼容"
+            + (features.isEmpty ? "。" : "（\(features)）。")
+            + "基础字符串、数组与 JSON 处理已支持。"
+    }
 
     public static let clean = SourceCompatibility(
         level: .supported,
@@ -75,9 +68,10 @@ public struct SourceCompatibility: Equatable, Sendable {
         /// A blocking slot is one that has no fallback in the engine: if its
         /// selector disappears, the source yields nothing to read.
         let blocking: Bool
+        var executableHere = true
     }
 
-    public static func analyze(_ source: BookSource) -> SourceCompatibility {
+    public static func analyze(_ source: BookSource, supportsJavaScript: Bool = JavaScriptRuntime.isAvailable) -> SourceCompatibility {
         let slots: [Slot] = [
             // Blocking: the engine has no fallback for an empty chapter list or
             // an empty search result list, so these fail outright.
@@ -99,18 +93,49 @@ public struct SourceCompatibility: Equatable, Sendable {
             Slot(role: "封面", rule: source.search.coverURL, blocking: false),
             Slot(role: "字数", rule: source.bookInfo.wordCount, blocking: false),
             Slot(role: "最新章节", rule: source.bookInfo.lastChapter, blocking: false),
-            Slot(role: "发现页", rule: source.exploreURL, blocking: false),
+            Slot(role: "发现页", rule: source.exploreURL, blocking: false, executableHere: false),
+            Slot(role: "搜索地址", rule: source.searchURL, blocking: true),
+            Slot(role: "章节名", rule: source.toc.chapterName, blocking: true),
+            Slot(role: "章节链接", rule: source.toc.chapterURL, blocking: true),
+            Slot(role: "发现列表", rule: source.explore.bookList, blocking: false),
+            Slot(role: "发现书名", rule: source.explore.name, blocking: false),
+            Slot(role: "发现链接", rule: source.explore.bookURL, blocking: false),
+            Slot(role: "作者", rule: source.search.author, blocking: false),
+            Slot(role: "详情书名", rule: source.bookInfo.name, blocking: false),
+            Slot(role: "详情作者", rule: source.bookInfo.author, blocking: false),
+            Slot(role: "搜索简介", rule: source.search.intro, blocking: false),
+            Slot(role: "搜索分类", rule: source.search.kind, blocking: false),
+            Slot(role: "详情分类", rule: source.bookInfo.kind, blocking: false),
+            Slot(role: "搜索最新章节", rule: source.search.lastChapter, blocking: false),
+            Slot(role: "搜索更新时间", rule: source.search.updateTime, blocking: false),
+            Slot(role: "详情更新时间", rule: source.bookInfo.updateTime, blocking: false),
+            Slot(role: "搜索字数", rule: source.search.wordCount, blocking: false),
+            Slot(role: "付费章节判断", rule: source.toc.isVIP, blocking: false),
+            Slot(role: "分卷判断", rule: source.toc.isVolume, blocking: false),
+            Slot(role: "请求头脚本", rule: source.header, blocking: false, executableHere: false),
         ]
 
         var roles: [String] = []
         var blockingRoles: [String] = []
         var usesDOM = false
         var usesNetwork = false
+        var unsupportedRoles: [String] = []
+        var unsupportedFeatures = Set<String>()
 
         for slot in slots {
             guard let inspection = inspect(slot.rule) else { continue }
             if !roles.contains(slot.role) { roles.append(slot.role) }
-            if slot.blocking && !inspection.keepsSelector {
+            let hosts = JavaScriptRuleSyntax.unsupportedHosts(in: slot.rule)
+            let validSyntax = (try? JavaScriptRuleSyntax.parse(slot.rule)) != nil
+            let supported = supportsJavaScript && slot.executableHere && hosts.isEmpty && validSyntax
+            if !supported {
+                if !unsupportedRoles.contains(slot.role) { unsupportedRoles.append(slot.role) }
+                unsupportedFeatures.formUnion(hosts)
+                if !supportsJavaScript { unsupportedFeatures.insert("当前平台无 JS 引擎") }
+                if !slot.executableHere { unsupportedFeatures.insert("此处脚本尚未接入") }
+                if !validSyntax { unsupportedFeatures.insert("规则格式") }
+            }
+            if !supported && slot.blocking && !inspection.keepsSelector {
                 if !blockingRoles.contains(slot.role) { blockingRoles.append(slot.role) }
             }
             if inspection.usesDOM { usesDOM = true }
@@ -124,11 +149,13 @@ public struct SourceCompatibility: Equatable, Sendable {
         }
 
         return SourceCompatibility(
-            level: blockingRoles.isEmpty ? .degraded : .unreadable,
+            level: unsupportedRoles.isEmpty ? .supported : (blockingRoles.isEmpty ? .degraded : .unreadable),
             roles: roles,
             blockingRoles: blockingRoles,
             usesDOM: usesDOM,
-            usesNetwork: usesNetwork
+            usesNetwork: usesNetwork,
+            unsupportedRoles: unsupportedRoles,
+            unsupportedFeatures: unsupportedFeatures.sorted()
         )
     }
 
@@ -144,6 +171,9 @@ public struct SourceCompatibility: Equatable, Sendable {
     /// Returns `nil` when the rule contains no JavaScript at all.
     private static func inspect(_ rule: String) -> Inspection? {
         guard let cut = javascriptStart(in: rule) else { return nil }
+        do {
+            if try JavaScriptRuleSyntax.parse(rule) == nil { return nil }
+        } catch { /* A malformed script still needs a compatibility warning. */ }
 
         let selector = rule[rule.startIndex..<cut]
         let script = rule[cut...]

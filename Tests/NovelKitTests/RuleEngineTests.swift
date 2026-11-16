@@ -91,7 +91,7 @@ final class RuleEngineTests: XCTestCase {
     func testUnsupportedJSRuleWarns() {
         var warnings: [String] = []
         let engine = RuleEngine(onWarning: { warnings.append($0) })
-        XCTAssertNil(engine.value("@js:result", in: scope))
+        XCTAssertNil(engine.value("@js:java.getString(result)", in: scope))
         XCTAssertEqual(warnings.count, 1)
     }
 

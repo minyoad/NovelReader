@@ -36,7 +36,18 @@ public struct SourceEngine {
     public func search(keyword: String, source: BookSource) async throws -> [SearchResult] {
         guard source.canSearch else { throw SourceError.unsupported("书源「\(source.name)」没有配置搜索规则") }
 
-        let (urlString, options) = splitURLOptions(source.searchURL)
+        let searchTemplate: String
+        if try JavaScriptRuleSyntax.parse(source.searchURL) != nil {
+            let context = RuleScope(payload: .text(source.baseURL), baseURL: URL(string: source.baseURL))
+            guard let generated = RuleEngine(variables: ["key": keyword, "page": "1"], onWarning: onWarning)
+                .value(source.searchURL, in: context) else {
+                throw SourceError.unsupported("搜索地址的 JS 规则未返回链接，请检查规则兼容提示")
+            }
+            searchTemplate = generated
+        } else {
+            searchTemplate = source.searchURL
+        }
+        let (urlString, options) = splitURLOptions(searchTemplate)
         let encoded = keyword.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? keyword
         let rawURL = interpolate(urlString, variables: ["key": encoded, "page": "1"])
         // Sources often use a relative `searchUrl` (`/search.php?q=`) plus an
@@ -53,7 +64,7 @@ public struct SourceEngine {
         if items.isEmpty {
             // A JS-only search list never matches, whatever the site returns.
             if source.compatibility.blockingRoles.contains("搜索列表") {
-                throw SourceError.noResults("这个书源的搜索规则是纯 JavaScript，本应用无法执行，请换一个书源")
+                throw SourceError.noResults("这个书源的搜索规则依赖尚未支持的 JS 能力，请查看书源详情或换源")
             }
             // Fall back to the explore rule when it shares the same shape.
             if source.explore.bookList.isEmpty {
@@ -265,7 +276,7 @@ public struct SourceEngine {
                 referer: book.detailURL
             )
             let root = try scope(for: page, source: source)
-            let engine = makeEngine(variables: ["key": book.name], baseURL: page.finalURL)
+            let engine = makeEngine(variables: ["key": book.name, "page": String(visited.count)], baseURL: page.finalURL)
 
             let items = engine.scopes(for: source.toc.chapterList, in: root)
             if items.isEmpty && chapters.isEmpty {
@@ -274,7 +285,7 @@ public struct SourceEngine {
                 // site returns, so "规则可能已失效" would send the user looking
                 // for a page change that never happened.
                 if source.compatibility.blockingRoles.contains("目录") {
-                    throw SourceError.notFound("这个书源的目录规则是纯 JavaScript，本应用无法执行，请换一个书源")
+                    throw SourceError.notFound("这个书源的目录规则依赖尚未支持的 JS 能力，请查看书源详情或换源")
                 }
                 throw SourceError.notFound("没有解析到目录，书源规则可能已失效")
             }
@@ -312,9 +323,12 @@ public struct SourceEngine {
                 referer: book.detailURL
             )
             let root = try scope(for: page, source: source)
-            let engine = makeEngine(variables: ["key": book.name], baseURL: page.finalURL)
+            let engine = makeEngine(variables: ["key": book.name, "page": String(visited.count)], baseURL: page.finalURL)
 
             var html = engine.values(source.content.content, in: root).joined(separator: "\n")
+            if html.isEmpty, JavaScriptRuleSyntax.containsScript(source.content.content) {
+                throw SourceError.emptyContent("正文 JS 规则未返回内容，请检查规则错误或书源兼容提示")
+            }
             if html.isEmpty {
                 html = fallbackContentHTML(from: root) ?? ""
             }
@@ -387,7 +401,7 @@ public struct SourceEngine {
         if trimmed.hasPrefix("{") || trimmed.hasPrefix("[") {
             if let data = trimmed.data(using: .utf8),
                let json = try? JSONDecoder().decode(JSONValue.self, from: data) {
-                return RuleScope(payload: .json(json), baseURL: page.finalURL)
+                return RuleScope(payload: .json(json), baseURL: page.finalURL, sourceText: page.text)
             }
         }
         return .html(page.text, baseURL: page.finalURL)

@@ -22,7 +22,14 @@ let package = Package(
     targets: [
         .target(
             name: "NovelKit",
-            dependencies: ["SwiftSoup"]
+            dependencies: ["SwiftSoup", "CNovelJavaScript"]
+        ),
+        .target(
+            name: "CNovelJavaScript",
+            exclude: ["README.md", "vendor/LICENSE"],
+            publicHeadersPath: "include",
+            cSettings: [.define("_GNU_SOURCE"), .define("NDEBUG")],
+            linkerSettings: [.linkedLibrary("m")]
         ),
         .target(
             name: "NovelReader",
