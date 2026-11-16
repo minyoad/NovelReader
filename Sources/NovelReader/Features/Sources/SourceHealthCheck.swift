@@ -65,35 +65,25 @@ final class SourceHealthCheck: ObservableObject {
         task = Task { [weak self] in
             guard let self, !Task.isCancelled, self.runID == currentRun else { return }
             let coordinator = ExploreProbeCoordinator()
+            // Which source each child task in the group is checking. The group
+            // body runs off the main actor, so the entries themselves are only
+            // touched here, around the awaits.
             await withTaskGroup(of: (UUID, Bool, String?).self) { group in
                 var next = 0
-                func enqueue(_ source: BookSource) {
-                    if let index = self.entries.firstIndex(where: { $0.id == source.id }) {
-                        self.entries[index].status = .checking
-                    }
-                    group.addTask {
-                        let result = await AppModel.probeSource(
-                            source, categories: source.openableExploreCategories,
-                            client: client, coordinator: coordinator
-                        )
-                        return (source.id, result.working != nil, result.sourceError?.localizedDescription)
-                    }
-                }
                 for _ in 0..<min(6, queue.count) {
-                    enqueue(queue[next])
+                    markChecking(queue[next].id)
+                    group.addTask { await self.probe(queue[next], client: client, coordinator: coordinator) }
                     next += 1
                 }
-                for await (id, works, error) in group {
+                for await result in group {
                     guard !Task.isCancelled, self.runID == currentRun else {
                         group.cancelAll()
                         break
                     }
-                    if let index = self.entries.firstIndex(where: { $0.id == id }) {
-                        self.entries[index].status = works ? .working : .failed
-                        self.entries[index].note = works ? nil : (error ?? "当前未能打开发现页，搜索和正文阅读可能仍然可用。")
-                    }
+                    record(result)
                     if next < queue.count {
-                        enqueue(queue[next])
+                        markChecking(queue[next].id)
+                        group.addTask { await self.probe(queue[next], client: client, coordinator: coordinator) }
                         next += 1
                     }
                 }
@@ -102,6 +92,32 @@ final class SourceHealthCheck: ObservableObject {
             self.isRunning = false
             self.task = nil
         }
+    }
+
+    private func markChecking(_ id: UUID) {
+        if let index = entries.firstIndex(where: { $0.id == id }) {
+            entries[index].status = .checking
+        }
+    }
+
+    private func record(_ result: (UUID, Bool, String?)) {
+        let (id, works, error) = result
+        if let index = entries.firstIndex(where: { $0.id == id }) {
+            entries[index].status = works ? .working : .failed
+            entries[index].note = works ? nil : (error ?? "当前未能打开发现页，搜索和正文阅读可能仍然可用。")
+        }
+    }
+
+    private func probe(
+        _ source: BookSource,
+        client: HTTPClient,
+        coordinator: ExploreProbeCoordinator
+    ) async -> (UUID, Bool, String?) {
+        let result = await AppModel.probeSource(
+            source, categories: source.openableExploreCategories,
+            client: client, coordinator: coordinator
+        )
+        return (source.id, result.working != nil, result.sourceError?.localizedDescription)
     }
 }
 

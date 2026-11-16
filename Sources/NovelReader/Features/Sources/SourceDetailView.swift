@@ -63,7 +63,7 @@ struct SourceDetailView: View {
                 Text("启用表示参与找书和发现，不代表已通过可用性检测。")
             }
 
-            Section("规则与检测") {
+            Section {
                 LabeledContent("搜索规则", value: source.canSearch ? "已配置" : "未配置")
                 LabeledContent("发现页规则", value: source.openableExploreCategories.isEmpty ? "未配置可检测页面" : "已配置")
                 LabeledContent("兼容情况", value: compatibilityTitle(source))
@@ -90,7 +90,6 @@ struct SourceDetailView: View {
             } footer: {
                 Text("检测仅验证发现页；发现页异常时，搜索和正文阅读可能仍然可用。")
             }
-
             Section("关联书籍（\(books.count)）") {
                 if books.isEmpty {
                     Text("书架上还没有使用这个书源的书。")
