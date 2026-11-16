@@ -8,12 +8,19 @@ import UIKit
 struct SourcesView: View {
     @EnvironmentObject private var app: AppModel
 
+    @State private var showAdd = false
+    @State private var pendingAddDestination: SourceAddDestination?
+    @State private var showAddSubscription = false
+    @State private var viewingSource: BookSource?
+    @StateObject private var healthCheck = SourceHealthCheck()
+    @State private var showHealthResults = false
     @State private var showImport = false
     @State private var showURLImport = false
     @State private var showCollections = false
     @State private var editingSource: BookSource?
     @State private var lastWarnings: [String] = []
     @State private var showWarnings = false
+    @State private var hasPendingImportReport = false
     @State private var pendingDelete: BookSource?
     /// What the reader typed into the source list's search field.
     @State private var query = ""
@@ -116,7 +123,7 @@ struct SourcesView: View {
     private static let foldingThreshold = 6
 
     private func isExpanded(_ group: String) -> Bool {
-        expandedGroups.contains(group)
+        !trimmedQuery.isEmpty || expandedGroups.contains(group)
     }
 
     /// Folds the big groups the first time the list is built, and again when
@@ -127,7 +134,7 @@ struct SourcesView: View {
     /// open/closed state would leave "已停用" showing four rows and a thousand
     /// closed ones.
     private func prepareGroups() {
-        guard !groupsPrepared else { return }
+        guard !groupsPrepared, trimmedQuery.isEmpty else { return }
         groupsPrepared = true
         let groups = grouped
         expandedGroups = Set(groups.filter { $0.1.count <= Self.foldingThreshold }.map(\.0))
@@ -179,7 +186,7 @@ struct SourcesView: View {
                             toggleSelection(source)
                             return
                         }
-                        editingSource = source
+                        viewingSource = source
                     },
                     onSelect: {
                         selection = [source.id]
@@ -227,6 +234,9 @@ struct SourcesView: View {
     var body: some View {
         NavigationStack {
             List {
+                if !isBatchSelecting {
+                    managementSection
+                }
                 if app.sources.isEmpty {
                     Section {
                         VStack(alignment: .leading, spacing: 8) {
@@ -244,7 +254,7 @@ struct SourcesView: View {
                         HStack(spacing: 8) {
                             Image(systemName: "magnifyingglass")
                                 .foregroundStyle(.secondary)
-                            TextField("搜索书名、网址或分组", text: $query)
+                            TextField("搜索书源名称、网址或分组", text: $query)
                                 .textInputAutocapitalization(.never)
                                 .autocorrectionDisabled()
                                 .submitLabel(.search)
@@ -268,7 +278,11 @@ struct SourcesView: View {
                         .pickerStyle(.segmented)
                         .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
                     } footer: {
-                        Text("分组超过 \(Self.foldingThreshold) 个书源时默认折叠，点分组名展开或收起。长按书源可以置顶，置顶的会排在最上面。")
+                        if !trimmedQuery.isEmpty {
+                            Text("找到 \(visibleSources.count) 个书源，搜索结果已全部展开。")
+                        } else {
+                            Text("点分组名展开或收起；长按书源可以置顶。")
+                        }
                     }
                 }
 
@@ -287,6 +301,7 @@ struct SourcesView: View {
                         }
                     } header: {
                         Button {
+                            guard trimmedQuery.isEmpty else { return }
                             withAnimation(.snappy(duration: 0.22)) {
                                 if isExpanded(group) {
                                     expandedGroups.remove(group)
@@ -310,6 +325,7 @@ struct SourcesView: View {
                             .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
+                        .accessibilityHint(trimmedQuery.isEmpty ? "展开或收起分组" : "搜索期间显示全部匹配书源")
                     }
                 }
 
@@ -322,87 +338,22 @@ struct SourcesView: View {
                              : "切到「全部」，或先启用一些书源。")
                     }
                 }
-
-                Section {
-                    Button {
-                        showCollections = true
-                    } label: {
-                        Label("浏览在线书源合集", systemImage: "square.grid.2x2")
-                    }
-                    NavigationLink {
-                        SourceSubscriptionsView()
-                    } label: {
-                        Label {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("书源订阅")
-                                let count = app.subscriptions.count
-                                if count > 0 {
-                                    Text("\(count) 个订阅，启动和退到后台时自动更新")
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
-                                }
-                            }
-                        } icon: {
-                            Image(systemName: "dot.radiowaves.left.and.right")
-                        }
-                    }
-                    Button {
-                        showImport = true
-                    } label: {
-                        Label("粘贴书源 JSON", systemImage: "doc.on.clipboard")
-                    }
-                    Button {
-                        showURLImport = true
-                    } label: {
-                        Label("从链接导入", systemImage: "link")
-                    }
-                    Button {
-                        useClipboard()
-                    } label: {
-                        Label("直接读取剪贴板", systemImage: "clipboard")
-                    }
-                    Button {
-                        _ = app.importSources(fromJSON: BuiltinContent.exampleLegadoJSON)
-                        app.showBanner("已导入示例书源（默认关闭）", isError: false)
-                    } label: {
-                        Label("查看 / 导入示例书源", systemImage: "book.pages")
-                    }
-                } header: {
-                    Text("导入")
-                } footer: {
-                    Text("支持 legado 规则子集：CSS、XPath、JSONPath、@@ 回退、## 正则替换。用到 JavaScript 的书源会标出影响范围。")
-                }
-
-                if !app.sources.isEmpty && !isBatchSelecting {
-                    Section {
-                        Button {
-                            checkExploreHealth()
-                        } label: {
-                            if isCheckingHealth {
-                                HStack(spacing: 8) {
-                                    ProgressView().controlSize(.small)
-                                    Text("正在检测发现页…")
-                                }
-                            } else {
-                                Label("检测发现页", systemImage: "waveform.path.ecg")
-                            }
-                        }
-                        .disabled(isCheckingHealth)
-                    } footer: {
-                        Text("逐个打开书源的发现页：能打开的取消选中，打不开的会被选中，之后由你决定停用还是删除。发现页打不开不代表书源不能用——搜索和阅读可能是好的，所以默认建议先停用。")
-                    }
-                }
             }
             .onChange(of: filter) { _, _ in
                 groupsPrepared = false
+                prepareGroups()
             }
             .onChange(of: app.sources.count) { _, _ in
                 // A new import adds groups; fold the big ones rather than
                 // dropping a hundred new rows onto the reader at once.
                 groupsPrepared = false
+                prepareGroups()
             }
             .onChange(of: grouped.count) { _, _ in
                 prepareGroups()
+            }
+            .onChange(of: trimmedQuery) { _, query in
+                if query.isEmpty { prepareGroups() }
             }
             .onAppear {
                 prepareGroups()
@@ -447,10 +398,11 @@ struct SourcesView: View {
                 } else {
                     ToolbarItem(placement: .topBarTrailing) {
                         Button {
-                            showImport = true
+                            showAdd = true
                         } label: {
                             Image(systemName: "plus")
                         }
+                        .accessibilityLabel("添加书源")
                     }
                     ToolbarItem(placement: .topBarTrailing) {
                         Button {
@@ -469,7 +421,28 @@ struct SourcesView: View {
                     batchActionBar
                 }
             }
-            .sheet(isPresented: $showImport) {
+            .sheet(isPresented: $showAdd, onDismiss: openAddDestination) {
+                SourceAddSheet { destination in
+                    pendingAddDestination = destination
+                    showAdd = false
+                }
+            }
+            .sheet(isPresented: $showAddSubscription) {
+                AddSubscriptionSheet()
+            }
+            .sheet(item: $viewingSource) { source in
+                NavigationStack {
+                    SourceDetailView(sourceID: source.id)
+                }
+            }
+            .sheet(isPresented: $showHealthResults) {
+                SourceHealthResultsView(check: healthCheck) { ids in
+                    selection = ids.intersection(Set(app.sources.map(\.id)))
+                    isBatchSelecting = !selection.isEmpty
+                    showHealthResults = false
+                }
+            }
+            .sheet(isPresented: $showImport, onDismiss: presentImportReport) {
                 ImportSourcesSheet { text in
                     let result = app.importSources(fromJSON: text)
                     report(result)
@@ -479,7 +452,7 @@ struct SourcesView: View {
             .sheet(isPresented: $showCollections) {
                 SourceCollectionsView()
             }
-            .sheet(isPresented: $showURLImport) {
+            .sheet(isPresented: $showURLImport, onDismiss: presentImportReport) {
                 ImportFromURLSheet { data in
                     let result = app.importSources(from: data)
                     report(result)
@@ -487,7 +460,7 @@ struct SourcesView: View {
                 }
             }
             .sheet(item: $editingSource) { source in
-                SourceEditorView(source: source)
+                NavigationStack { SourceEditorView(source: source) }
             }
             .alert("导入结果", isPresented: $showWarnings) {
                 Button("好", role: .cancel) {}
@@ -510,7 +483,10 @@ struct SourcesView: View {
                 }
                 Button("取消", role: .cancel) { pendingDelete = nil }
             } message: {
-                Text("只会删除书源配置，已加入书架的书不受影响。")
+                let books = pendingDelete.map { app.booksOnShelf(from: [$0.id]) } ?? []
+                Text(books.isEmpty
+                     ? "只会删除书源配置。"
+                     : "书架上的 \(bookSummary(books)) 会保留，但无法通过这个书源更新目录或下载新章节。")
             }
             .confirmationDialog(
                 pendingBatchAction == .delete
@@ -693,7 +669,7 @@ struct SourcesView: View {
         let books = affectedBooks
         switch pendingBatchAction {
         case .delete:
-            let scope = "注意：检测只看过发现页，打不开不代表书源不能用，删除前请确认。"
+            let scope = "删除后将移除书源配置，请确认所选范围。"
             if books.isEmpty {
                 return scope + "\n将移除 \(count) 个书源的配置，它们不再出现在找书和发现页。"
             }
@@ -738,69 +714,57 @@ struct SourcesView: View {
         selection.formUnion(visibleSources.filter { !$0.enabled }.map(\.id))
     }
 
-    // MARK: - Health check
+    // MARK: - Adding and checking sources
 
-    @State private var isCheckingHealth = false
-
-    /// Opens every source's discover page and selects the ones that answered.
-    ///
-    /// Only the discover page is checked — a source whose listing happens to
-    /// break may still search and read perfectly — so this is offered as
-    /// "检测发现页", not as a verdict on whether a source works. Nothing is
-    /// deleted here: the sources that failed are selected so the reader sees
-    /// the count and decides, and 停用 is the first action in the bar.
-    private func checkExploreHealth() {
-        guard !isCheckingHealth else { return }
-        let queue = visibleSources
-        guard !queue.isEmpty else { return }
-        isCheckingHealth = true
-        selection = []
-        isBatchSelecting = true
-        let client = HTTPClient(settings: app.settings.network)
-
-        Task {
-            let coordinator = ExploreProbeCoordinator()
-            var ok: Set<UUID> = []
-            var failed: Set<UUID> = []
-            var done = 0
-
-            await withTaskGroup(of: (BookSource, ExploreCategory?).self) { group in
-                var next = 0
-                func enqueue(_ source: BookSource) {
-                    group.addTask {
-                        let verdict = await AppModel.probeSource(
-                            source,
-                            categories: source.openableExploreCategories,
-                            client: client,
-                            coordinator: coordinator
-                        )
-                        return (source, verdict.working)
-                    }
-                }
-                for _ in 0..<min(6, queue.count) {
-                    enqueue(queue[next])
-                    next += 1
-                }
-                for await (source, working) in group {
-                    done += 1
-                    if working != nil {
-                        ok.insert(source.id)
+    private var managementSection: some View {
+        Section {
+            Button { showAdd = true } label: {
+                Label("添加书源", systemImage: "plus.circle")
+            }
+            NavigationLink {
+                SourceSubscriptionsView()
+            } label: {
+                Label("管理订阅（\(app.subscriptions.count)）", systemImage: "dot.radiowaves.left.and.right")
+            }
+            if !app.sources.isEmpty {
+                Button {
+                    if healthCheck.entries.isEmpty {
+                        checkExploreHealth()
                     } else {
-                        failed.insert(source.id)
+                        showHealthResults = true
                     }
-                    if next < queue.count {
-                        enqueue(queue[next])
-                        next += 1
-                    }
+                } label: {
+                    Label(
+                        healthCheck.isRunning ? "检测中（\(healthCheck.completed)/\(healthCheck.entries.count)）"
+                            : (healthCheck.entries.isEmpty ? "检测发现页" : "查看发现页检测结果"),
+                        systemImage: "waveform.path.ecg"
+                    )
+                }
+                if !healthCheck.entries.isEmpty && !healthCheck.isRunning {
+                    Button("重新检测当前列表") { checkExploreHealth() }
+                        .disabled(visibleSources.isEmpty)
                 }
             }
-
-            selection = failed
-            isCheckingHealth = false
-            batchResultText = "发现页检测完成：\(done) 个书源里 \(ok.count) 个能打开。"
-                + (failed.isEmpty ? "" : "\n已选中 \(failed.count) 个打不开的。它们可能仍能搜索，建议先停用。")
-            showBatchResult = true
         }
+    }
+
+    private func openAddDestination() {
+        guard let destination = pendingAddDestination else { return }
+        pendingAddDestination = nil
+        switch destination {
+        case .collections: showCollections = true
+        case .subscription: showAddSubscription = true
+        case .json: showImport = true
+        case .url: showURLImport = true
+        case .example:
+            report(app.importSources(fromJSON: BuiltinContent.exampleLegadoJSON))
+        }
+    }
+
+    private func checkExploreHealth() {
+        guard !healthCheck.isRunning, !visibleSources.isEmpty else { return }
+        healthCheck.start(sources: visibleSources, client: HTTPClient(settings: app.settings.network))
+        showHealthResults = true
     }
 
     /// Drops the sources whose books are already on the shelf.
@@ -841,8 +805,6 @@ struct SourcesView: View {
     }
 
     private func report(_ result: (added: Int, warnings: [String])) {
-        showImport = false
-        showURLImport = false
         var messages: [String] = []
         if result.added > 0 {
             messages.append("新增 \(result.added) 个书源")
@@ -851,19 +813,19 @@ struct SourcesView: View {
         }
         messages.append(contentsOf: result.warnings)
         lastWarnings = messages
-        showWarnings = true
+        hasPendingImportReport = true
+        if showImport || showURLImport {
+            showImport = false
+            showURLImport = false
+        } else {
+            presentImportReport()
+        }
     }
 
-    private func useClipboard() {
-        #if canImport(UIKit)
-        guard let text = UIPasteboard.general.string, !text.isEmpty else {
-            app.showBanner("剪贴板里没有文本", isError: true)
-            return
-        }
-        report(app.importSources(fromJSON: text))
-        #else
-        app.showBanner("当前平台不支持剪贴板", isError: true)
-        #endif
+    private func presentImportReport() {
+        guard hasPendingImportReport else { return }
+        hasPendingImportReport = false
+        showWarnings = true
     }
 }
 
@@ -878,7 +840,7 @@ private struct SourceRow: View {
     var onToggle: () -> Void
     /// Opens the source's detail screen. Deliberately bound to the text block
     /// rather than the whole row: a row-wide gesture also fires when the switch
-    /// is tapped, which would open the editor on every enable/disable.
+    /// is tapped, which would open the details on every enable/disable.
     var onOpen: () -> Void
     /// Starts batch selection with this row included, from the context menu.
     var onSelect: () -> Void = {}
@@ -1210,17 +1172,14 @@ private struct ImportSourcesSheet: View {
                     .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }
-            .onAppear {
-                if text.isEmpty { paste(silent: true) }
-            }
         }
     }
 
-    private func paste(silent: Bool = false) {
+    private func paste() {
         #if canImport(UIKit)
         if let clipboard = UIPasteboard.general.string, !clipboard.isEmpty {
             text = clipboard
-        } else if !silent {
+        } else {
             error = "剪贴板里没有文本"
         }
         #else
@@ -1316,7 +1275,7 @@ private struct ImportFromURLSheet: View {
 
 // MARK: - Editor
 
-private struct SourceEditorView: View {
+struct SourceEditorView: View {
     @EnvironmentObject private var app: AppModel
     @Environment(\.dismiss) private var dismiss
 

@@ -149,7 +149,7 @@ struct SourceSubscriptionsView: View {
     }
 }
 
-private struct AddSubscriptionSheet: View {
+struct AddSubscriptionSheet: View {
     @EnvironmentObject private var app: AppModel
     @Environment(\.dismiss) private var dismiss
 
