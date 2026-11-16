@@ -211,6 +211,14 @@ final class AppModel: ObservableObject {
         settings = loaded
         client = HTTPClient(settings: loaded.network)
         books = await store.loadBooks()
+        let waiting = await store.loadSyncProgressAdvances()
+        pendingProgressAdvances = Dictionary(waiting.filter { advance in
+            books.contains {
+                $0.id == advance.id && $0.sourceID == advance.remoteBook.sourceID
+                    && $0.progress == advance.remoteBook.progress
+            }
+        }.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        preferredSyncJumpBookID = ReadingRecents.mostRecent(in: books)?.id
         sources = await store.loadSources()
         subscriptions = await store.loadSubscriptions()
         loadExploreAvailability()
@@ -389,6 +397,53 @@ final class AppModel: ObservableObject {
 
     /// Guard against two runs at once (launch and foreground can overlap).
     private var syncInFlight = false
+    @Published private(set) var pendingProgressAdvances: [UUID: SyncProgressAdvance] = [:]
+    @Published private(set) var activeReaderBookID: UUID?
+    @Published private(set) var preferredSyncJumpBookID: UUID?
+    private var readerSessionID: UUID?
+
+    func beginReadingSession(bookID: UUID, sessionID: UUID) {
+        readerSessionID = sessionID
+        activeReaderBookID = bookID
+    }
+
+    func endReadingSession(sessionID: UUID) {
+        guard readerSessionID == sessionID else { return }
+        readerSessionID = nil
+        activeReaderBookID = nil
+    }
+
+    /// Opening a reader while a decision is pending must retain the local
+    /// position, otherwise auto-resume would jump before asking the question.
+    func bookForReading(_ book: Book) -> Book {
+        guard let advance = pendingProgressAdvances[book.id] else { return book }
+        var local = book
+        local.progress = advance.localProgress
+        return local
+    }
+
+    @discardableResult
+    func resolveSyncedProgress(bookID: UUID, useRemote: Bool) -> Book? {
+        guard let advance = pendingProgressAdvances.removeValue(forKey: bookID),
+              let index = books.firstIndex(where: { $0.id == bookID }) else { return nil }
+        if preferredSyncJumpBookID == bookID { preferredSyncJumpBookID = nil }
+        persistPendingSyncProgress()
+        guard books[index].sourceID == advance.remoteBook.sourceID,
+              books[index].detailURL == advance.remoteBook.detailURL else { return nil }
+        books[index].progress = useRemote ? advance.remoteBook.progress : advance.localProgress
+        // Choosing to stay here is intentional, including when re-reading an
+        // earlier chapter; the timestamp rule must respect that choice later.
+        books[index].progress.updatedAt = Date()
+        books[index].lastReadAt = Date()
+        let snapshot = books
+        Task { await store.saveBooks(snapshot) }
+        return books[index]
+    }
+
+    private func persistPendingSyncProgress() {
+        let snapshot = Array(pendingProgressAdvances.values)
+        Task { await store.saveSyncProgressAdvances(snapshot) }
+    }
 
     /// What a manual sync produced. Carries the failure reason so the settings
     /// screen can say why, instead of a button that silently does nothing.
@@ -442,13 +497,55 @@ final class AppModel: ObservableObject {
             store: store,
             deviceID: settings.sync.deviceID
         )
+        let booksBeforeSync = books
+        // Finish an in-memory progress update before the service snapshots disk.
+        await store.saveBooks(booksBeforeSync)
         do {
             let result = try await service.run()
             if result.downloaded {
-                // The merge wrote to disk; reload so the shelf shows it.
-                books = await store.loadBooks()
-                sources = await store.loadSources()
-                subscriptions = await store.loadSubscriptions()
+                var downloadedBooks = await store.loadBooks()
+                let downloadedSources = await store.loadSources()
+                let downloadedSubscriptions = await store.loadSubscriptions()
+                let liveBooks = books
+                // A reader can keep moving while upload is in flight. A newer
+                // local edit must survive the disk reload after sync completes.
+                for local in liveBooks {
+                    guard let before = booksBeforeSync.first(where: { $0.id == local.id }),
+                          local.progress != before.progress,
+                          let index = downloadedBooks.firstIndex(where: { $0.id == local.id }),
+                          (local.progress.updatedAt ?? .distantPast) > (downloadedBooks[index].progress.updatedAt ?? .distantPast)
+                    else { continue }
+                    downloadedBooks[index].progress = local.progress
+                    downloadedBooks[index].lastReadAt = local.lastReadAt
+                }
+                let previousAdvances = pendingProgressAdvances
+                // A later sync or source switch can invalidate a question that
+                // was waiting in the background. Never jump to an obsolete copy.
+                pendingProgressAdvances = pendingProgressAdvances.filter { id, advance in
+                    downloadedBooks.contains {
+                        $0.id == id && $0.sourceID == advance.remoteBook.sourceID
+                            && $0.progress == advance.remoteBook.progress
+                    }
+                }
+                for var advance in result.progressAdvances {
+                    guard let local = liveBooks.first(where: { $0.id == advance.id }),
+                          let adopted = downloadedBooks.first(where: { $0.id == advance.id }),
+                          adopted.progress == advance.remoteBook.progress,
+                          advance.remoteBook.progress.isAhead(of: local.progress) else { continue }
+                    // Preserve the actual local position at completion, not an
+                    // old position from before the network request started.
+                    advance.localProgress = previousAdvances[advance.id]?.localProgress ?? local.progress
+                    pendingProgressAdvances[advance.id] = advance
+                }
+                preferredSyncJumpBookID = activeReaderBookID
+                    ?? ReadingRecents.mostRecent(in: booksBeforeSync)?.id
+                    ?? ReadingRecents.mostRecent(in: downloadedBooks)?.id
+                persistPendingSyncProgress()
+                books = downloadedBooks
+                sources = downloadedSources
+                subscriptions = downloadedSubscriptions
+                let snapshot = books
+                await store.saveBooks(snapshot)
                 // The other device's deletions are now this device's too, so a
                 // pin can point at a source that is gone.
                 prunePinnedSources()
@@ -1657,6 +1754,9 @@ final class AppModel: ObservableObject {
     }
 
     func removeFromShelf(_ book: Book) {
+        pendingProgressAdvances[book.id] = nil
+        persistPendingSyncProgress()
+        if preferredSyncJumpBookID == book.id { preferredSyncJumpBookID = nil }
         books.removeAll { $0.id == book.id }
         let snapshot = books
         Task {
@@ -1667,12 +1767,31 @@ final class AppModel: ObservableObject {
 
     func updateProgress(bookID: UUID, chapterIndex: Int, chapterTitle: String, characterOffset: Int = 0) {
         guard let index = books.firstIndex(where: { $0.id == bookID }) else { return }
-        books[index].progress = ReadingProgress(
+        let progress = ReadingProgress(
             chapterIndex: chapterIndex,
             characterOffset: characterOffset,
             chapterTitle: chapterTitle,
             updatedAt: Date()
         )
+        if let advance = pendingProgressAdvances[bookID],
+           books[index].sourceID != advance.remoteBook.sourceID {
+            pendingProgressAdvances[bookID] = nil
+            persistPendingSyncProgress()
+        }
+        if var advance = pendingProgressAdvances[bookID] {
+            advance.localProgress = progress
+            if advance.remoteBook.progress.isAhead(of: progress) {
+                // Keep the synced position intact until the user chooses. Page
+                // restoration and TTS callbacks must not erase the proposal.
+                pendingProgressAdvances[bookID] = advance
+                persistPendingSyncProgress()
+                return
+            }
+            pendingProgressAdvances[bookID] = nil
+            persistPendingSyncProgress()
+            if preferredSyncJumpBookID == bookID { preferredSyncJumpBookID = nil }
+        }
+        books[index].progress = progress
         books[index].lastReadAt = Date()
         let snapshot = books
         Task { await store.saveBooks(snapshot) }

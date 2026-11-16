@@ -6,6 +6,7 @@ struct ReaderView: View {
     @StateObject private var model: ReaderModel
     @EnvironmentObject private var app: AppModel
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var scenePhase
     /// Only consulted when "follow system" is on; when it is off the reader
     /// owns its appearance and this is ignored.
     @Environment(\.colorScheme) private var systemScheme
@@ -171,7 +172,21 @@ struct ReaderView: View {
         // material on a dark page. `forcedScheme` is nil while following the
         // system, so that mode keeps reacting to the phone.
         .preferredColorScheme(forcedScheme)
+        .onAppear { model.beginReadingSession() }
         .task { await model.start() }
+        .modifier(SyncedProgressPrompt(
+            advance: model.mode.recordsProgress ? app.pendingProgressAdvances[model.book.id] : nil,
+            enabled: scenePhase == .active && !model.isLoading && model.errorMessage == nil
+                && !showSettings && !showTOC && !showCacheSheet && !showBookInfo && !model.showSourcePicker,
+            onStay: { advance in
+                app.resolveSyncedProgress(bookID: advance.id, useRemote: false)
+            },
+            onJump: { advance in
+                if let book = app.resolveSyncedProgress(bookID: advance.id, useRemote: true) {
+                    Task { await model.jumpToSyncedProgress(book) }
+                }
+            }
+        ))
         .sheet(isPresented: $showSettings) {
             ReaderSettingsSheet()
                 .presentationDetents([.medium, .large])
@@ -229,6 +244,7 @@ struct ReaderView: View {
             Text(model.errorMessage ?? "")
         }
         .onDisappear {
+            model.endReadingSession()
             model.stopBackgroundWork()
             app.saveSettings()
         }
@@ -440,6 +456,12 @@ private struct ReaderContent: View {
                 withAnimation(.easeInOut(duration: 0.3)) {
                     proxy.scrollTo(index, anchor: .center)
                 }
+            }
+            .onChange(of: model.positionRevision) { _, _ in
+                if !model.isLoading, let text = model.content?.text { restoreScroll(proxy: proxy, text: text) }
+            }
+            .onChange(of: model.isLoading) { _, loading in
+                if !loading, let text = model.content?.text { restoreScroll(proxy: proxy, text: text) }
             }
             .onChange(of: model.content) { _, newValue in
                 guard let text = newValue?.text else { return }

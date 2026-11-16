@@ -1,6 +1,6 @@
 import Foundation
 
-/// Runs one sync: read remote, merge, save local, write remote back.
+/// Runs one sync: read remote, merge, upload, then commit locally.
 ///
 /// All of it is in NovelKit so it can be tested on Linux with a fake
 /// transport; the app layer only supplies settings and triggers.
@@ -31,28 +31,34 @@ public actor SyncService {
         public var booksAfter: Int
         public var sourcesAfter: Int
         public var remoteUpdatedAt: Date?
+        public var progressAdvances: [SyncProgressAdvance]
 
         public init(
             uploaded: Bool,
             downloaded: Bool,
             booksAfter: Int,
             sourcesAfter: Int,
-            remoteUpdatedAt: Date?
+            remoteUpdatedAt: Date?,
+            progressAdvances: [SyncProgressAdvance] = []
         ) {
             self.uploaded = uploaded
             self.downloaded = downloaded
             self.booksAfter = booksAfter
             self.sourcesAfter = sourcesAfter
             self.remoteUpdatedAt = remoteUpdatedAt
+            self.progressAdvances = progressAdvances
         }
     }
 
     /// Performs a full two-way sync.
     ///
-    /// Order matters: read first, merge, save locally, then upload the merged
-    /// result. Uploading before merging would push this device's view over the
-    /// other's and lose whatever the other had.
+    /// Read and merge before uploading, then commit locally only after the
+    /// upload succeeds. A failed run must not consume a remote progress change
+    /// without giving the UI a successful result to present.
     public func run() async throws -> Result {
+        // Read the potentially slow network first; progress saved while it is
+        // pending must be part of the local merge snapshot.
+        let remoteData = try await transport.read()
         let localBooks = await store.loadBooks()
         let localSources = await store.loadSources()
         let localSubscriptions = await store.loadSubscriptions()
@@ -64,7 +70,6 @@ public actor SyncService {
             subscriptions: localSubscriptions
         )
 
-        let remoteData = try await transport.read()
         var remote: SyncPayload?
         if let remoteData {
             do {
@@ -96,11 +101,7 @@ public actor SyncService {
         }
 
         let outcome = SyncMerge.merge(local: local, remote: remote)
-        if outcome.localChanged {
-            await store.saveBooks(outcome.books)
-            await store.saveSources(outcome.sources)
-            await store.saveSubscriptions(outcome.subscriptions)
-        }
+        let advances = SyncProgressAdvance.detect(local: localBooks, merged: outcome.books)
 
         // Upload whenever anything differs from the remote file, so the other
         // device sees the union on its next run. A plain progress advance on
@@ -118,12 +119,35 @@ public actor SyncService {
             try await upload(merged)
         }
 
+        // A failed upload must not silently consume the remote progress: the
+        // next successful run still needs to report the advance to the UI.
+        let waiting = await store.loadSyncProgressAdvances()
+        var pending = Dictionary(waiting.filter { advance in
+            outcome.books.contains {
+                $0.id == advance.id && $0.sourceID == advance.remoteBook.sourceID
+                    && $0.progress == advance.remoteBook.progress
+            }
+        }.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        for var advance in advances {
+            advance.localProgress = waiting.first { $0.id == advance.id }?.localProgress ?? advance.localProgress
+            pending[advance.id] = advance
+        }
+        // Save the question before the adopted position, so a background sync
+        // followed by process termination still asks before resuming remotely.
+        await store.saveSyncProgressAdvances(Array(pending.values))
+        if outcome.localChanged {
+            await store.saveBooks(outcome.books)
+            await store.saveSources(outcome.sources)
+            await store.saveSubscriptions(outcome.subscriptions)
+        }
+
         return Result(
             uploaded: needsUpload,
             downloaded: outcome.localChanged,
             booksAfter: outcome.books.count,
             sourcesAfter: outcome.sources.count,
-            remoteUpdatedAt: needsUpload ? Date() : remote.updatedAt
+            remoteUpdatedAt: needsUpload ? Date() : remote.updatedAt,
+            progressAdvances: advances
         )
     }
 

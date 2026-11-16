@@ -71,6 +71,19 @@ struct RootView: View {
         .fullScreenCover(item: $resumedBook) { book in
             ReaderView(book: book, app: app)
         }
+        .modifier(SyncedProgressPrompt(
+            advance: app.preferredSyncJumpBookID.flatMap { app.pendingProgressAdvances[$0] },
+            enabled: didResume && scenePhase == .active && app.activeReaderBookID == nil
+                && resumedBook == nil && !app.isSearching,
+            onStay: { advance in
+                app.resolveSyncedProgress(bookID: advance.id, useRemote: false)
+            },
+            onJump: { advance in
+                if let book = app.resolveSyncedProgress(bookID: advance.id, useRemote: true) {
+                    resumedBook = book
+                }
+            }
+        ))
         .task {
             // Loading the shelf and opening the last book are one flow: the
             // resume decision needs the books that `bootstrap` fetches.
@@ -94,6 +107,9 @@ struct RootView: View {
             // Backgrounding is the last moment the app is guaranteed to run;
             // it is where a sync can still reach the network without holding
             // the user on launch.
+            if phase == .active, didResume {
+                Task { await app.runSync() }
+            }
             if phase == .background {
                 app.saveSettings()
                 Task { await app.refreshSubscriptions() }

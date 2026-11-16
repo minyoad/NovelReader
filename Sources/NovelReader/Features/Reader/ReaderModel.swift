@@ -82,8 +82,11 @@ final class ReaderModel: ObservableObject {
     private var speechObserver: AnyCancellable?
     /// Only the latest navigation request may replace the visible chapter.
     private var chapterLoadID = UUID()
+    private let readingSessionID = UUID()
+    @Published private(set) var positionRevision = 0
 
     init(book: Book, app: AppModel, startIndex: Int? = nil, previewChapters: [Chapter]? = nil) {
+        let book = previewChapters == nil ? app.bookForReading(book) : book
         self.book = book
         self.app = app
         self.currentIndex = startIndex ?? book.progress.chapterIndex
@@ -186,6 +189,48 @@ final class ReaderModel: ObservableObject {
     }
 
     var isSpeaking: Bool { speech.isActive }
+
+    func beginReadingSession() {
+        guard mode.recordsProgress else { return }
+        app.beginReadingSession(bookID: book.id, sessionID: readingSessionID)
+    }
+
+    func endReadingSession() {
+        app.endReadingSession(sessionID: readingSessionID)
+    }
+
+    func jumpToSyncedProgress(_ updated: Book) async {
+        guard mode.recordsProgress, updated.id == book.id else { return }
+        let jumpID = UUID()
+        chapterLoadID = jumpID
+        isLoading = true
+        // The old utterance must not save or auto-advance over an explicit jump.
+        speech.stop()
+        defer {
+            if chapterLoadID == jumpID { isLoading = false }
+        }
+        book = updated
+        do {
+            if updated.progress.chapterIndex >= chapters.count {
+                chapters = try await app.chapters(for: updated, forceReload: true)
+            }
+            guard chapterLoadID == jumpID, !Task.isCancelled else { return }
+            let titledIndex: Int? = updated.progress.chapterTitle.isEmpty ? nil
+                : chapters.firstIndex { $0.title == updated.progress.chapterTitle }
+            let target = titledIndex ?? updated.progress.chapterIndex
+            guard chapters.indices.contains(target) else {
+                errorMessage = "同步位置对应的章节暂不可用，请刷新目录后重试。"
+                return
+            }
+            // Preserve the exact requested offset when jumping within the same
+            // chapter; content equality alone would not trigger a new layout.
+            positionRevision += 1
+            await loadChapter(at: target, offset: updated.progress.characterOffset)
+        } catch {
+            guard chapterLoadID == jumpID, !Task.isCancelled else { return }
+            errorMessage = error.localizedDescription
+        }
+    }
 
     // MARK: - Loading
     func start() async {
@@ -776,7 +821,7 @@ final class ReaderModel: ObservableObject {
     }
 
     private func saveProgressFromSpeech() {
-        guard mode.recordsProgress else { return }
+        guard mode.recordsProgress, !isLoading else { return }
         guard let text = content?.text else { return }
         let offset = speech.characterOffset(ofSentence: currentSentenceIndex, in: text)
         app.updateProgress(bookID: book.id, chapterIndex: currentIndex, chapterTitle: currentChapter?.title ?? "", characterOffset: offset)

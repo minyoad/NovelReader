@@ -53,6 +53,16 @@ public actor LibraryStore {
         write(books, to: "books.json")
     }
 
+    /// Local-only decisions: background sync must not bypass confirmation if
+    /// the process ends before the user returns to the reader.
+    public func loadSyncProgressAdvances() -> [SyncProgressAdvance] {
+        read([SyncProgressAdvance].self, from: "sync-progress-advances.json") ?? []
+    }
+
+    public func saveSyncProgressAdvances(_ advances: [SyncProgressAdvance]) {
+        write(advances, to: "sync-progress-advances.json")
+    }
+
     // MARK: - Sources
 
     public func loadSources() -> [BookSource] {

@@ -313,6 +313,8 @@ public enum SyncMerge {
 
     private static func mergeCopy(winning: Book, local: Book) -> Book {
         var copy = winning
+        // References, cached chapters and open readers use this device's id.
+        copy.id = local.id
         // `addedAt` is when this device put the book on its shelf.
         copy.addedAt = min(local.addedAt, winning.addedAt)
         return copy

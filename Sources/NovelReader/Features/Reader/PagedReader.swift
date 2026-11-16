@@ -56,6 +56,13 @@ struct PagedReader: View {
     @State private var layoutRequestID = UUID()
     @State private var preparedChapters: [String: PreparedChapter] = [:]
 
+    private struct LayoutRequest: Equatable {
+        let layout: LayoutKey
+        let positionRevision: Int
+        let isLoading: Bool
+    }
+    @State private var laidOutPositionRevision = -1
+
     private struct PreparedChapter {
         let key: LayoutKey
         let document: PagedDocument
@@ -105,7 +112,7 @@ struct PagedReader: View {
                 isVisible = false
                 layoutRequestID = UUID()
             }
-            .task(id: layoutKey(box)) {
+            .task(id: LayoutRequest(layout: layoutKey(box), positionRevision: model.positionRevision, isLoading: model.isLoading)) {
                 await paginate(box: box)
                 guard !Task.isCancelled else { return }
                 await prepareAdjacentChapters(box: box)
@@ -705,6 +712,7 @@ struct PagedReader: View {
     // MARK: - Pagination
 
     private func paginate(box: CGSize) async {
+        guard !model.isLoading else { return }
         guard let content = model.content,
               box.width > 40, box.height > 60 else {
             document = nil
@@ -775,7 +783,9 @@ struct PagedReader: View {
         // reader has to land.
         let opensAtEnd = isNewChapter && model.pendingEndOfChapter
         model.pendingEndOfChapter = false
-        let resumeOffset = model.speech.isActive && !isNewChapter
+        let explicitPosition = laidOutPositionRevision != model.positionRevision
+        laidOutPositionRevision = model.positionRevision
+        let resumeOffset = model.speech.isActive && !isNewChapter && !explicitPosition
             ? (previousPageOffset ?? model.pendingOffset)
             : model.pendingOffset
         if opensAtEnd, !layout.isEmpty {
@@ -837,7 +847,9 @@ struct PagedReader: View {
     }
 
     private func saveProgress() {
-        guard let document, let range = currentPage?.range else { return }
+        guard !model.isLoading, let document,
+              document.chapterURL == model.currentChapter?.url,
+              let range = currentPage?.range else { return }
         let offset = document.characterOffset(atAttributed: range.location)
         model.pendingOffset = offset
         // `pageIndex` changes for reasons other than turning a page — the
@@ -850,8 +862,9 @@ struct PagedReader: View {
     }
 
     private func followSpeech(box: CGSize) {
-        guard !isAnimating, !isLayingOut,
-              let document, !pages.isEmpty, model.speech.isActive else { return }
+        guard !isAnimating, !isLayingOut, !model.isLoading,
+              let document, document.chapterURL == model.currentChapter?.url,
+              !pages.isEmpty, model.speech.isActive else { return }
         let text = model.content?.text ?? ""
         let start = model.speech.characterOffset(ofSentence: model.currentSentenceIndex, in: text)
         let target = pageIndex(forOriginalOffset: start, document: document)
