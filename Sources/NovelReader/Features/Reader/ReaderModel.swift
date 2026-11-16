@@ -14,7 +14,12 @@ final class ReaderModel: ObservableObject {
 
     @Published var chapters: [Chapter] = []
     @Published var currentIndex: Int
-    @Published var content: ChapterContent?
+    @Published var content: ChapterContent? {
+        didSet { contentFingerprint = content?.text.hashValue ?? 0 }
+    }
+    /// Layout identity is read on every animation frame; hash the chapter only
+    /// when its content changes, rather than walking the entire text per frame.
+    private(set) var contentFingerprint = 0
     @Published var isLoading = false
     @Published var errorMessage: String?
     /// Whether the chrome (top bar, bottom bar) is showing.
@@ -75,6 +80,8 @@ final class ReaderModel: ObservableObject {
     /// though the queue was gone, because no published property of the model
     /// changed and SwiftUI never redrew.
     private var speechObserver: AnyCancellable?
+    /// Only the latest navigation request may replace the visible chapter.
+    private var chapterLoadID = UUID()
 
     init(book: Book, app: AppModel, startIndex: Int? = nil, previewChapters: [Chapter]? = nil) {
         self.book = book
@@ -229,6 +236,13 @@ final class ReaderModel: ObservableObject {
         opensAtEnd: Bool = false
     ) async {
         guard chapters.indices.contains(index) else { return }
+        let loadID = UUID()
+        chapterLoadID = loadID
+        prefetchTask?.cancel()
+        cleanAheadTask?.cancel()
+        nextChapterPrefetchTask?.cancel()
+        nextChapterText = nil
+        nextChapterTextURL = nil
         // Reading across a chapter boundary has to keep the audio session: iOS
         // suspends a backgrounded app the moment the session goes inactive, and
         // the next chapter would never finish downloading. `autoplaySpeech`
@@ -247,8 +261,12 @@ final class ReaderModel: ObservableObject {
         currentSentenceIndex = 0
         pendingOffset = offset
         pendingEndOfChapter = opensAtEnd
+        chapterProgress = 0
         isLoading = true
         errorMessage = nil
+        defer {
+            if chapterLoadID == loadID { isLoading = false }
+        }
 
         let chapter = chapters[index]
         do {
@@ -261,6 +279,7 @@ final class ReaderModel: ObservableObject {
                 // chapter at once and relies on the cleaning-ahead queue.
                 synchronous: shouldSpeak
             )
+            guard chapterLoadID == loadID, !Task.isCancelled else { return }
             content = fetched
             // A trial read has no shelf entry to record progress against: the
             // book may never be added, and writing here would also bump
@@ -285,6 +304,7 @@ final class ReaderModel: ObservableObject {
                 scheduleCleanAhead()
             }
         } catch {
+            guard chapterLoadID == loadID, !Task.isCancelled else { return }
             content = nil
             errorMessage = error.localizedDescription
             // Nothing is going to play, so release the session kept alive for
@@ -296,6 +316,13 @@ final class ReaderModel: ObservableObject {
     }
 
     // MARK: - Offline cache
+
+    /// The page reader warms only its two neighbours. Prepared content is still
+    /// read through the normal chapter pipeline on entry (including AI rules).
+    func contentForPagination(at index: Int) async throws -> ChapterContent? {
+        guard mode.cachesChapters, chapters.indices.contains(index) else { return nil }
+        return try await app.chapterContentPrepared(book: book, chapter: chapters[index])
+    }
 
     /// Text of the chapter after the current one, once it is known.
     ///
@@ -810,6 +837,7 @@ final class ReaderModel: ObservableObject {
     /// Stops background work when the reader closes, so prefetch does not keep
     /// hitting the network after the user leaves the book.
     func stopBackgroundWork() {
+        chapterLoadID = UUID()
         prefetchTask?.cancel()
         prefetchTask = nil
         cleanAheadTask?.cancel()

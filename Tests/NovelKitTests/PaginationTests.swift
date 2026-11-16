@@ -5,6 +5,32 @@ import Foundation
 @Suite("Pagination offset mapping")
 struct PaginationTests {
 
+    @Test("scroll restoration follows character offsets, not paragraph ratios")
+    func scrollParagraphOffsets() {
+        let longParagraph = String(repeating: "长段落中的文字。", count: 200)
+        let text = PaginatedText(rawText: "  短段。\n\n　　" + longParagraph + "\n末段。")
+        #expect(text.paragraphIndex(forOriginal: -20) == 0)
+        let middle = text.paragraphs[1].originalStart + longParagraph.count - 5
+        #expect(text.paragraphIndex(forOriginal: middle) == 1)
+        #expect(text.paragraphIndex(forOriginal: text.paragraphs[2].originalStart) == 2)
+        #expect(text.paragraphIndex(forOriginal: Int.max) == 2)
+        #expect(PaginatedText(rawText: " \n\n").paragraphIndex(forOriginal: 0) == nil)
+    }
+
+    @Test("scroll positions distinguish repeated paragraphs and Unicode characters")
+    func repeatedScrollParagraphs() {
+        let text = PaginatedText(rawText: "　😀他说。\n\n　😀他说。\n结束。")
+        for (index, paragraph) in text.paragraphs.enumerated() {
+            for local in 0..<paragraph.text.count {
+                #expect(text.paragraphIndex(forOriginal: paragraph.originalStart + local) == index)
+            }
+        }
+        // Positions in a blank line restore to the next readable paragraph.
+        let end = text.paragraphs[0].originalStart + text.paragraphs[0].text.count
+        #expect(text.paragraphIndex(forOriginal: end) == 1)
+        #expect(text.paragraphIndex(forOriginal: end + 1) == 1)
+    }
+
     private let raw = """
       　　这是第一段，有一些内容。
     　　这是第二段，也有内容。

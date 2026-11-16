@@ -49,6 +49,18 @@ struct PagedReader: View {
     /// animated on this separate value instead, so exactly one driver moves the
     /// page at a time and the swipe never stalls just before the page goes.
     @State private var turn: CGFloat = 0
+    @State private var boundaryPreview: NSAttributedString?
+    @State private var boundaryTargetURL: String?
+    @State private var isVisible = false
+    @State private var isLayingOut = false
+    @State private var layoutRequestID = UUID()
+    @State private var preparedChapters: [String: PreparedChapter] = [:]
+
+    private struct PreparedChapter {
+        let key: LayoutKey
+        let document: PagedDocument
+        let pages: [ReaderPage]
+    }
 
     private var reading: ReadingSettings { app.settings.reading }
 
@@ -72,7 +84,7 @@ struct PagedReader: View {
                     pageLayers(box: box)
                 }
 
-                if model.isLoading && model.content != nil {
+                if model.isLoading && model.content != nil && boundaryPreview == nil {
                     ProgressView()
                         .padding(12)
                         .background(.ultraThinMaterial, in: Circle())
@@ -88,8 +100,15 @@ struct PagedReader: View {
                     }
                 }
             )
+            .onAppear { isVisible = true }
+            .onDisappear {
+                isVisible = false
+                layoutRequestID = UUID()
+            }
             .task(id: layoutKey(box)) {
-                paginate(box: box)
+                await paginate(box: box)
+                guard !Task.isCancelled else { return }
+                await prepareAdjacentChapters(box: box)
             }
             .onChange(of: pageIndex) { _, _ in
                 refreshStaging()
@@ -143,10 +162,10 @@ struct PagedReader: View {
         var alignment: String
     }
 
-    private func layoutKey(_ box: CGSize) -> LayoutKey {
-        LayoutKey(
-            url: model.content?.chapterURL ?? "",
-            contentHash: model.content?.text.hashValue ?? 0,
+    private func layoutKey(_ box: CGSize, content: ChapterContent? = nil) -> LayoutKey {
+        return LayoutKey(
+            url: (content ?? model.content)?.chapterURL ?? "",
+            contentHash: content?.text.hashValue ?? model.contentFingerprint,
             width: Int(box.width.rounded()),
             height: Int(box.height.rounded()),
             fontSize: reading.fontSize,
@@ -212,6 +231,8 @@ struct PagedReader: View {
             ZStack {
                 if let resting = restingIndex() {
                     pageImage(text: text(at: resting), paper: theme.background)
+                } else if let boundaryPreview {
+                    pageImage(text: boundaryPreview, paper: theme.background)
                 } else if abs(pageOffset) > 0.5 || isAnimating {
                     // End of chapter: the hint card is what comes next.
                     chapterHint(forward: turnForward ?? isForward, box: box)
@@ -260,7 +281,7 @@ struct PagedReader: View {
     /// curling would have nothing to fold onto.
     private func curlLayers(box: CGSize) -> some View {
         let forward = isForward
-        let hasNeighbor = revealedIndex() != nil
+        let hasNeighbor = revealedIndex() != nil || boundaryPreview != nil
 
         return ZStack {
             if hasNeighbor {
@@ -288,7 +309,7 @@ struct PagedReader: View {
     /// The page on screen, from the cache; `preparePages` fills it before an
     /// index is committed, so this never styles a page inside a frame.
     private var currentText: NSAttributedString {
-        text(at: pageIndex)
+        leaving ?? text(at: pageIndex)
     }
 
     /// Styled page text for the page at `index`, from the page cache.
@@ -398,7 +419,7 @@ struct PagedReader: View {
 
     /// The page revealed by the sheet being pulled away.
     private func neighborText(forward: Bool) -> NSAttributedString {
-        guard let index = revealedIndex() else { return NSAttributedString() }
+        guard let index = revealedIndex() else { return boundaryPreview ?? NSAttributedString() }
         return text(at: index)
     }
 
@@ -486,7 +507,8 @@ struct PagedReader: View {
     private func turnGesture(box: CGSize) -> some Gesture {
         DragGesture(minimumDistance: 8)
             .onChanged { value in
-                guard !isAnimating, !pages.isEmpty, box.width > 20 else { return }
+                guard !isAnimating, !isLayingOut, !model.isLoading, !pages.isEmpty,
+                      document?.chapterURL == model.currentChapter?.url, box.width > 20 else { return }
                 // An edge drag while the bars are up is leaving the book; turning
                 // a page underneath it would move the reader before it vanished.
                 guard !isBackSwipeOrigin(value.startLocation.x) else { return }
@@ -499,7 +521,11 @@ struct PagedReader: View {
                 if abs(drag) < 0.5 {
                     prepareNeighbor(forward: dx < 0)
                 }
-                let edge = neighbor(forward: dx < 0) == nil
+                if abs(drag) < 0.5 || (drag < 0) != (dx < 0) {
+                    boundaryPreview = neighbor(forward: dx < 0) == nil
+                        ? preparedBoundary(forward: dx < 0, box: box) : nil
+                }
+                let edge = neighbor(forward: dx < 0) == nil && boundaryPreview == nil
                 // Following the finger, never animating: the finger is the
                 // animator here, and an implicit animation on top of it makes
                 // the page lag behind and then stall for the spring's tail.
@@ -510,7 +536,8 @@ struct PagedReader: View {
                 }
             }
             .onEnded { value in
-                guard !isAnimating, box.width > 20 else { return }
+                guard !isAnimating, !isLayingOut, !model.isLoading,
+                      document?.chapterURL == model.currentChapter?.url, box.width > 20 else { return }
                 guard !isBackSwipeOrigin(value.startLocation.x) else { return }
                 let width = box.width
                 let dx = value.translation.width
@@ -563,10 +590,14 @@ struct PagedReader: View {
             withAnimation(.easeOut(duration: 0.22)) {
                 turn = forward ? -box.width : box.width
             }
+            let chapterURL = document?.chapterURL
+            let layoutID = layoutRequestID
             Task { @MainActor in
                 // Fixed duration rather than waiting on the animation to report
                 // back: a dropped frame must not leave the reader frozen.
                 try? await Task.sleep(nanoseconds: 235_000_000)
+                guard isVisible, document?.chapterURL == chapterURL,
+                      layoutRequestID == layoutID else { return }
                 var transaction = Transaction()
                 transaction.disablesAnimations = true
                 withTransaction(transaction) {
@@ -581,36 +612,99 @@ struct PagedReader: View {
                 }
             }
         } else {
-            // End of chapter: no page to turn to, so hand the swipe straight to
-            // the chapter switch. The page never springs back on its own — the
-            // new chapter's content replaces this one and pagination resets
-            // `drag`, which reads as the page sliding away rather than bouncing.
-            guard !isAnimating else { return }
+            let target = model.currentIndex + (forward ? 1 : -1)
+            guard model.chapters.indices.contains(target) else {
+                snapBack()
+                withAnimation(.easeOut(duration: 0.2)) { turn = 0 }
+                return
+            }
             isAnimating = true
-            // The chapter being left stays on screen, unmoved but dimmed, until
-            // the next one is laid out: there is nothing behind it to reveal,
-            // and a page sliding off onto blank paper looks like a glitch.
+            turnForward = forward
+            boundaryTargetURL = model.chapters[target].url
             leaving = currentText
+            boundaryPreview = preparedBoundary(forward: forward, box: box)
             snapBack()
-            turn = 0
-            Task { @MainActor in
-                if forward {
-                    await model.goNextChapter()
-                } else {
-                    await model.goPreviousChapterBackwards()
+
+            // When the next sheet is ready, finish the same gesture onto it.
+            // Commit the chapter only after the animation completes so changing
+            // the model cannot replace the outgoing text halfway through a fold.
+            if boundaryPreview != nil {
+                withAnimation(.easeOut(duration: 0.22), completionCriteria: .removed) {
+                    turn = forward ? -box.width : box.width
+                } completion: {
+                    Task { @MainActor in await enterAdjacentChapter(forward: forward) }
                 }
-                var transaction = Transaction()
-                transaction.disablesAnimations = true
-                withTransaction(transaction) { turn = 0 }
+            } else {
+                // A cold network request keeps the current sheet visible.
+                withAnimation(.easeOut(duration: 0.18)) { turn = 0 }
+                Task { @MainActor in await enterAdjacentChapter(forward: forward) }
+            }
+        }
+    }
+
+    private func enterAdjacentChapter(forward: Bool) async {
+        guard isVisible, let expectedURL = boundaryTargetURL else { return }
+        let target = model.currentIndex + (forward ? 1 : -1)
+        guard model.chapters.indices.contains(target),
+              model.chapters[target].url == expectedURL else { return }
+        if forward {
+            await model.goNextChapter()
+        } else {
+            await model.goPreviousChapterBackwards()
+        }
+        // Successful loads are installed by paginate, which also releases the
+        // animation lock. Failure must release it here so retry remains usable.
+        if model.content?.chapterURL != expectedURL {
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                leaving = nil
+                boundaryPreview = nil
+                boundaryTargetURL = nil
                 turnForward = nil
+                drag = 0
+                turn = 0
                 isAnimating = false
             }
         }
     }
 
+    private func preparedBoundary(forward: Bool, box: CGSize) -> NSAttributedString? {
+        let index = model.currentIndex + (forward ? 1 : -1)
+        guard model.chapters.indices.contains(index),
+              let prepared = preparedChapters[model.chapters[index].url],
+              let page = forward ? prepared.pages.first : prepared.pages.last else { return nil }
+        // Settings or size may have changed while the background job ran.
+        var expected = layoutKey(box)
+        expected.url = prepared.key.url
+        expected.contentHash = prepared.key.contentHash
+        guard expected == prepared.key else { return nil }
+        return page.drawable(from: prepared.document.attributed)
+    }
+
+    private func prepareAdjacentChapters(box: CGSize) async {
+        guard box.width > 40, box.height > 60, !model.isLoading else { return }
+        let origin = model.currentIndex
+        let targets = [origin + 1, origin - 1].filter { model.chapters.indices.contains($0) }
+        let keep = Set(targets.map { model.chapters[$0].url } + [model.content?.chapterURL ?? ""])
+        preparedChapters = preparedChapters.filter { keep.contains($0.key) }
+        for index in targets {
+            guard !Task.isCancelled, model.currentIndex == origin else { return }
+            guard let content = try? await model.contentForPagination(at: index) else { continue }
+            guard !Task.isCancelled, model.currentIndex == origin else { return }
+            let key = layoutKey(box, content: content)
+            if preparedChapters[content.chapterURL]?.key == key { continue }
+            let doc = PagedDocument.make(content: content, reading: reading, theme: theme)
+            let ranges = await PageLayout.prepare(document: doc, in: box)
+            guard !Task.isCancelled, model.currentIndex == origin,
+                  layoutKey(box, content: content) == key else { return }
+            preparedChapters[content.chapterURL] = PreparedChapter(key: key, document: doc, pages: ranges)
+        }
+    }
+
     // MARK: - Pagination
 
-    private func paginate(box: CGSize) {
+    private func paginate(box: CGSize) async {
         guard let content = model.content,
               box.width > 40, box.height > 60 else {
             document = nil
@@ -635,12 +729,31 @@ struct PagedReader: View {
             document?.characterOffset(atAttributed: old.range.location) ?? 0
         }
 
-        let doc = PagedDocument.make(content: content, reading: reading, theme: theme)
-        let layout = PageLayout.ranges(of: doc.attributed, text: doc.text, in: box)
+        let requestID = UUID()
+        layoutRequestID = requestID
+        isLayingOut = true
+        defer {
+            if layoutRequestID == requestID { isLayingOut = false }
+        }
+        let key = layoutKey(box, content: content)
+        let cached = preparedChapters[content.chapterURL]
+        let doc: PagedDocument
+        let layout: [ReaderPage]
+        if let cached, cached.key == key {
+            doc = cached.document
+            layout = cached.pages
+        } else {
+            doc = PagedDocument.make(content: content, reading: reading, theme: theme)
+            layout = await PageLayout.prepare(document: doc, in: box)
+        }
+        guard !Task.isCancelled, isVisible, layoutRequestID == requestID,
+              model.content == content, layoutKey(box) == key else { return }
         // A different chapter starts at its own beginning; showing the old
         // chapter's position for a frame is worse than showing nothing.
         let isNewChapter = document?.chapterURL != content.chapterURL
+        preparedChapters[content.chapterURL] = PreparedChapter(key: key, document: doc, pages: layout)
         document = doc
+        pageText = [:]
         pages = layout
         pagesWidth = box.width
         if isNewChapter {
@@ -662,7 +775,7 @@ struct PagedReader: View {
         // reader has to land.
         let opensAtEnd = isNewChapter && model.pendingEndOfChapter
         model.pendingEndOfChapter = false
-        let resumeOffset = model.speech.isActive
+        let resumeOffset = model.speech.isActive && !isNewChapter
             ? (previousPageOffset ?? model.pendingOffset)
             : model.pendingOffset
         if opensAtEnd, !layout.isEmpty {
@@ -681,6 +794,10 @@ struct PagedReader: View {
         // so the next frame has the text ready and the turn never waits on a
         // CoreText pass at the moment the page should already be gone.
         leaving = nil
+        boundaryPreview = nil
+        boundaryTargetURL = nil
+        turnForward = nil
+        isAnimating = false
         if !opensAtEnd || layout.isEmpty {
             refreshStaging()
         }
@@ -700,6 +817,7 @@ struct PagedReader: View {
         if let range = currentPage?.range, !opensAtEnd {
             model.pendingOffset = doc.characterOffset(atAttributed: range.location)
         }
+        saveProgress()
     }
 
     /// Character offset of the page's first character, in raw-chapter terms.
@@ -732,7 +850,8 @@ struct PagedReader: View {
     }
 
     private func followSpeech(box: CGSize) {
-        guard let document, !pages.isEmpty, model.speech.isActive else { return }
+        guard !isAnimating, !isLayingOut,
+              let document, !pages.isEmpty, model.speech.isActive else { return }
         let text = model.content?.text ?? ""
         let start = model.speech.characterOffset(ofSentence: model.currentSentenceIndex, in: text)
         let target = pageIndex(forOriginalOffset: start, document: document)

@@ -23,6 +23,15 @@ public struct PaginatedText: Hashable, Sendable {
     /// Paragraphs joined with a single newline; what actually gets laid out.
     public let body: String
 
+    /// Paragraph containing a saved raw-text position. Whitespace between
+    /// paragraphs belongs to the following paragraph, as in bodyOffset.
+    public func paragraphIndex(forOriginal offset: Int) -> Int? {
+        guard !paragraphs.isEmpty else { return nil }
+        return paragraphs.firstIndex {
+            offset < $0.originalStart + $0.text.count
+        } ?? paragraphs.count - 1
+    }
+
     public init(rawText: String) {
         var paragraphs: [Paragraph] = []
         var cursor = 0

@@ -97,6 +97,18 @@ struct PagedDocument {
 /// same framesetter output is what `PageImage` draws, so the computed slices
 /// never overflow or leave gaps.
 enum PageLayout {
+    /// CoreText measuring owns its framesetter on a worker queue; only the
+    /// immutable attributed document and page ranges cross the queue boundary.
+    static func prepare(document: PagedDocument, in size: CGSize) async -> [ReaderPage] {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                continuation.resume(returning: ranges(
+                    of: document.attributed, text: document.text, in: size
+                ))
+            }
+        }
+    }
+
     /// Returns the slices of `attributed` that fit into `size`.
     ///
     /// `firstLineIndent` is applied per page rather than baked into the whole
@@ -140,9 +152,9 @@ enum PageLayout {
             // A slice starting at 0 or right after a newline is a real paragraph
             // start and keeps the indent; anything else is a wrapped tail whose
             // first line is drawn flush.
-            let startsParagraph = text.startsParagraph(
-                atBody: text.bodyCharacterOffset(forUTF16: location)
-            )
+            // CoreText locations are already UTF-16. Inspecting the preceding
+            // newline avoids walking the chapter's graphemes for every page.
+            let startsParagraph = location == 0 || body.character(at: location - 1) == newlineCode
 
             let frame = CTFramesetterCreateFrame(
                 framesetter,

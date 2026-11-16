@@ -33,6 +33,10 @@ let package = Package(
             dependencies: ["NovelKit"],
             resources: [.copy("Fixtures")]
         ),
+        .testTarget(
+            name: "ReaderLayoutTests",
+            dependencies: ["NovelReader", "NovelKit"]
+        ),
     ],
     swiftLanguageModes: [.v5]
 )

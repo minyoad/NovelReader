@@ -38,6 +38,7 @@ struct PageImage: UIViewRepresentable {
 
         var paper: Color? {
             didSet {
+                guard paper != oldValue else { return }
                 backgroundColor = paper.map { UIColor($0) } ?? .clear
                 isOpaque = paper != nil
                 setNeedsDisplay()
@@ -46,11 +47,13 @@ struct PageImage: UIViewRepresentable {
 
         override init(frame: CGRect) {
             super.init(frame: frame)
+            isOpaque = false
             contentMode = .redraw
         }
 
         required init?(coder: NSCoder) {
             super.init(coder: coder)
+            isOpaque = false
             contentMode = .redraw
         }
 

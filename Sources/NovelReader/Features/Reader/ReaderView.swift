@@ -292,14 +292,25 @@ private struct ReaderContent: View {
 
     private static let scrollSpace = "reader.scroll"
 
+    private struct ParagraphFramesKey: PreferenceKey {
+        static var defaultValue: [Int: CGRect] = [:]
+
+        static func reduce(value: inout [Int: CGRect], nextValue: () -> [Int: CGRect]) {
+            value.merge(nextValue(), uniquingKeysWith: { _, new in new })
+        }
+    }
+
     @State private var viewportHeight: CGFloat = 0
+    @State private var tracksUserScroll = false
+    @State private var lastSavedOffset: Int?
 
     private var reading: ReadingSettings { app.settings.reading }
 
-    private var paragraphs: [String] {
-        guard let text = model.content?.text else { return [] }
-        return text.components(separatedBy: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+    private var paginated: PaginatedText {
+        PaginatedText(rawText: model.content?.text ?? "")
     }
+
+    private var paragraphs: [String] { paginated.paragraphs.map(\.text) }
 
     /// Body font mirroring `PagedDocument.bodyFont`, so both page-turn modes
     /// look the same. SwiftUI cannot indent only the first line, so the indent
@@ -328,12 +339,13 @@ private struct ReaderContent: View {
     }
 
     private var highlightIndex: Int? {
-        guard let sentence = currentSentence else { return nil }
-        let probe = String(sentence.prefix(12))
-        return paragraphs.firstIndex { $0.contains(probe) }
+        guard currentSentence != nil, let text = model.content?.text else { return nil }
+        let offset = model.speech.characterOffset(ofSentence: model.currentSentenceIndex, in: text)
+        return paginated.paragraphIndex(forOriginal: offset)
     }
 
     var body: some View {
+        let highlightedParagraph = highlightIndex
         ScrollViewReader { proxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
@@ -349,7 +361,7 @@ private struct ReaderContent: View {
                     // here. Repeating it would print the heading twice at the
                     // top of a chapter and cost a paragraph of screen space.
                     ForEach(Array(paragraphs.enumerated()), id: \.offset) { index, paragraph in
-                        Text(attributed(displayed(paragraph), highlighted: index == highlightIndex))
+                        Text(attributed(displayed(paragraph), highlighted: index == highlightedParagraph))
                             .font(bodyFont)
                             .lineSpacing(reading.lineSpacing)
                             .multilineTextAlignment(.leading)
@@ -357,6 +369,14 @@ private struct ReaderContent: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(.bottom, reading.paragraphSpacing)
                             .id(index)
+                            .background(
+                                GeometryReader { geo in
+                                    Color.clear.preference(
+                                        key: ParagraphFramesKey.self,
+                                        value: [index: geo.frame(in: .named(Self.scrollSpace))]
+                                    )
+                                }
+                            )
                     }
 
                     if model.isLoading && model.content != nil {
@@ -392,6 +412,14 @@ private struct ReaderContent: View {
                 )
             }
             .coordinateSpace(name: Self.scrollSpace)
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 5).onChanged { _ in
+                    tracksUserScroll = true
+                }
+            )
+            .onPreferenceChange(ParagraphFramesKey.self) { frames in
+                saveVisibleParagraph(frames)
+            }
             .background(
                 GeometryReader { geo in
                     Color.clear.preference(key: ViewportKey.self, value: geo.size.height)
@@ -404,7 +432,8 @@ private struct ReaderContent: View {
                 publishScrollProgress(metrics)
             }
             .onChange(of: model.currentIndex) { _, _ in
-                proxy.scrollTo(0, anchor: .top)
+                tracksUserScroll = false
+                lastSavedOffset = nil
             }
             .onChange(of: model.currentSentenceIndex) { _, _ in
                 guard let index = highlightIndex else { return }
@@ -430,7 +459,8 @@ private struct ReaderContent: View {
     /// preference fires on every scroll tick, and pushing a new value into the
     /// observed model re-renders the whole reader.
     private func publishScrollProgress(_ metrics: ScrollMetrics) {
-        guard let text = model.content?.text, !text.isEmpty,
+        guard !model.isLoading,
+              let text = model.content?.text, !text.isEmpty,
               metrics.contentHeight > 0, viewportHeight > 0 else { return }
         let scrollable = max(metrics.contentHeight - viewportHeight, 1)
         let progress = min(max(Double(metrics.offset / scrollable), 0), 1)
@@ -439,17 +469,36 @@ private struct ReaderContent: View {
         }
     }
 
-    /// Approximate restore by character offset: the cached progress stores a
-    /// character index, and the reader scrolls to the paragraph at that ratio.
+    /// Persist the first visible paragraph, without writing on every scroll tick
+    /// or allowing restoration and speech-driven scrolling to overwrite progress.
+    private func saveVisibleParagraph(_ frames: [Int: CGRect]) {
+        guard tracksUserScroll, !model.isLoading, !model.isSpeaking,
+              model.content?.chapterURL == model.currentChapter?.url else { return }
+        let text = paginated
+        guard let index = frames.filter({ $0.value.maxY > 8 })
+            .min(by: { $0.value.minY < $1.value.minY })?.key,
+              text.paragraphs.indices.contains(index) else { return }
+        let offset = text.paragraphs[index].originalStart
+        model.pendingOffset = offset
+        guard lastSavedOffset != offset else { return }
+        lastSavedOffset = offset
+        model.saveProgress(characterOffset: offset)
+    }
+
     private func restoreScroll(proxy: ScrollViewProxy, text: String) {
-        guard model.pendingOffset > 0, !text.isEmpty else { return }
-        let lineCount = text.components(separatedBy: "\n")
-            .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
-            .count
-        guard lineCount > 0 else { return }
-        let fraction = min(max(Double(model.pendingOffset) / Double(max(text.count, 1)), 0), 1)
-        let target = min(Int(fraction * Double(lineCount)), lineCount - 1)
-        proxy.scrollTo(target, anchor: .center)
+        tracksUserScroll = false
+        lastSavedOffset = nil
+        let document = PaginatedText(rawText: text)
+        guard !document.paragraphs.isEmpty else { return }
+        if model.pendingEndOfChapter {
+            model.pendingEndOfChapter = false
+            proxy.scrollTo(document.paragraphs.count - 1, anchor: .bottom)
+            let offset = document.paragraphs.last!.originalStart
+            model.pendingOffset = offset
+            model.saveProgress(characterOffset: offset)
+        } else if let target = document.paragraphIndex(forOriginal: model.pendingOffset) {
+            proxy.scrollTo(target, anchor: .top)
+        }
     }
 
     private var chapterFooter: some View {
