@@ -932,9 +932,13 @@ final class SpeechController: NSObject, ObservableObject {
     }
 
     /// How many chunks before the end of a chapter the look-ahead starts.
-    /// Two chunks is roughly half a minute of audio: long enough for the
-    /// fastest listener, cheap enough to discard if the reader stops early.
-    private static let nextChapterLookaheadChunks = 2
+    ///
+    /// Four chunks rather than two: short closing lines (dialogue, single-word
+    /// paragraphs) make the last chunks quick to play, and a two-chunk window
+    /// can be under a minute — not much slack for a slow network plus the one
+    /// retry. A bigger window only moves the same single request earlier, so
+    /// the extra cost is a request that may be discarded when the reader stops.
+    private static let nextChapterLookaheadChunks = 4
 
     private func advanceRemote() {
         let next = currentChunkIndex + 1
