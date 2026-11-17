@@ -1,6 +1,7 @@
 #if canImport(AVFoundation) && canImport(SwiftUI)
 import AVFoundation
 import Foundation
+import os
 import NovelKit
 
 /// Reads a chapter aloud.
@@ -19,6 +20,10 @@ import NovelKit
 /// estimated by character count.
 @MainActor
 final class SpeechController: NSObject, ObservableObject {
+    /// Playback diagnostics. Shows in Console.app filtered by the `tts`
+    /// subsystem: every interruption, cancellation and failure leaves a line
+    /// here, so "reading stopped a few times" can be answered after the fact.
+    static let log = Logger(subsystem: "com.yang.NovelReader", category: "tts")
     @Published private(set) var isSpeaking = false
     @Published private(set) var isPaused = false
     @Published private(set) var currentIndex = 0
@@ -585,6 +590,41 @@ final class SpeechController: NSObject, ObservableObject {
         startChunk(at: index, fromSentence: currentIndex)
     }
 
+    /// Fetches a chunk with retries.
+    ///
+    /// The Edge service is free and unguarded: individual requests get rate
+    /// limited or have their socket reset for no visible reason, and one such
+    /// blip used to end a whole listening session at the worst moment — a
+    /// chapter boundary, where the next chunk is the *first* thing fetched
+    /// after the old audio ran out. Transient transport failures are worth two
+    /// more attempts with a short backoff; a rejected token or an empty body
+    /// would fail identically every time, so those are not retried.
+    private func fetchChunkWithRetry(
+        _ chunk: SpeechChunk,
+        key: String,
+        settings: TTSSettings,
+        store: LibraryStore?,
+        chunkIndex: Int
+    ) async throws -> (audio: Data, boundaries: [EdgeSentenceBoundary]) {
+        var lastError: Error?
+        for attempt in 1...3 {
+            do {
+                return try await Self.audio(for: chunk, key: key, settings: settings, store: store)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                lastError = error
+                guard attempt < 3 else { break }
+                let delay = UInt64(attempt) * 600_000_000
+                SpeechController.log.info(
+                    "chunk \(chunkIndex) 第 \(attempt) 次失败，\(delay / 1_000_000)ms 后重试: \(String(describing: error), privacy: .public)"
+                )
+                try? await Task.sleep(nanoseconds: delay)
+            }
+        }
+        throw lastError ?? EdgeTTSError.noAudio
+    }
+
     private func startChunk(at index: Int, fromSentence sentence: Int) {
         guard chunks.indices.contains(index) else {
             finishQueue()
@@ -629,23 +669,22 @@ final class SpeechController: NSObject, ObservableObject {
 
         loadTask = Task { [weak self] in
             do {
-                let audio = try await Self.audio(
-                    for: chunk,
-                    key: key,
-                    settings: settings,
-                    store: store
+                let audio = try await self?.fetchChunkWithRetry(
+                    chunk, key: key, settings: settings, store: store, chunkIndex: index
                 )
                 guard !Task.isCancelled else { return }
                 self?.beginPlayback(
-                    audio: audio.audio,
-                    boundaries: audio.boundaries,
+                    audio: audio?.audio ?? Data(),
+                    boundaries: audio?.boundaries ?? [],
                     chunkIndex: index,
                     fromSentence: sentence
                 )
             } catch is CancellationError {
+                SpeechController.log.info("chunk \(index) 拉取被取消（用户停止/跳转）")
                 return
             } catch {
                 guard let self, !Task.isCancelled else { return }
+                SpeechController.log.error("chunk \(index) 拉取失败（已重试）: \(String(describing: error), privacy: .public)")
                 self.fail(error)
             }
         }
@@ -907,6 +946,7 @@ final class SpeechController: NSObject, ObservableObject {
     }
 
     private func fail(_ error: Error) {
+        Self.log.error("TTS 失败并停止播放: \(String(describing: error), privacy: .public)")
         isSpeaking = false
         isPaused = false
         isPreparing = false
@@ -1094,6 +1134,7 @@ final class SpeechController: NSObject, ObservableObject {
 
         switch type {
         case .began:
+            Self.log.info("音频会话被打断（来电/其他 App 抢占），暂停朗读")
             guard isActive else { return }
             wasPlayingBeforeInterruption = isPlaying
             pause()
@@ -1101,6 +1142,7 @@ final class SpeechController: NSObject, ObservableObject {
             let options = AVAudioSession.InterruptionOptions(
                 rawValue: note.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
             )
+            Self.log.info("打断结束 shouldResume=\(options.contains(.shouldResume))")
             guard wasPlayingBeforeInterruption, options.contains(.shouldResume), isPaused else { return }
             wasPlayingBeforeInterruption = false
             play()
@@ -1117,6 +1159,7 @@ final class SpeechController: NSObject, ObservableObject {
         guard let raw = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt,
               let reason = AVAudioSession.RouteChangeReason(rawValue: raw) else { return }
         guard reason == .oldDeviceUnavailable, isActive else { return }
+        Self.log.info("音频输出设备断开（拔出耳机），暂停朗读")
         pause()
     }
 
@@ -1141,6 +1184,7 @@ extension SpeechController: AVSpeechSynthesizerDelegate {
 
     nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
         Task { @MainActor in
+            SpeechController.log.info("系统引擎语句被取消")
             // Cancellation happens on stop/jump; state is already handled there.
             if self.isSpeaking && self.settings.engine == .system {
                 self.isSpeaking = false

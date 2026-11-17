@@ -325,8 +325,7 @@ final class ReaderModel: ObservableObject {
                 synchronous: shouldSpeak
             )
             guard chapterLoadID == loadID, !Task.isCancelled else { return }
-            content = fetched
-            // A trial read has no shelf entry to record progress against: the
+            content = fetched            // A trial read has no shelf entry to record progress against: the
             // book may never be added, and writing here would also bump
             // `lastReadAt` and so change which book the app resumes.
             if mode.recordsProgress {
@@ -350,11 +349,55 @@ final class ReaderModel: ObservableObject {
             }
         } catch {
             guard chapterLoadID == loadID, !Task.isCancelled else { return }
-            content = nil
-            errorMessage = error.localizedDescription
-            // Nothing is going to play, so release the session kept alive for
-            // the chapter that failed to load.
-            speech.stop()
+            // Reading aloud across a chapter boundary is the one place a
+            // transient network failure is worth a second try without asking:
+            // the listener has no page in front of them, and a failed load
+            // ends the whole session with an error toast. One retry after a
+            // short wait; a genuinely dead source fails the same way again
+            // and surfaces as before.
+            if shouldSpeak {
+                SpeechController.log.error(
+                    "朗读跨章加载失败，准备重试: \(String(describing: error), privacy: .public)"
+                )
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                guard chapterLoadID == loadID, !Task.isCancelled else { return }
+                do {
+                    let retried = try await app.chapterContentPrepared(
+                        book: book,
+                        chapter: chapter,
+                        cache: mode.cachesChapters,
+                        synchronous: true
+                    )
+                    guard chapterLoadID == loadID, !Task.isCancelled else { return }
+                    content = retried
+                    if mode.recordsProgress {
+                        app.updateProgress(bookID: book.id, chapterIndex: index, chapterTitle: chapter.title, characterOffset: offset)
+                    }
+                    describeForSystemPlayback()
+                    startSpeaking(autoPlay: !wasPaused)
+                    if mode.cachesChapters {
+                        schedulePrefetch()
+                        scheduleCleanAhead()
+                    }
+                    isLoading = false
+                    await refreshCacheStats()
+                    return
+                } catch {
+                    guard chapterLoadID == loadID, !Task.isCancelled else { return }
+                    SpeechController.log.error(
+                        "朗读跨章重试仍失败: \(String(describing: error), privacy: .public)"
+                    )
+                    content = nil
+                    errorMessage = error.localizedDescription
+                    speech.stop()
+                }
+            } else {
+                content = nil
+                errorMessage = error.localizedDescription
+                // Nothing is going to play, so release the session kept alive for
+                // the chapter that failed to load.
+                speech.stop()
+            }
         }
         isLoading = false
         await refreshCacheStats()
