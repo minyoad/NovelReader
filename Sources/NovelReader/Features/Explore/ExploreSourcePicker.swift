@@ -81,7 +81,7 @@ struct ExploreSourcePicker: View {
                 Section {
                     probeRow
                 } footer: {
-                    Text("逐个打开发现页，打不开的自动隐藏，通常不到一分钟。")
+                    Text("仅在点击后检测全部来源，耗时取决于来源数量和响应速度，可随时停止。")
                 }
             }
             .listStyle(.insetGrouped)

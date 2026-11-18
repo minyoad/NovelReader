@@ -65,6 +65,20 @@ public actor LibraryStore {
 
     // MARK: - Sources
 
+    public func loadDiscoveryFeed() -> DiscoveryFeedCache? {
+        read(DiscoveryFeedCache.self, from: "discovery-feed.json")
+    }
+
+    public func saveDiscoveryFeed(_ cache: DiscoveryFeedCache) {
+        // An older, cancelled refresh must not overwrite a later preference
+        // change or a newer streamed page that reached this actor first.
+        if let existing = loadDiscoveryFeed(), existing.savedAt > cache.savedAt { return }
+        var bounded = cache
+        bounded.results = DiscoveryCatalog.boundedResults(Array(cache.results.suffix(DiscoveryCatalog.cacheLimit)))
+        bounded.visibleIDs = Array(cache.visibleIDs.prefix(DiscoveryCatalog.batchSize))
+        write(bounded, to: "discovery-feed.json")
+    }
+
     public func loadSources() -> [BookSource] {
         read([BookSource].self, from: "sources.json") ?? []
     }

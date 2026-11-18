@@ -1150,10 +1150,6 @@ final class AppModel: ObservableObject {
     /// ones are thrown away instead of hiding sources that now qualify.
     private static let availabilityVersion = 3
 
-    /// Set when old verdicts were discarded, so the discover page can check the
-    /// sources once instead of making the reader tap through them again.
-    @Published var shouldProbeExplore = false
-
     /// How many tabs opening a source will try before giving up.
     ///
     /// Two would cover the usual case — the first tab is stale, the second
@@ -1191,7 +1187,6 @@ final class AppModel: ObservableObject {
             unavailableExploreSourceIDs = []
             unavailableExploreCategories = [:]
             defaults.set(Self.availabilityVersion, forKey: Self.availabilityVersionKey)
-            shouldProbeExplore = true
             return
         }
 
@@ -1288,6 +1283,7 @@ final class AppModel: ObservableObject {
             if page == 1 { recordExploreSuccess(category: category, source: source) }
             return .success(results)
         } catch {
+            if Task.isCancelled || error is CancellationError { return .failure(error) }
             if page == 1 { recordExploreFailure(category: category, source: source, error: error) }
             return .failure(error)
         }
@@ -1435,6 +1431,7 @@ final class AppModel: ObservableObject {
             }
 
             for await outcome in group {
+                guard !Task.isCancelled else { break }
                 done += 1
                 applyProbeOutcome(outcome)
                 if outcome.isWorking { working += 1 }

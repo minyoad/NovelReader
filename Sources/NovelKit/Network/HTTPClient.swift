@@ -88,13 +88,18 @@ public final class HTTPClient: @unchecked Sendable {
 
     private let session: URLSession
     private let lock = NSLock()
+    private let maximumRetries: Int?
+    private let maximumResponseBytes: Int?
 
-    public init(settings: NetworkSettings = NetworkSettings()) {
+    public init(settings: NetworkSettings = NetworkSettings(), maximumRetries: Int? = nil,
+                resourceTimeout: Double? = nil, maximumResponseBytes: Int? = nil) {
         self.settings = settings
+        self.maximumRetries = maximumRetries.map { max(0, $0) }
+        self.maximumResponseBytes = maximumResponseBytes
 
         let configuration = URLSessionConfiguration.default
         configuration.timeoutIntervalForRequest = settings.timeout
-        configuration.timeoutIntervalForResource = max(settings.timeout, 45)
+        configuration.timeoutIntervalForResource = resourceTimeout ?? max(settings.timeout, 45)
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         configuration.httpShouldSetCookies = settings.useCookies
         configuration.httpCookieStorage = settings.useCookies ? HTTPCookieStorage.shared : nil
@@ -111,11 +116,14 @@ public final class HTTPClient: @unchecked Sendable {
 
     public func fetch(_ request: HTTPRequest, referer: String? = nil, retries: Int = 2) async throws -> FetchedPage {
         var lastError: Error = HTTPError.invalidResponse
+        let retries = max(0, min(retries, maximumRetries ?? retries))
 
         for attempt in 0...retries {
+            try Task.checkCancellation()
             do {
                 return try await perform(request, referer: referer)
             } catch {
+                if Task.isCancelled || error is CancellationError { throw CancellationError() }
                 lastError = error
                 if let httpError = error as? HTTPError {
                     switch httpError {
@@ -129,7 +137,7 @@ public final class HTTPClient: @unchecked Sendable {
                 }
                 if attempt < retries {
                     let delay = UInt64(300 * (attempt + 1)) * 1_000_000
-                    try? await Task.sleep(nanoseconds: delay)
+                    try await Task.sleep(nanoseconds: delay)
                 }
             }
         }
@@ -142,6 +150,7 @@ public final class HTTPClient: @unchecked Sendable {
         }
 
         var urlRequest = URLRequest(url: url)
+        urlRequest.timeoutInterval = max(1, settings.timeout)
         urlRequest.httpMethod = request.method.rawValue
         urlRequest.setValue(settings.userAgent, forHTTPHeaderField: "User-Agent")
         urlRequest.setValue("zh-CN,zh;q=0.9,en;q=0.8", forHTTPHeaderField: "Accept-Language")
@@ -167,7 +176,13 @@ public final class HTTPClient: @unchecked Sendable {
         do {
             (data, response) = try await session.data(for: urlRequest)
         } catch {
+            if Task.isCancelled || (error as? URLError)?.code == .cancelled { throw CancellationError() }
             throw HTTPError.transport(error.localizedDescription)
+        }
+
+        try Task.checkCancellation()
+        if let maximumResponseBytes, data.count > maximumResponseBytes {
+            throw HTTPError.transport("页面过大，已跳过此来源")
         }
 
         guard let httpResponse = response as? HTTPURLResponse else {

@@ -111,7 +111,8 @@ public struct SourceEngine {
     public func explore(
         category: ExploreCategory,
         page: Int,
-        source: BookSource
+        source: BookSource,
+        resultLimit: Int? = nil
     ) async throws -> [SearchResult] {
         guard source.canExplore else {
             throw SourceError.unsupported("书源「\(source.name)」没有配置发现页")
@@ -162,7 +163,8 @@ public struct SourceEngine {
         }
 
         var results: [SearchResult] = []
-        for item in items {
+        for item in items.prefix(max(0, resultLimit ?? items.count)) {
+            try Task.checkCancellation()
             guard let name = engine.value(rules.name, in: item), !name.isEmpty else { continue }
             guard let detail = engine.value(rules.bookURL, in: item),
                   let detailURL = TextProcessing.resolveURL(detail, base: fetched.finalURL) else { continue }
