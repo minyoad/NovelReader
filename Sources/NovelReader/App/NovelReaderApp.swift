@@ -43,10 +43,6 @@ struct RootView: View {
                 .tabItem { Label("发现", systemImage: "safari") }
                 .tag(AppTab.explore)
 
-            SourcesView()
-                .tabItem { Label("书源", systemImage: "antenna.radiowaves.left.and.right") }
-                .tag(AppTab.sources)
-
             SettingsView()
                 .tabItem { Label("设置", systemImage: "gearshape") }
                 .tag(AppTab.settings)

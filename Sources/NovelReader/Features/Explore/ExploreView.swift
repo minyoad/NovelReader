@@ -124,8 +124,11 @@ struct ExploreView: View {
                         ContentUnavailableView {
                             Label(candidates.isEmpty ? "还没有发现来源" : "暂未取得书籍", systemImage: "safari")
                         } description: {
-                            Text(candidates.isEmpty ? "在「书源」导入并启用带发现页的书源。" : "可以调整发现来源，或刷新重试。上次缓存会在有内容时保留。")
+                            Text(candidates.isEmpty ? "在「设置 → 书源管理」导入并启用带发现页的书源。" : "可以调整发现来源，或刷新重试。上次缓存会在有内容时保留。")
                         } actions: {
+                            if candidates.isEmpty {
+                                NavigationLink("添加或管理书源") { SourcesView() }
+                            }
                             Button("调整发现来源") { showingSources = true }
                             if !candidates.isEmpty { Button("刷新重试") { model.refresh() } }
                         }
@@ -228,8 +231,9 @@ private struct DiscoverySourceSelectionView: View {
                     }
                 }
                 if sources.isEmpty {
-                    Text("没有带发现页的已启用书源，请先在「书源」添加。")
+                    Text("没有带发现页的已启用书源，请先在「设置 → 书源管理」添加。")
                         .foregroundStyle(.secondary)
+                    NavigationLink("添加或管理书源") { SourcesView() }
                 }
             }
             .searchable(text: $query, prompt: "搜索来源")

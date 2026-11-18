@@ -95,7 +95,6 @@ enum SearchState: Equatable {
 enum AppTab: Hashable {
     case library
     case explore
-    case sources
     case settings
 }
 
@@ -975,7 +974,7 @@ final class AppModel: ObservableObject {
         let available = sources.filter { $0.enabled && $0.type == .text && ($0.canSearch || $0.isBuiltIn) }
         let active = settings.searchAllSources ? available : Array(available.prefix(1))
         guard !active.isEmpty else {
-            searchState = .failed("没有可用的书源，请先在「书源」里导入")
+            searchState = .failed("没有可用的书源，请前往「设置 → 书源管理」导入")
             return
         }
 

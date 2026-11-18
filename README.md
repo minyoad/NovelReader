@@ -303,6 +303,8 @@ python3 Tools/verify-curl-geometry.py   # 需要 numpy + Pillow
 
 ## 导入书源
 
+从「设置 → 书源管理」进入管理页，也可通过发现页或搜索空结果中的快捷入口进入。
+
 三种方式：
 
 1. 书源页 →「粘贴书源 JSON」→ 粘贴 legado 导出内容 → 导入。

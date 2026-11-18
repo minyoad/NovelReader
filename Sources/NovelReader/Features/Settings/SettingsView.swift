@@ -59,6 +59,17 @@ struct SettingsView: View {
 
                 Section {
                     NavigationLink {
+                        SourcesView()
+                    } label: {
+                        SettingsRow(
+                            icon: "antenna.radiowaves.left.and.right",
+                            tint: .blue,
+                            title: "书源管理",
+                            detail: "已启用 \(app.sources.filter(\.enabled).count) / 共 \(app.sources.count) 个"
+                        )
+                    }
+
+                    NavigationLink {
                         NetworkSettingsPage()
                     } label: {
                         SettingsRow(
@@ -105,7 +116,6 @@ struct SettingsView: View {
 
                 Section("关于") {
                     LabeledContent("版本", value: appVersion)
-                    LabeledContent("书源", value: "\(app.sources.filter(\.enabled).count) 个已启用 / \(app.sources.count) 个")
                     LabeledContent("书架", value: "\(app.books.count) 本")
                     Button {
                         showAIDocs = true

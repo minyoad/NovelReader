@@ -231,8 +231,9 @@ struct SourcesView: View {
         return books.count > 3 ? "\(names) 等 \(books.count) 本" : names
     }
 
+    // Presented inside the settings/search/discovery navigation stack.
     var body: some View {
-        NavigationStack {
+        Group {
             List {
                 if !isBatchSelecting {
                     managementSection
@@ -361,7 +362,7 @@ struct SourcesView: View {
             .coordinateSpace(name: SourceRowLayout.space)
             .onPreferenceChange(RowFramesKey.self) { rowFrames = $0 }
             .simultaneousGesture(slideSelectionGesture)
-            .navigationTitle(isBatchSelecting ? (selection.isEmpty ? "选择书源" : "已选 \(selection.count) 个") : "书源")
+            .navigationTitle(isBatchSelecting ? (selection.isEmpty ? "选择书源" : "已选 \(selection.count) 个") : "书源管理")
             .toolbar {
                 if isBatchSelecting {
                     ToolbarItem(placement: .topBarLeading) {

@@ -40,6 +40,16 @@ struct SearchView: View {
         app.sources.filter { $0.enabled && $0.type == .text && $0.canSearch }
     }
 
+    private var shouldOfferSourceManagement: Bool {
+        if activeSources.isEmpty { return true }
+        guard !isQueryEmpty else { return false }
+        switch app.searchState {
+        case .finished: return app.searchResults.isEmpty
+        case .failed: return true
+        default: return false
+        }
+    }
+
     /// Nothing typed: the field is where a search starts, so this is the only
     /// moment the history belongs on screen.
     private var isQueryEmpty: Bool {
@@ -110,6 +120,19 @@ struct SearchView: View {
                     case .failed(let message):
                         EmptyStateView(title: "搜索失败", message: message, systemImage: "wifi.exclamationmark")
                     }
+                }
+            }
+            .safeAreaInset(edge: .bottom) {
+                if shouldOfferSourceManagement {
+                    NavigationLink {
+                        SourcesView()
+                    } label: {
+                        Label(activeSources.isEmpty ? "添加或启用书源" : "管理书源", systemImage: "antenna.radiowaves.left.and.right")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .padding()
+                    .background(.bar)
                 }
             }
             .navigationTitle("找书")
@@ -270,7 +293,7 @@ struct SearchView: View {
 
     private var searchHint: String {
         if activeSources.isEmpty {
-            return "还没有可用的书源。先在「书源」里导入，或者直接搜索内置示例《长夜灯下》。"
+            return "还没有可用的书源。前往「设置 → 书源管理」导入，或者直接搜索内置示例《长夜灯下》。"
         }
         return "将在 \(activeSources.count) 个书源中搜索。试试「长夜灯下」。"
     }
@@ -289,7 +312,7 @@ struct SearchView: View {
             parts.append("这些书源搜索失败：\(failed.joined(separator: "、"))。")
         }
         if parts.isEmpty {
-            return "换个关键词试试，或者先在「书源」里添加更多书源。"
+            return "换个关键词试试，或者前往「设置 → 书源管理」添加更多书源。"
         }
         return parts.joined(separator: "\n")
     }
@@ -327,7 +350,7 @@ struct SearchView: View {
                     // Shown with the results, not only when the search comes up
                     // empty: this is why one of the sources returned nothing, and
                     // it stays true for every future search.
-                    Text("\(skipped.joined(separator: "、")) 的搜索规则依赖尚未支持的 JS 能力，已在「书源」里标出。")
+                    Text("\(skipped.joined(separator: "、")) 的搜索规则依赖尚未支持的 JS 能力，已在「书源管理」里标出。")
                         .font(.caption2)
                 }
             }

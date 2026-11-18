@@ -153,7 +153,7 @@ final class DiscoveryFeedModel: ObservableObject {
         guard !requests.isEmpty else {
             message = sources.contains { $0.enabled && $0.type == .text && $0.canExplore }
                 ? "来源暂时未响应或正在冷却，可点击刷新重试，或调整发现来源。"
-                : "还没有可用于发现的书源，请先在「书源」导入并启用带发现页的来源。"
+                : "还没有可用于发现的书源，请先在「设置 → 书源管理」导入并启用带发现页的来源。"
             return
         }
         isLoading = true

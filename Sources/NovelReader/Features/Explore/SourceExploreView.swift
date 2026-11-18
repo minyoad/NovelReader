@@ -95,7 +95,7 @@ struct SourceExploreView: View {
             EmptyStateView(
                 title: app.hiddenExploreSources.isEmpty ? "还没有可发现的来源" : "没有能打开的来源",
                 message: app.hiddenExploreSources.isEmpty
-                    ? "去「书源」导入带发现页的书源，就能直接翻分类找书。"
+                    ? "去「设置 → 书源管理」导入带发现页的书源，就能直接翻分类找书。"
                     : "打不开的书源已被隐藏。恢复后检测一遍，只留下真正能打开的。",
                 systemImage: "safari"
             )
