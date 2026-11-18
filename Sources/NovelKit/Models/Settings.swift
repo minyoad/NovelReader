@@ -524,6 +524,19 @@ public struct AppSettings: Codable, Hashable, Sendable {
     /// scrolling past the other hundred and ninety-five. Order is the user's,
     /// not alphabetical, so the ones used most can be kept at the very top.
     public var pinnedSourceIDs: [UUID]
+    /// When the AI block last changed on this device.
+    ///
+    /// Needed because the sync file's `updatedAt` is the time of the *sync*,
+    /// and the local payload is built with `Date()` — which is always newer
+    /// than the remote file. Comparing those two would make the local copy win
+    /// every time, so a change made on the other phone could never arrive.
+    /// This records the only thing the merge actually needs: when did this
+    /// device's settings last differ.
+    ///
+    /// Optional so settings written before it existed still decode; absent
+    /// means "unknown", and the merge treats a device with no timestamp as
+    /// having never changed its AI block.
+    public var aiUpdatedAt: Date?
 
     public init(
         reading: ReadingSettings = ReadingSettings(),
@@ -537,7 +550,8 @@ public struct AppSettings: Codable, Hashable, Sendable {
         aiCleanAhead: Int = 3,
         searchHistory: [String] = [],
         sync: SyncSettings = SyncSettings(),
-        pinnedSourceIDs: [UUID] = []
+        pinnedSourceIDs: [UUID] = [],
+        aiUpdatedAt: Date? = nil
     ) {
         self.reading = reading
         self.tts = tts
@@ -551,6 +565,7 @@ public struct AppSettings: Codable, Hashable, Sendable {
         self.searchHistory = searchHistory
         self.sync = sync
         self.pinnedSourceIDs = pinnedSourceIDs
+        self.aiUpdatedAt = aiUpdatedAt
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -566,6 +581,7 @@ public struct AppSettings: Codable, Hashable, Sendable {
         case searchHistory
         case sync
         case pinnedSourceIDs
+        case aiUpdatedAt
     }
 
     /// Tolerant decoding so adding settings in a new build does not wipe the
@@ -589,6 +605,7 @@ public struct AppSettings: Codable, Hashable, Sendable {
         sync = (try? container.decodeIfPresent(SyncSettings.self, forKey: .sync)) ?? defaults.sync
         pinnedSourceIDs = try container.decodeIfPresent([UUID].self, forKey: .pinnedSourceIDs)
             ?? defaults.pinnedSourceIDs
+        aiUpdatedAt = try container.decodeIfPresent(Date.self, forKey: .aiUpdatedAt)
     }
 
     /// A copy safe to write as plain JSON: API keys live in the Keychain, never

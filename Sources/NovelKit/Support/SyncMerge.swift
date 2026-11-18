@@ -308,11 +308,10 @@ public enum SyncMerge {
 
         // The sync server's address: newest file wins, older one fills blanks.
         //
-        // Keyed off nothing but the files themselves, because there is no id to
-        // match on. Using `updatedAt` here rather than a per-field timestamp is
-        // deliberate: the address changes when someone moves servers, and that
-        // is a deliberate act that should win over a stale copy, while a field
-        // the newer side never filled must not erase a working setup.
+        // `local.updatedAt` is the time this device's own copy was last
+        // *changed*, not the time of this sync. Comparing against "now" would
+        // make the local side win every time — the file could never bring in a
+        // change made on the other phone.
         let endpoint: SyncEndpoint?
         switch (local.endpoint, remote.endpoint) {
         case let (localEndpoint?, remoteEndpoint?):
@@ -327,19 +326,21 @@ public enum SyncMerge {
             endpoint = nil
         }
 
-        // AI settings: the newer file wins whole, with the older one filling
-        // only what the newer left blank.
+        // AI settings: the block with the later `updatedAt` wins whole, with
+        // the older one filling only what it left blank.
         //
-        // Field-by-field merging would be wrong here: the address, model and
-        // preset are one coherent choice — `deepseek-chat` against a
-        // `wb.mybacc.com` endpoint is not a configuration anyone meant. So a
-        // device that just changed providers replaces the whole block, and a
-        // fresh install (which has none of it filled in) cannot blank out a
-        // working one.
+        // Compared on the block's own timestamp, not the payload's. The
+        // payload's `updatedAt` is when the file was written — on every sync,
+        // whether or not AI changed — so using it meant the local side (built
+        // with `Date()` at that moment) won every single time and a change
+        // made on the other phone could never arrive. That was the bug behind
+        // "I changed it by hand and after syncing it is still wrong".
         let ai: SyncedAISettings?
         switch (local.ai, remote.ai) {
         case let (localAI?, remoteAI?):
-            ai = remote.updatedAt > local.updatedAt
+            let localTime = localAI.updatedAt ?? .distantPast
+            let remoteTime = remoteAI.updatedAt ?? .distantPast
+            ai = remoteTime > localTime
                 ? SyncedAISettings.merge(newer: remoteAI, older: localAI)
                 : SyncedAISettings.merge(newer: localAI, older: remoteAI)
         case let (localAI?, nil):

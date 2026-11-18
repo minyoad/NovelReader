@@ -44,12 +44,18 @@ struct SyncClaimTests {
         #expect(Self.claimTimeout >= worstCase)
     }
 
-    @Test("启动同步的 8 秒上限远小于占用上限，所以超时后按钮仍可用")
-    func startupDeadlineIsShorter() {
-        // 启动同步最多等 8 秒，超时后 runSync 可能还在跑。
-        // 只要占用上限明显更长，用户在启动同步之后点「立即同步」
-        // 才会看到"还没结束"。这正是要避免的：所以 runSync 里
-        // withDeadline 超时会取消任务，占用也随之释放。
-        #expect(8.0 < Self.claimTimeout)
+    @Test("启动同步不再用 8 秒上限，所以不会留下跑不完的占用")
+    func startupNoLongerAbandons() {
+        // 之前启动同步包在 8 秒的 withDeadline 里：一次正常的同步上传几百个
+        // 书源就超过 8 秒，于是几乎每次启动都会放弃一次运行，而那次运行还在
+        // 占着 syncInFlight，用户一到书架点「立即同步」就被告知"还没结束"。
+        //
+        // 现在启动同步直接用网络层自己的超时（单请求 30s，单资源 50s），
+        // 占用只在真正结束时释放。
+        let networkBound: TimeInterval = 50 * 3
+        #expect(networkBound < Self.claimTimeout)
+        // 也就是说：只要同步还在合法耗时内，占用就有效、按钮就该显示"正在同步"。
+        // 一旦超过 180 秒（网络层早就该结束了），占用失效，用户不会被锁死。
+        #expect(Self.claimTimeout > networkBound)
     }
 }

@@ -40,6 +40,16 @@ public struct SyncedAISettings: Codable, Sendable, Equatable {
     public var autoClean: Bool
     public var cleanAhead: Int
 
+    /// When this block last changed on the device that published it.
+    ///
+    /// The payload already has an `updatedAt`, but that is the time of the
+    /// *sync* — the file is rewritten on every sync even when nothing about AI
+    /// changed. Using it to decide "whose settings are newer" made the local
+    /// side win every time, because the local payload is built with `Date()`
+    /// at the moment of syncing. This is the timestamp the merge actually
+    /// needs, and it only moves when one of the fields above really changes.
+    public var updatedAt: Date?
+
     public init(
         enabled: Bool = false,
         preset: AIProviderPreset = .deepseek,
@@ -53,7 +63,8 @@ public struct SyncedAISettings: Codable, Sendable, Equatable {
         customInstruction: String = "",
         outputFormat: AIPrompt.OutputFormat = .paragraphs,
         autoClean: Bool = false,
-        cleanAhead: Int = 3
+        cleanAhead: Int = 3,
+        updatedAt: Date? = nil
     ) {
         self.enabled = enabled
         self.preset = preset
@@ -68,6 +79,7 @@ public struct SyncedAISettings: Codable, Sendable, Equatable {
         self.outputFormat = outputFormat
         self.autoClean = autoClean
         self.cleanAhead = cleanAhead
+        self.updatedAt = updatedAt
     }
 
     public init(_ settings: AppSettings) {
@@ -85,7 +97,8 @@ public struct SyncedAISettings: Codable, Sendable, Equatable {
             customInstruction: ai.customInstruction,
             outputFormat: settings.aiOutputFormat,
             autoClean: settings.aiAutoClean,
-            cleanAhead: settings.aiCleanAhead
+            cleanAhead: settings.aiCleanAhead,
+            updatedAt: settings.aiUpdatedAt
         )
     }
 
@@ -107,6 +120,11 @@ public struct SyncedAISettings: Codable, Sendable, Equatable {
     }
 
     /// Applies these settings locally, leaving everything else alone.
+    ///
+    /// The timestamp is carried along, so the local copy keeps the identity of
+    /// the change it came from. Overwriting it with "now" would make this
+    /// device look like the author of a change it merely received, and the next
+    /// merge would then prefer it over the device that actually made it.
     public func apply(to settings: inout AppSettings) {
         settings.ai.enabled = enabled
         settings.ai.preset = preset
@@ -121,6 +139,7 @@ public struct SyncedAISettings: Codable, Sendable, Equatable {
         settings.aiOutputFormat = outputFormat
         settings.aiAutoClean = autoClean
         settings.aiCleanAhead = cleanAhead
+        settings.aiUpdatedAt = updatedAt
     }
 
     /// Merges two blocks, newest wins whole, older fills blanks only.

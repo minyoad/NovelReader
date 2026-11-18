@@ -18,7 +18,6 @@ struct SyncSettingsSection: View {
     /// Result of the last manual sync, shown under the button. A sync failure
     /// used to go to a banner on the shelf screen, which is invisible here.
     @State private var syncMessage: (text: String, isError: Bool)?
-    @State private var syncing = false
     @State private var showWebDAVPassword = false
     @State private var showS3Secret = false
 
@@ -203,22 +202,31 @@ struct SyncSettingsSection: View {
         .disabled(testing)
 
         Button {
-            syncing = true
             syncMessage = ("正在同步…", false)
             Task {
                 let outcome = await app.runSync(reportErrors: true)
                 syncMessage = (outcome.summary, !outcome.isSuccess)
-                syncing = false
             }
         } label: {
             HStack {
-                if syncing {
+                if app.syncInProgress {
                     ProgressView().controlSize(.small)
                 }
-                Text("立即同步")
+                Text(app.syncInProgress ? "正在同步…" : "立即同步")
             }
         }
-        .disabled(syncing)
+        // Driven by the model, not by a local flag: a launch-time or
+        // background sync is already running before this screen is opened, and
+        // a view-local `syncing` knew nothing about it. The button looked
+        // pressable, and pressing it produced "上一次同步还没结束" — a message
+        // that reads like a fault rather than "wait a moment".
+        .disabled(app.syncInProgress)
+
+        if app.syncInProgress {
+            Text("正在与服务器同步，完成后会显示结果。")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        }
 
         if !sync.wrappedValue.isUsable {
             Text("配置还不完整：需要打开开关，并填好地址和账号。")

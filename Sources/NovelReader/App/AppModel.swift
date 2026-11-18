@@ -398,15 +398,26 @@ final class AppModel: ObservableObject {
     ///
     /// A timestamp rather than a bare flag, because the run it guards can be
     /// abandoned: the launch-time sync gives up waiting after eight seconds,
-    /// and the request underneath is not cancellation-aware — it unwinds when
-    /// URLSession decides to, which for a server that accepts the connection
-    /// and then goes quiet is the resource timeout. With a plain flag that
-    /// window locked the manual sync button out for a minute at a time.
+    /// and the request underneath may not unwind immediately — URLSession
+    /// decides when. With a plain flag that window locked the manual sync
+    /// button out with "上一次同步还没结束" for a sync the user could see
+    /// nothing of.
     ///
-    /// So a claim older than the longest a sync could legitimately take is
-    /// treated as dead and ignored. The stale run still finishes on its own;
-    /// what it must not do is keep the user from starting a real one.
+    /// Two fixes, because either alone leaves a hole:
+    ///
+    /// - the claim expires, so an abandoned run cannot block forever;
+    /// - the state is published, so while a sync really is running the button
+    ///   is disabled and says so, instead of accepting a press and answering
+    ///   with a message that reads like an error.
     private var syncClaim: Date?
+
+    /// True while a sync is actually running. Published so the settings screen
+    /// can disable the button and show progress, rather than letting the press
+    /// through and rejecting it afterwards.
+    @Published private(set) var syncInProgress = false
+
+    /// When the running sync started, for the "正在同步…" line.
+    @Published private(set) var syncStartedAt: Date?
 
     /// How long a claim is honoured before it is assumed abandoned.
     ///
@@ -418,8 +429,17 @@ final class AppModel: ObservableObject {
 
     private var syncInFlight: Bool {
         guard let claim = syncClaim else { return false }
-        return Date().timeIntervalSince(claim) < Self.syncClaimTimeout
+        // An expired claim is no longer a claim. Clearing it here keeps
+        // `syncInProgress` honest: the published flag is for the UI, this is
+        // the guard, and they must agree or the button would look disabled
+        // after the guard had already let a new run through.
+        if Date().timeIntervalSince(claim) >= Self.syncClaimTimeout {
+            syncClaim = nil
+            return false
+        }
+        return true
     }
+
     @Published private(set) var pendingProgressAdvances: [UUID: SyncProgressAdvance] = [:]
     @Published private(set) var activeReaderBookID: UUID?
     @Published private(set) var preferredSyncJumpBookID: UUID?
@@ -506,7 +526,19 @@ final class AppModel: ObservableObject {
             return .failed("上一次同步还没结束，请稍等")
         }
         syncClaim = Date()
-        defer { syncClaim = nil }
+        syncStartedAt = Date()
+        syncInProgress = true
+        // Cleared explicitly rather than in `defer`, and here specifically:
+        // `defer` does run on the normal paths, but a cancelled `Task` can
+        // still be unwinding inside `URLSession` when this function's stack
+        // goes away, and the flag has to be down before the user sees the
+        // button again either way. Publishing it makes the UI wait instead of
+        // letting a press through to be rejected.
+        defer {
+            syncClaim = nil
+            syncInProgress = false
+            syncStartedAt = nil
+        }
 
         let transport: SyncTransport
         switch settings.sync.backend {
@@ -578,12 +610,14 @@ final class AppModel: ObservableObject {
                 // pin can point at a source that is gone.
                 prunePinnedSources()
             }
-            // Read before `lastSyncedAt` moves: it is the baseline that tells
-            // "the file is this device's own upload" from "another device
-            // wrote it since".
+            // Whose settings win was decided in the merge, on each block's own
+            // timestamp; these two just apply the result.
             adoptSyncedEndpoint(result.endpoint)
-            adoptSyncedAI(result.ai, fileUpdatedAt: result.remoteUpdatedAt)
+            adoptSyncedAI(result.ai)
             settings.sync.lastSyncedAt = result.remoteUpdatedAt ?? Date()
+            // Takes the adopted values to disk. The API key goes to the
+            // Keychain here too — `saveSettings` is the one path that splits
+            // secrets out of the file.
             saveSettings()
             if reportErrors {
                 showBanner("同步完成：\(result.booksAfter) 本书", isError: false)
@@ -597,35 +631,41 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Takes AI settings from the file when this device cannot use its own, or
-    /// when the file was written after this device last finished a sync.
+    /// Stamps the AI block when it changes on this device.
     ///
-    /// Two cases, and both are real:
+    /// Called from the settings observer, which sees every edit made anywhere.
+    /// Only the AI fields are compared: a font-size slider must not make this
+    /// device look like it has newer AI settings than the other phone.
     ///
-    /// - **This device cannot do AI cleanup on its own.** A fresh install, or
-    ///   one whose key was cleared. Taking the file's copy here is what makes
-    ///   the feature work on a second phone without retyping anything.
-    /// - **This device is configured, but the file is newer.** The user
-    ///   switched provider on another phone; that should reach every device.
+    /// The timestamp is written back onto `settings`, which re-runs the
+    /// observer — the second run finds the AI block unchanged and does
+    /// nothing, so this settles immediately instead of looping.
+    func noteAIChange(from old: AppSettings) {
+        var comparableOld = SyncedAISettings(old)
+        var comparableNew = SyncedAISettings(settings)
+        // Ignore the timestamp itself, or every call would look like a change.
+        comparableOld.updatedAt = nil
+        comparableNew.updatedAt = nil
+        guard comparableOld != comparableNew else { return }
+        guard settings.aiUpdatedAt != nil || SyncedAISettings(settings).isConfigured else { return }
+        settings.aiUpdatedAt = Date()
+    }
+
+    /// Applies the merged AI block, which `SyncMerge` has already decided.
     ///
-    /// "Newer" compares the file's `updatedAt` with `lastSyncedAt` — the last
-    /// time this device successfully wrote its own state. If the file is newer
-    /// than that, another device wrote it since; if it is not, the file is
-    /// this device's own upload and there is nothing to adopt. No extra
-    /// timestamp is needed, and none is stored.
+    /// The decision of *whose* settings win is made in the merge, on each
+    /// block's own timestamp — not here. This method only has to tell the
+    /// difference between "the merge produced my own block" (nothing to do)
+    /// and "it produced the other phone's" (apply it), which is what the
+    /// equality check does.
     ///
-    /// The one thing that never happens is adopting a block that is not
-    /// configured at all — which is what a device that never opened AI
-    /// settings would upload if it were allowed to.
-    private func adoptSyncedAI(_ ai: SyncedAISettings?, fileUpdatedAt: Date?) {
+    /// It never applies an unconfigured block. A half-set-up device that
+    /// somehow got published must not be able to erase a working setup just
+    /// because its block carried a later timestamp.
+    private func adoptSyncedAI(_ ai: SyncedAISettings?) {
         guard let ai, ai.isConfigured else { return }
         let current = SyncedAISettings(settings)
         guard current != ai else { return }
-        // A working setup here loses only to a file written by another device
-        // after this one's last sync.
-        if current.isConfigured {
-            guard let fileUpdatedAt, fileUpdatedAt > (settings.sync.lastSyncedAt ?? .distantPast) else { return }
-        }
         ai.apply(to: &settings)
     }
 
@@ -670,22 +710,28 @@ final class AppModel: ObservableObject {
             }
         }
         guard settings.sync.isUsable else { return }
-        await withDeadline(seconds: 8) {
-            await self.runSync()
-            return true
-        }
+        // Not wrapped in a deadline, unlike the subscriptions above.
+        //
+        // The eight seconds were the wrong shape for this one: a sync that
+        // uploads a few hundred sources takes longer than that on a good day,
+        // so the deadline fired almost every launch and abandoned a run that
+        // then held the "syncing" state while the user was already on the
+        // shelf — which is exactly when they press 立即同步 and get told a
+        // sync is still running. The network layer already has its own
+        // timeouts (30s per request, 50s per resource), so a dead server ends
+        // in bounded time without a deadline here. What matters at launch is
+        // that the shelf is not blocked, and it is not: this runs in a Task
+        // from the app's `.task`, and the reader opens from its own path.
+        await runSync()
     }
 
     /// Runs `work` but stops waiting after `seconds`.
     ///
-    /// A detached deadline rather than racing inside the work itself: once it
-    /// is inside `URLSession` it is not cancellation-aware, so the only
-    /// reliable way to stop waiting is to stop waiting.
-    ///
-    /// The task *is* cancelled on timeout. URLSession's `data(for:)` honours
-    /// task cancellation in practice — it tears the connection down — so this
-    /// usually does end the request; `withDeadline` does not rely on it, which
-    /// is why `syncInFlight` also expires on its own.
+    /// The task is cancelled on timeout, which URLSession's `data(for:)`
+    /// honours in practice by tearing the connection down. It is not relied on
+    /// for correctness: a cancelled task can still be unwinding inside
+    /// `URLSession`, so `runSync`'s claim also expires on its own rather than
+    /// trusting that cancellation ends the run promptly.
     private func withDeadline(seconds: Double, _ work: @escaping @MainActor () async -> Bool) async {
         let task = Task { @MainActor in await work() }
         await withTaskGroup(of: Bool.self) { group in
@@ -696,8 +742,6 @@ final class AppModel: ObservableObject {
             }
             let finished = await group.next() ?? false
             group.cancelAll()
-            // Timed out: stop the work too, rather than leaving it to hold the
-            // sync claim while the user is looking at the shelf.
             if finished == false { task.cancel() }
         }
     }

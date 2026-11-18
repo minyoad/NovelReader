@@ -92,7 +92,14 @@ struct RootView: View {
             // background and the reader asks whether to jump via the
             // synced-progress prompt.
             resumeLastReading()
-            await app.runStartupSync()
+            // Started, not awaited. `runStartupSync` now runs the sync without
+            // an artificial deadline (see its comment), so awaiting it here
+            // would hold this `.task` open for as long as the upload takes.
+            // Nothing below depends on it: the shelf is already loaded and the
+            // book already resumed above, and the settings screen shows the
+            // "正在同步…" state from `app.syncInProgress` if the user goes there
+            // while it is still running.
+            Task { await app.runStartupSync() }
         }
         .onChange(of: tab) { _, newTab in
             // Any deliberate navigation beats a deferred auto-resume. Once the
@@ -111,16 +118,29 @@ struct RootView: View {
             }
             if phase == .background {
                 app.saveSettings()
-                Task { await app.refreshSubscriptions() }
-                Task { await app.runSync() }
+                // Sequential, not two racing Tasks. Both touch the source
+                // list that a sync uploads, and refreshing subscriptions after
+                // the sync had already read them meant the new sources went up
+                // on the *next* launch instead of this one.
+                Task {
+                    await app.refreshSubscriptions()
+                    await app.runSync()
+                }
             }
         }
-        .onChange(of: app.settings) { _, _ in
+        .onChange(of: app.settings) { oldValue, newValue in
             // Settings changed from somewhere other than a page's own save
             // hook — a reading slider dragged from the reader, a sheet closed by
             // swiping. Persisting here rather than in each page is what stops
             // the settings tab's split into pages from losing a change made on
             // one of them right before the app is backgrounded.
+            //
+            // The AI timestamp moves here, and only here, so it means "this
+            // device's AI block differs from what it was". `adoptSyncedAI`
+            // installs a block with its original timestamp, so adopting does
+            // not restart the clock — otherwise this device would immediately
+            // look newer than the phone the change actually came from.
+            app.noteAIChange(from: oldValue)
             app.saveSettings()
         }
     }

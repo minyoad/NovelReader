@@ -21,13 +21,21 @@ struct SyncedAISettingsTests {
         )
     }
 
-    private func configured(key: String = "sk-abc", model: String = "deepseek-chat") -> SyncedAISettings {
+    /// - Parameter changedAt: when this block was last edited on its device.
+    ///   The merge compares these, not the payload's `updatedAt` — see
+    ///   `newerFileWins` for why.
+    private func configured(
+        key: String = "sk-abc",
+        model: String = "deepseek-chat",
+        changedAt: Date? = nil
+    ) -> SyncedAISettings {
         SyncedAISettings(
             enabled: true,
             preset: .deepseek,
             baseURL: "https://api.deepseek.com/v1",
             model: model,
-            apiKey: key
+            apiKey: key,
+            updatedAt: changedAt
         )
     }
 
@@ -123,23 +131,45 @@ struct SyncedAISettingsTests {
         #expect(merged.model == "deepseek-chat")
     }
 
-    @Test("文件更新时取文件里的")
+    @Test("文件里的 AI 块更新时取文件里的")
     func newerFileWins() {
         let now = Date()
+        // 关键：payload 的 updatedAt 在这里反而是「本地更新」——真实同步里
+        // 它就是同步那一刻，永远比文件里的旧时间新。旧实现比的就是它，
+        // 于是本地每次都赢，另一台改了参数永远传不过来。
         let local = payload(
-            updatedAt: now.addingTimeInterval(-3600),
-            ai: configured(key: "sk-old", model: "old-model")
+            updatedAt: now,
+            ai: configured(key: "sk-old", model: "old-model", changedAt: now.addingTimeInterval(-3600))
         )
         let remote = payload(
             device: "B",
-            updatedAt: now,
-            ai: configured(key: "sk-new", model: "new-model")
+            updatedAt: now.addingTimeInterval(-1800),
+            ai: configured(key: "sk-new", model: "new-model", changedAt: now)
         )
 
         let outcome = SyncMerge.merge(local: local, remote: remote)
 
         #expect(outcome.ai?.apiKey == "sk-new")
         #expect(outcome.ai?.model == "new-model")
+    }
+
+    @Test("本机的 AI 块更新时保留本机的，即使文件刚被重写过")
+    func newerLocalBlockWins() {
+        let now = Date()
+        let local = payload(
+            updatedAt: now,
+            ai: configured(key: "sk-mine", model: "mine", changedAt: now)
+        )
+        let remote = payload(
+            device: "B",
+            updatedAt: now.addingTimeInterval(60),
+            ai: configured(key: "sk-theirs", model: "theirs", changedAt: now.addingTimeInterval(-3600))
+        )
+
+        let outcome = SyncMerge.merge(local: local, remote: remote)
+
+        #expect(outcome.ai?.apiKey == "sk-mine")
+        #expect(outcome.ai?.model == "mine")
     }
 
     @Test("本机没配、文件有配，拿到文件的")
