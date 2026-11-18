@@ -48,6 +48,12 @@ public struct SyncedAISettings: Codable, Sendable, Equatable {
     /// side win every time, because the local payload is built with `Date()`
     /// at the moment of syncing. This is the timestamp the merge actually
     /// needs, and it only moves when one of the fields above really changes.
+    ///
+    /// Settings written before this field existed decode with `nil`, which the
+    /// merge reads as "never changed". `LibraryStore.loadSettings` backfills it
+    /// once from the settings file's modification time, so an upgraded device
+    /// keeps a place in the ordering instead of always losing to a file that
+    /// carries a timestamp.
     public var updatedAt: Date?
 
     public init(

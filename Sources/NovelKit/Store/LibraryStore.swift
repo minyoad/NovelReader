@@ -118,7 +118,29 @@ public actor LibraryStore {
     // MARK: - Settings
 
     public func loadSettings() -> AppSettings {
-        read(AppSettings.self, from: "settings.json") ?? AppSettings()
+        var settings = read(AppSettings.self, from: "settings.json") ?? AppSettings()
+        // Settings written before the AI timestamp existed have none, which the
+        // sync merge reads as "never changed". Every upgraded device would then
+        // report the same non-answer, and whichever file carried a timestamp —
+        // any file written by a newer build — would win even over a
+        // configuration the user set up by hand here.
+        //
+        // The day the AI block actually changed is not recorded anywhere, so
+        // this backfills the best available guess: the file's own modification
+        // time. That is not the change date, but it is the last time this
+        // device wrote its settings, which is the closest thing to "when this
+        // device last meant what it says".
+        if settings.aiUpdatedAt == nil {
+            settings.aiUpdatedAt = settingsFileModificationDate()
+        }
+        return settings
+    }
+
+    /// The on-disk modification time of `settings.json`, if it exists.
+    private func settingsFileModificationDate() -> Date? {
+        let url = directory.appendingPathComponent("settings.json")
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path) else { return nil }
+        return attributes[.modificationDate] as? Date
     }
 
     /// Whether a settings file exists, as opposed to defaults being returned.

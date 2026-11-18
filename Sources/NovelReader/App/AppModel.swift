@@ -647,7 +647,13 @@ final class AppModel: ObservableObject {
         comparableOld.updatedAt = nil
         comparableNew.updatedAt = nil
         guard comparableOld != comparableNew else { return }
-        guard settings.aiUpdatedAt != nil || SyncedAISettings(settings).isConfigured else { return }
+        // Any real edit stamps the block, including clearing it — that is a
+        // deliberate act and has to beat the other phone's copy. But the *first*
+        // edit on a device that has never recorded a timestamp, while the block
+        // is still unconfigured, is the user filling the page in from empty.
+        // Those keystrokes are not a configuration yet, and stamping them would
+        // make a half-typed address the newest AI settings in the file.
+        guard settings.aiUpdatedAt != nil || comparableNew.isConfigured else { return }
         settings.aiUpdatedAt = Date()
     }
 
