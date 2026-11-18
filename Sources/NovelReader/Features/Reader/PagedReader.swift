@@ -3,6 +3,15 @@ import Foundation
 import SwiftUI
 import NovelKit
 
+/// Ask every reader view to drop caches that can be rebuilt from disk or
+/// text: adjacent-chapter paginations and the styled page slices. Fired when
+/// the system posts a memory warning; a few seconds of re-layout on the next
+/// page turn is much cheaper than being killed by jetsam.
+extension Notification.Name {
+    static let readerReleaseRegenerableMemory =
+        Notification.Name("readerReleaseRegenerableMemory")
+}
+
 /// Horizontal page-turning reader. Text is laid out with CoreText
 /// (`PageLayout`) so the drawn pages match the measured slices exactly, and the
 /// character offsets map back to the chapter text for progress and TTS.
@@ -111,6 +120,15 @@ struct PagedReader: View {
             .onDisappear {
                 isVisible = false
                 layoutRequestID = UUID()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .readerReleaseRegenerableMemory)) { _ in
+                // Adjacent-chapter documents are pure cache: the current
+                // chapter's document is the one being read, so it stays.
+                let currentURL = model.content?.chapterURL
+                preparedChapters = preparedChapters.filter { $0.key == currentURL }
+                // Styled slices rebuild in one CoreText pass on demand.
+                refreshStaging()
+                model.releaseRegenerableMemory()
             }
             .task(id: LayoutRequest(layout: layoutKey(box), positionRevision: model.positionRevision, isLoading: model.isLoading)) {
                 await paginate(box: box)

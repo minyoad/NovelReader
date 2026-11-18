@@ -88,12 +88,15 @@ struct RootView: View {
             // Loading the shelf and opening the last book are one flow: the
             // resume decision needs the books that `bootstrap` fetches.
             await app.bootstrap()
-            // Sync before resuming: the progress being resumed may have been
-            // advanced on the other device. Bounded, because a slow or
-            // unreachable server must not leave the app on the shelf for
-            // minutes while the user wonders whether it launched at all.
-            await app.runStartupSync()
+            // Resume before syncing. The sync used to run first so the resumed
+            // position could be the remote one, but its two bounded phases can
+            // hold the shelf for ~16 seconds on a slow network, which reads as
+            // "the app did not reopen my book". A remote position that is
+            // ahead no longer needs the wait: the sync completes in the
+            // background and the reader asks whether to jump via the
+            // synced-progress prompt.
             resumeLastReading()
+            await app.runStartupSync()
         }
         .onChange(of: tab) { _, newTab in
             // Any deliberate navigation beats a deferred auto-resume. Once the

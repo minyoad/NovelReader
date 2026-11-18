@@ -187,6 +187,20 @@ struct ReaderView: View {
                 ScreenAwake.release()
             }
         }
+        // The reader holds the largest single allocations in the app: three
+        // fully paginated chapter documents and their styled page slices.
+        // Dropping the regenerable ones on a memory warning is what keeps a
+        // moment of system-wide memory pressure (another app grabbing
+        // hundreds of megabytes) from pushing the reader over the jetsam
+        // limit and killing it mid-read.
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didReceiveMemoryWarningNotification)) { _ in
+            NotificationCenter.default.post(
+                name: .readerReleaseRegenerableMemory, object: nil
+            )
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .readerReleaseRegenerableMemory)) { _ in
+            model.releaseRegenerableMemory()
+        }
         .modifier(SyncedProgressPrompt(
             advance: model.mode.recordsProgress ? app.pendingProgressAdvances[model.book.id] : nil,
             enabled: scenePhase == .active && !model.isLoading && model.errorMessage == nil

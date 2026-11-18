@@ -924,6 +924,16 @@ final class ReaderModel: ObservableObject {
 
     /// Stops background work when the reader closes, so prefetch does not keep
     /// hitting the network after the user leaves the book.
+    /// Drops caches the reader can rebuild, on a system memory warning.
+    ///
+    /// Nothing here affects what is on screen: the current chapter and its
+    /// speech queue stay untouched, and everything dropped is refetched or
+    /// relaid out when it is next needed.
+    func releaseRegenerableMemory() {
+        nextChapterText = nil
+        nextChapterTextURL = nil
+    }
+
     func stopBackgroundWork() {
         chapterLoadID = UUID()
         prefetchTask?.cancel()

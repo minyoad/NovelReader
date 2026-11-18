@@ -10,8 +10,7 @@ import UIKit
 /// found again. Raising `isIdleTimerDisabled` is the one supported way to stop
 /// that, and it has to be released the moment the reader goes away — leaving
 /// it on would keep the whole phone's screen lit from anywhere in the app.
-enum ScreenAwake {
-    /// Applies the user's preference. Idempotent: the reader calls it on
+enum ScreenAwake {    /// Applies the user's preference. Idempotent: the reader calls it on
     /// appearance and again whenever the toggle changes.
     static func apply(_ enabled: Bool) {
         UIApplication.shared.isIdleTimerDisabled = enabled
