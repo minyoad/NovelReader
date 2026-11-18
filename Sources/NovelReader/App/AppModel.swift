@@ -395,7 +395,31 @@ final class AppModel: ObservableObject {
     // MARK: - Sync
 
     /// Guard against two runs at once (launch and foreground can overlap).
-    private var syncInFlight = false
+    ///
+    /// A timestamp rather than a bare flag, because the run it guards can be
+    /// abandoned: the launch-time sync gives up waiting after eight seconds,
+    /// and the request underneath is not cancellation-aware — it unwinds when
+    /// URLSession decides to, which for a server that accepts the connection
+    /// and then goes quiet is the resource timeout. With a plain flag that
+    /// window locked the manual sync button out for a minute at a time.
+    ///
+    /// So a claim older than the longest a sync could legitimately take is
+    /// treated as dead and ignored. The stale run still finishes on its own;
+    /// what it must not do is keep the user from starting a real one.
+    private var syncClaim: Date?
+
+    /// How long a claim is honoured before it is assumed abandoned.
+    ///
+    /// Comfortably longer than one sync: the WebDAV request timeout is 30s
+    /// with a 50s resource cap, and a sync makes three requests (read, MKCOL
+    /// optionally, write), so a slow-but-working server can take a couple of
+    /// minutes in the worst case.
+    private static let syncClaimTimeout: TimeInterval = 180
+
+    private var syncInFlight: Bool {
+        guard let claim = syncClaim else { return false }
+        return Date().timeIntervalSince(claim) < Self.syncClaimTimeout
+    }
     @Published private(set) var pendingProgressAdvances: [UUID: SyncProgressAdvance] = [:]
     @Published private(set) var activeReaderBookID: UUID?
     @Published private(set) var preferredSyncJumpBookID: UUID?
@@ -481,8 +505,8 @@ final class AppModel: ObservableObject {
         guard !syncInFlight else {
             return .failed("上一次同步还没结束，请稍等")
         }
-        syncInFlight = true
-        defer { syncInFlight = false }
+        syncClaim = Date()
+        defer { syncClaim = nil }
 
         let transport: SyncTransport
         switch settings.sync.backend {
@@ -656,8 +680,12 @@ final class AppModel: ObservableObject {
     ///
     /// A detached deadline rather than racing inside the work itself: once it
     /// is inside `URLSession` it is not cancellation-aware, so the only
-    /// reliable way to stop waiting is to stop waiting. The work keeps running
-    /// and its own completion still lands.
+    /// reliable way to stop waiting is to stop waiting.
+    ///
+    /// The task *is* cancelled on timeout. URLSession's `data(for:)` honours
+    /// task cancellation in practice — it tears the connection down — so this
+    /// usually does end the request; `withDeadline` does not rely on it, which
+    /// is why `syncInFlight` also expires on its own.
     private func withDeadline(seconds: Double, _ work: @escaping @MainActor () async -> Bool) async {
         let task = Task { @MainActor in await work() }
         await withTaskGroup(of: Bool.self) { group in
@@ -666,8 +694,11 @@ final class AppModel: ObservableObject {
                 try? await Task.sleep(for: .seconds(seconds))
                 return false
             }
-            _ = await group.next()
+            let finished = await group.next() ?? false
             group.cancelAll()
+            // Timed out: stop the work too, rather than leaving it to hold the
+            // sync claim while the user is looking at the shelf.
+            if finished == false { task.cancel() }
         }
     }
 
