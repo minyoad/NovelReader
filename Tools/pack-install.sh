@@ -82,6 +82,57 @@ echo "ipa: $OUT ($(stat -c%s "$OUT") bytes)"
 cd - >/dev/null
 
 echo "=== install ==="
+# 装之前先看这台设备上已有几份夜读。
+#
+# 换过两次 bundle id，设备上就有过两份同名 App，各存一份数据。安装本身不会
+# 报错，因为 pymobiledevice3 只会就地替换完全同名的那个；另一个继续留在
+# 桌面上。而删掉「多余的那个」时，删掉的可能是用户一直在用的那份——13 本书
+# 就是这么丢的。所以先停下来把清单给出来，不要让人凭名字猜。
+if [ -x "$PMD3_PY" ]; then
+  # 查不到和「只有一份」必须分开：连不上设备时 apps list 会失败，而旧写法
+  # 把 stderr 丢掉再解析 JSON，失败就静默返回空——看起来像「没有重复」，
+  # 实际是一次没做成的检查。
+  EXISTING_RAW=$("$PMD3_PY" apps list --udid "$TARGET" 2>&1)
+  EXISTING_RC=$?
+  if [ "$EXISTING_RC" -ne 0 ]; then
+    echo
+    echo "警告：读不到设备上已安装的 App（apps list exit $EXISTING_RC），" >&2
+    echo "跳过重复「夜读」的检查。装完请自己确认桌面只有一个图标。" >&2
+    echo "（多半是 usbmuxd 转发端口没起来，见 Tools/device.sh 顶部说明。）" >&2
+  else
+    EXISTING=$(printf '%s\n' "$EXISTING_RAW" | python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except Exception as e:
+    # 读出来不是 JSON 也不算「干净」，按未知处理。
+    print("__unparsable__")
+    sys.exit(0)
+ids = [b for b in data if "NovelReader" in b]
+for b in sorted(ids):
+    print(b)
+' 2>/dev/null)
+    if printf '%s' "$EXISTING" | grep -q '__unparsable__'; then
+      echo
+      echo "警告：设备返回的 App 清单无法解析，跳过重复「夜读」的检查。" >&2
+      EXISTING=""
+      EXISTING_COUNT=0
+    else
+      EXISTING_COUNT=$(printf '%s\n' "$EXISTING" | grep -c . || true)
+    fi
+    if [ "${EXISTING_COUNT:-0}" -gt 1 ] && [ "${FORCE:-0}" != "1" ]; then
+      echo
+      echo "这台设备上已经装着 $EXISTING_COUNT 份「夜读」：" >&2
+      printf '  %s\n' $EXISTING >&2
+      echo >&2
+      echo "它们各有自己的书架，装完不会合并。先确认哪一份是你一直在用的" >&2
+      echo "（设置里的书架本数、最近阅读），再决定删哪个，不要凭名字猜。" >&2
+      echo "确认后加 FORCE=1 重新运行以继续安装。" >&2
+      exit 4
+    fi
+  fi
+fi
+
 # 不用 `xtool install`：它会对传入的包再做一次签名，而 --sign 出来的产物
 # bundle id 已经带团队前缀，于是被加上第二层前缀，变成一个「新」应用独立安装：
 #
@@ -118,23 +169,34 @@ if [ "$STATUS" -eq 0 ] && [ -x "$PMD3_PY" ]; then
   # 设备上同时存在多个 NovelReader 时，安装只会更新与 bundle id 完全相同的
   # 那一个，另一个继续留在桌面上。两个同名图标各自有独立容器，数据不同步，
   # 用户很难看出点的是哪一个，所以装完就报出来。
-  DUPES=$("$PMD3_PY" apps list --udid "$TARGET" 2>/dev/null | python3 -c '
+  #
+  # 同上面装前那段：读失败要说话，不能静默当作「只有一个」。
+  DUPES_RAW=$("$PMD3_PY" apps list --udid "$TARGET" 2>&1)
+  DUPES_RC=$?
+  if [ "$DUPES_RC" -ne 0 ]; then
+    echo
+    echo "警告：装完读不到 App 清单（exit $DUPES_RC），无法确认桌面上有几个夜读。" >&2
+  else
+    DUPES=$(printf '%s\n' "$DUPES_RAW" | python3 -c '
 import json, sys
 try:
     data = json.load(sys.stdin)
 except Exception:
-    sys.exit(0)
+    sys.exit(1)
 ids = [b for b in data if "NovelReader" in b]
 if len(ids) > 1:
     for b in sorted(ids):
         print("  " + b)
 ' 2>/dev/null)
-
-  if [ -n "$DUPES" ]; then
-    echo
-    echo "注意：设备上有多个夜读，桌面会显示成同名图标，各自数据独立：" >&2
-    echo "$DUPES" >&2
-    echo "只保留一个：$PMD3_PY apps uninstall <不要的那个 bundle id>" >&2
+    if [ $? -ne 0 ]; then
+      echo
+      echo "警告：装完拿到的 App 清单无法解析，无法确认桌面上有几个夜读。" >&2
+    elif [ -n "$DUPES" ]; then
+      echo
+      echo "注意：设备上有多个夜读，桌面会显示成同名图标，各自数据独立：" >&2
+      echo "$DUPES" >&2
+      echo "只保留一个：$PMD3_PY apps uninstall <不要的那个 bundle id>" >&2
+    fi
   fi
 fi
 
