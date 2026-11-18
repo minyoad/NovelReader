@@ -1130,58 +1130,76 @@ final class AppModel: ObservableObject {
         var failures: [String] = []
         var done = 0
 
-        await withTaskGroup(of: (String, Result<[SearchResult], Error>).self) { group in
-            for source in active {
-                let engine = self.engine
-                group.addTask {
-                    if source.isBuiltIn {
-                        let sample = BuiltinContent.sampleBook
-                        if sample.name.contains(query) || sample.author.contains(query) {
-                            let result = SearchResult(
-                                sourceID: source.id,
-                                sourceName: source.name,
-                                name: sample.name,
-                                author: sample.author,
-                                intro: sample.intro,
-                                detailURL: sample.detailURL
-                            )
-                            return (source.name, .success([result]))
-                        }
-                        return (source.name, .success([]))
-                    }
-                    do {
-                        let results = try await engine.search(keyword: query, source: source)
-                        return (source.name, .success(results))
-                    } catch {
-                        return (source.name, .failure(error))
-                    }
-                }
-            }
+        // Publish at a bounded rate rather than after every answer. The
+        // slowest source used to hold back everything the fast ones had
+        // already returned, which made a many-source search feel hung. But
+        // publishing on *every* answer is the opposite problem, and the one
+        // that actually froze the list: with a few hundred sources the two
+        // costs collide. `searchResults = sorted` re-sorts everything
+        // collected so far and hands SwiftUI a new array to diff, and
+        // `searchState` changes again for the counter — both on the main
+        // actor, both happening hundreds of times during one search. The
+        // table never got a frame to scroll or take a tap in.
+        //
+        // Ten times a second is faster than the eye reading arrives and orders
+        // of magnitude less work than one update per source.
+        var lastPublished = Date.distantPast
+        var remembered = false
 
-            // Publish after every answer rather than once at the end. The
-            // slowest source used to hold back everything the fast ones had
-            // already returned, which is what made a many-source search feel
-            // like it had hung.
-            var remembered = false
-            for await (name, result) in group {
-                guard activeSearchTicket == ticket else { return }
-                done += 1
-                switch result {
-                case .success(let results): collected.append(contentsOf: results)
-                case .failure: failures.append(name)
+        // The fan-out is bounded too: see `ConcurrencyWindow` for why putting
+        // every source on the network at once was the other half of the freeze.
+        //
+        // `engine` is read here, on the main actor, and captured: it is a
+        // main-actor property, and the closure passed to `forEach` runs off
+        // this actor.
+        let engine = self.engine
+        await ConcurrencyWindow.forEach(active, limit: ConcurrencyWindow.searchSources) { source in
+            if source.isBuiltIn {
+                let sample = BuiltinContent.sampleBook
+                if sample.name.contains(query) || sample.author.contains(query) {
+                    let result = SearchResult(
+                        sourceID: source.id,
+                        sourceName: source.name,
+                        name: sample.name,
+                        author: sample.author,
+                        intro: sample.intro,
+                        detailURL: sample.detailURL
+                    )
+                    return (source.name, Result<[SearchResult], Error>.success([result]))
                 }
-                let sorted = Self.rankResults(collected, for: query)
-                searchResults = sorted
-                searchState = .searching(query, done: done, total: active.count)
-                // Record the keyword the moment anything is found, not at the
-                // end. Cancelling while the slow sources are still running
-                // returns early, and a search that did produce results is
-                // exactly the one worth repeating.
-                if !remembered, !collected.isEmpty {
-                    remembered = true
-                    rememberSearch(query)
-                }
+                return (source.name, Result<[SearchResult], Error>.success([]))
             }
+            do {
+                let results = try await engine.search(keyword: query, source: source)
+                return (source.name, Result<[SearchResult], Error>.success(results))
+            } catch {
+                return (source.name, Result<[SearchResult], Error>.failure(error))
+            }
+        } onEach: { (name, result) in
+            guard self.activeSearchTicket == ticket else { return }
+            done += 1
+            switch result {
+            case .success(let results): collected.append(contentsOf: results)
+            case .failure: failures.append(name)
+            }
+            // Record the keyword the moment anything is found, not at the
+            // end. Cancelling while the slow sources are still running
+            // returns early, and a search that did produce results is
+            // exactly the one worth repeating.
+            if !remembered, !collected.isEmpty {
+                remembered = true
+                self.rememberSearch(query)
+            }
+            guard Date().timeIntervalSince(lastPublished) >= 0.1 else { return }
+            lastPublished = Date()
+            // Compare identity only: a full `SearchResult` is a dozen
+            // strings, and `!=` on the array walks all of them. Ids are
+            // one string per row and are what the list actually keys off.
+            let sorted = Self.rankResults(collected, for: query)
+            if sorted.map(\.id) != self.searchResults.map(\.id) {
+                self.searchResults = sorted
+            }
+            self.searchState = .searching(query, done: done, total: active.count)
         }
 
         guard activeSearchTicket == ticket else { return }
