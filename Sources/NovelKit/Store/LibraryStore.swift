@@ -65,6 +65,18 @@ public actor LibraryStore {
 
     // MARK: - Sources
 
+    public func loadRankings(_ provider: RankingProvider) -> RankingSnapshot? {
+        guard let cache = read(RankingSnapshot.self, from: "rankings-\(provider.rawValue).json"),
+              cache.version == 1, cache.provider == provider else { return nil }
+        return cache
+    }
+
+    public func saveRankings(_ snapshot: RankingSnapshot) {
+        guard snapshot.version == 1, !snapshot.boards.isEmpty else { return }
+        if let existing = loadRankings(snapshot.provider), existing.updatedAt > snapshot.updatedAt { return }
+        write(snapshot, to: "rankings-\(snapshot.provider.rawValue).json")
+    }
+
     public func loadDiscoveryFeed() -> DiscoveryFeedCache? {
         read(DiscoveryFeedCache.self, from: "discovery-feed.json")
     }

@@ -4,7 +4,17 @@ import NovelKit
 
 struct SearchView: View {
     @EnvironmentObject private var app: AppModel
+    @Environment(\.dismiss) private var dismiss
+    private let initialQuery: String
+    private let authorHint: String
+
+    init(initialQuery: String = "", authorHint: String = "") {
+        self.initialQuery = initialQuery
+        self.authorHint = authorHint
+        _query = State(initialValue: initialQuery)
+    }
     @State private var query = ""
+    @State private var initialSearchStarted = false
     @State private var errorMessage: String?
 
     /// Where a tapped row leads: the full preview for a book that is not on the
@@ -103,6 +113,12 @@ struct SearchView: View {
                 }
             }
             .navigationTitle("找书")
+            .task {
+                if !initialSearchStarted, !initialQuery.isEmpty {
+                    initialSearchStarted = true
+                    await app.search(initialQuery)
+                }
+            }
             .navigationDestination(item: $destination) { target in
                 switch target {
                 case .preview(let result):
@@ -137,7 +153,7 @@ struct SearchView: View {
                 // Search is a sheet, so it needs a way to close itself.
                 ToolbarItem(placement: .topBarLeading) {
                     Button {
-                        app.isSearching = false
+                        dismiss()
                     } label: {
                         Label("发现", systemImage: "chevron.backward")
                             .labelStyle(.titleAndIcon)
@@ -278,10 +294,17 @@ struct SearchView: View {
         return parts.joined(separator: "\n")
     }
 
+    private var orderedResults: [SearchResult] {
+        guard !authorHint.isEmpty, query == initialQuery else { return app.searchResults }
+        // Preserve the existing title ranking within each author group.
+        let matches = app.searchResults.filter { $0.author == authorHint }
+        return matches + app.searchResults.filter { $0.author != authorHint }
+    }
+
     private func resultsList(failed: [String], skipped: [String], count: Int, progress: String?) -> some View {
         List {
             Section {
-                ForEach(app.searchResults) { result in
+                ForEach(orderedResults) { result in
                     resultRow(result)
                 }
             } header: {

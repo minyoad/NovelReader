@@ -25,6 +25,21 @@ struct ExploreView: View {
         NavigationStack {
             List {
                 Section {
+                    NavigationLink {
+                        RankingsView()
+                    } label: {
+                        Label {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("新书榜单")
+                                Text("纵横 · 晋江，看看大家在读什么")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                        } icon: {
+                            Image(systemName: "chart.bar.xaxis")
+                        }
+                    }
+                }
+                Section {
                     HStack {
                         VStack(alignment: .leading, spacing: 4) {
                             Text("发现新书").font(.headline)
