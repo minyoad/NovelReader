@@ -590,15 +590,26 @@ final class SpeechController: NSObject, ObservableObject {
         startChunk(at: index, fromSentence: currentIndex)
     }
 
-    /// Fetches a chunk with retries.
+    /// Fetches a chunk, retrying until it succeeds or the reader gives up.
     ///
-    /// The Edge service is free and unguarded: individual requests get rate
-    /// limited or have their socket reset for no visible reason, and one such
-    /// blip used to end a whole listening session at the worst moment — a
-    /// chapter boundary, where the next chunk is the *first* thing fetched
-    /// after the old audio ran out. Transient transport failures are worth two
-    /// more attempts with a short backoff; a rejected token or an empty body
-    /// would fail identically every time, so those are not retried.
+    /// Originally this gave up after three attempts. That was wrong for the
+    /// way this engine is actually used: reading aloud in a car means the
+    /// network drops out for far longer than two seconds — a tunnel, a cell
+    /// handover, a car park — and ending the session on a blip is the one
+    /// failure a listener cannot work around without pulling over.
+    ///
+    /// So the rule is now: keep trying while the chapter is still wanted, and
+    /// back off so that a long outage costs nothing. The delays ramp to a
+    /// steady six seconds rather than growing forever, because the thing being
+    /// waited for is a better signal, not a quieter server.
+    ///
+    /// Only two errors stop it: a rejected token and an empty body, both of
+    /// which would come back the same however long it waited. Cancellation —
+    /// stop, jump, next book — ends it immediately too.
+    ///
+    /// - Returns: the audio.
+    /// - Throws: `CancellationError` when the reader stopped or moved, or one
+    ///   of the permanent errors above.
     private func fetchChunkWithRetry(
         _ chunk: SpeechChunk,
         key: String,
@@ -606,23 +617,97 @@ final class SpeechController: NSObject, ObservableObject {
         store: LibraryStore?,
         chunkIndex: Int
     ) async throws -> (audio: Data, boundaries: [EdgeSentenceBoundary]) {
+        var attempt = 0
         var lastError: Error?
-        for attempt in 1...3 {
+
+        while true {
+            try Task.checkCancellation()
             do {
                 return try await Self.audio(for: chunk, key: key, settings: settings, store: store)
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
+                // A rejected token or an empty body fails identically every
+                // time; waiting will not fix either. Everything else — a reset
+                // socket, a timeout, a handover — is worth waiting out.
+                if SpeechRetryRules.isPermanent(error) {
+                    Self.log.error("chunk \(chunkIndex) 失败且重试无用: \(String(describing: error), privacy: .public)")
+                    throw error
+                }
+
+                attempt += 1
                 lastError = error
-                guard attempt < 3 else { break }
-                let delay = UInt64(attempt) * 600_000_000
-                SpeechController.log.info(
-                    "chunk \(chunkIndex) 第 \(attempt) 次失败，\(delay / 1_000_000)ms 后重试: \(String(describing: error), privacy: .public)"
+                let delay = SpeechRetryRules.retryDelay(afterFailure: attempt)
+                Self.log.info(
+                    "chunk \(chunkIndex) 第 \(attempt) 次失败，\(delay)ms 后重试: \(String(describing: error), privacy: .public)"
                 )
-                try? await Task.sleep(nanoseconds: delay)
+                markWaitingForNetwork(chunkIndex: chunkIndex, attempt: attempt)
+
+                // Wait the delay, or less if the network comes back first.
+                //
+                // Both exits matter: the timer covers a path that never flips
+                // (a router that answers but has no uplink), the wake covers
+                // the common case of a handover, where retrying on the timer
+                // would leave the book silent for the rest of the delay after
+                // the signal had already returned.
+                //
+                // Cancellation is the third exit. It is checked every quarter
+                // second rather than wired into the wait, so stop and jump
+                // take effect promptly without the wait owning cancellation
+                // plumbing it does not need.
+                try await Self.wait(
+                    for: delay,
+                    orUntil: Self.networkRecovery
+                )
             }
         }
-        throw lastError ?? EdgeTTSError.noAudio
+    }
+
+    /// Waits `milliseconds`, waking early if the network comes back.
+    ///
+    /// Polls the path monitor rather than subscribing: a subscription per
+    /// retry during a long outage allocates a closure per second, and a
+    /// quarter-second granularity is invisible to a listener compared with the
+    /// multi-second delays this is used for.
+    private static func wait(for milliseconds: Int, orUntil monitor: NetworkRecoveryMonitor) async throws {
+        let deadline = Date().addingTimeInterval(Double(milliseconds) / 1000)
+        let wasSatisfied = monitor.isSatisfied
+        // A path that was already down when the wait began is waiting for a
+        // change; one that was up has nothing to wake for.
+        while Date() < deadline {
+            try Task.checkCancellation()
+            if !wasSatisfied, monitor.isSatisfied {
+                return
+            }
+            try await Task.sleep(for: .milliseconds(250))
+        }
+    }
+
+    /// The shared path monitor. One per process is enough; Network framework
+    /// multiplexes subscribers cheaply, but a new `NWPathMonitor` per retry
+    /// would still mean a new socket per retry during a long outage.
+    static let networkRecovery: NetworkRecoveryMonitor = {
+        let monitor = NetworkRecoveryMonitor()
+        monitor.start()
+        return monitor
+    }()
+
+    /// How long to wait after the `attempt`-th consecutive failure.
+    ///
+    /// The numbers live in `SpeechRetryRules` so they can be tested without
+    /// AVFoundation; this is here to keep the call site short.
+
+    /// Tells the UI the fetch is still going, without resetting the spinner.
+    /// Kept separate from `startChunk` so the reader's play button shows the
+    /// same preparing state across a whole outage instead of flickering
+    /// between spinner and idle every few seconds.
+    ///
+    /// Deliberately silent: an alert per retry would interrupt a driver every
+    /// few seconds to say what the spinner already says. `lastError` is left
+    /// for `fail()` — the one case the reader has to act on.
+    private func markWaitingForNetwork(chunkIndex: Int, attempt: Int) {
+        isPreparing = true
+        grace.begin(reason: "network-retry-\(chunkIndex)-\(attempt)")
     }
 
     private func startChunk(at index: Int, fromSentence sentence: Int) {
@@ -858,6 +943,34 @@ final class SpeechController: NSObject, ObservableObject {
         return max(texts.count - 1, 0)
     }
 
+    /// One prefetch attempt, with a couple of retries.
+    ///
+    /// Prefetch is only a head start: if it fails, the chunk is fetched again
+    /// when it is actually needed, and that path retries indefinitely. So this
+    /// gives up quietly after a few tries rather than holding a task open
+    /// through a long outage — but a single dropped packet should not waste
+    /// the head start either, which is what a bare `try?` did.
+    private static func prefetchAudio(
+        _ chunk: SpeechChunk,
+        key: String,
+        settings: TTSSettings,
+        store: LibraryStore?
+    ) async -> (audio: Data, boundaries: [EdgeSentenceBoundary])? {
+        for attempt in 1...3 {
+            if Task.isCancelled { return nil }
+            do {
+                return try await audio(for: chunk, key: key, settings: settings, store: store)
+            } catch is CancellationError {
+                return nil
+            } catch {
+                if SpeechRetryRules.isPermanent(error) { return nil }
+                guard attempt < 3 else { return nil }
+                try? await Task.sleep(for: .milliseconds(SpeechRetryRules.retryDelay(afterFailure: attempt)))
+            }
+        }
+        return nil
+    }
+
     /// Synthesizes the following chunk while the current one plays, so a
     /// chapter does not stutter between groups of sentences.
     private func prefetchNextChunk(after index: Int) {
@@ -872,7 +985,7 @@ final class SpeechController: NSObject, ObservableObject {
         prefetchTasks[next] = Task { [weak self] in
             defer { Task { @MainActor in self?.prefetchTasks[next] = nil } }
             guard !Task.isCancelled else { return }
-            guard let result = try? await Self.audio(for: chunk, key: key, settings: settings, store: store) else {
+            guard let result = await Self.prefetchAudio(chunk, key: key, settings: settings, store: store) else {
                 return
             }
             guard !Task.isCancelled else { return }
@@ -919,7 +1032,7 @@ final class SpeechController: NSObject, ObservableObject {
         prefetchNextChapterTask = Task { [weak self] in
             defer { Task { @MainActor in self?.prefetchNextChapterTask = nil } }
             guard !Task.isCancelled else { return }
-            guard let result = try? await Self.audio(for: first, key: key, settings: settings, store: store) else {
+            guard let result = await Self.prefetchAudio(first, key: key, settings: settings, store: store) else {
                 return
             }
             guard !Task.isCancelled else { return }
@@ -1140,7 +1253,12 @@ final class SpeechController: NSObject, ObservableObject {
         case .began:
             Self.log.info("音频会话被打断（来电/其他 App 抢占），暂停朗读")
             guard isActive else { return }
-            wasPlayingBeforeInterruption = isPlaying
+            // `isActive`, not `isPlaying`. A remote engine spends real time
+            // between chunks with `isPreparing` set and nothing coming out of
+            // the speaker; judging "was it playing" by sound alone recorded
+            // "no" for that whole window, and an interruption landing there
+            // left the reader paused for good once the call ended.
+            wasPlayingBeforeInterruption = isActive
             pause()
         case .ended:
             let options = AVAudioSession.InterruptionOptions(
