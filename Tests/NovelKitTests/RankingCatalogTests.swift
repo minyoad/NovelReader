@@ -8,6 +8,20 @@ struct RankingCatalogTests {
         return try String(contentsOf: url, encoding: .utf8)
     }
 
+    @Test func desktopRankingRequestDoesNotInheritMobileUserAgent() {
+        // The app defaults to iPhone Safari; that UA redirects the desktop
+        // ranking URL to an incompatible mobile endpoint.
+        #expect(NetworkSettings.defaultUserAgent.contains("iPhone"))
+        let request = RankingCatalog.request(for: .zongheng)
+        #expect(request.url == "https://www.zongheng.com/rank")
+        let userAgent = request.headers["User-Agent"] ?? ""
+        #expect(userAgent.contains("Windows NT"))
+        #expect(!userAgent.contains("iPhone"))
+        #expect(!userAgent.contains("Mobile"))
+        // Other providers continue using the caller's network settings.
+        #expect(RankingCatalog.request(for: .jinjiang).headers["User-Agent"] == nil)
+    }
+
     @Test func zonghengHomepageKeepsIndependentRanks() throws {
         let result = try RankingCatalog.parse(fixture("rank-zongheng"), provider: .zongheng)
         #expect(result.boards.map(\.title) == ["月票榜", "24小时畅销榜", "新书榜"])

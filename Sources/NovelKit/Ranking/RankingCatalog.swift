@@ -43,12 +43,23 @@ public enum RankingError: LocalizedError {
 }
 
 public enum RankingCatalog {
+    /// The parser consumes the desktop SSR page. A mobile UA redirects this
+    /// URL to m.zongheng.com, which serves a different page (or HTTP 500).
+    /// Keep this override local so reading sources retain their configured UA.
+    static func request(for provider: RankingProvider) -> HTTPRequest {
+        var headers: [String: String] = [:]
+        if provider == .zongheng {
+            headers["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+        }
+        return HTTPRequest(url: provider.url.absoluteString, headers: headers)
+    }
+
     public static func fetch(_ provider: RankingProvider, network: NetworkSettings) async throws -> RankingSnapshot {
         var settings = network
         settings.timeout = min(max(settings.timeout, 1), 8)
         let client = HTTPClient(settings: settings, maximumRetries: 0, resourceTimeout: 8,
                                 maximumResponseBytes: 2 * 1024 * 1024)
-        let page = try await client.fetch(HTTPRequest(url: provider.url.absoluteString))
+        let page = try await client.fetch(request(for: provider))
         try Task.checkCancellation()
         return try parse(page.text, provider: provider)
     }
