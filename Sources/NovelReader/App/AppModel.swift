@@ -494,7 +494,8 @@ final class AppModel: ObservableObject {
         let service = SyncService(
             transport: transport,
             store: store,
-            deviceID: settings.sync.deviceID
+            deviceID: settings.sync.deviceID,
+            endpoint: SyncEndpoint(settings.sync)
         )
         let booksBeforeSync = books
         // Finish an in-memory progress update before the service snapshots disk.
@@ -550,6 +551,7 @@ final class AppModel: ObservableObject {
                 prunePinnedSources()
             }
             settings.sync.lastSyncedAt = result.remoteUpdatedAt ?? Date()
+            adoptSyncedEndpoint(result.endpoint)
             saveSettings()
             if reportErrors {
                 showBanner("同步完成：\(result.booksAfter) 本书", isError: false)
@@ -561,6 +563,29 @@ final class AppModel: ObservableObject {
             }
             return .failed(error.localizedDescription)
         }
+    }
+
+    /// Takes the sync server's address from the file, if this device has none
+    /// or the file has a newer one.
+    ///
+    /// Only blank-on-this-device fields are filled, so a password-only setup on
+    /// a new phone becomes complete without ever undoing a deliberate change
+    /// made here. Secrets are untouched: they come from the Keychain and are
+    /// never in the file.
+    private func adoptSyncedEndpoint(_ endpoint: SyncEndpoint?) {
+        guard let endpoint else { return }
+        let current = SyncEndpoint(settings.sync)
+        guard current != endpoint else { return }
+        // Something to gain: this device is missing details or the file moved
+        // the server. `hasSameServerSettings` keeps a backend-only difference
+        // (phone on WebDAV, tablet on S3) from rewriting anything.
+        let fillsAGap = (current.directoryURL.isEmpty && !endpoint.directoryURL.isEmpty)
+            || (current.username.isEmpty && !endpoint.username.isEmpty)
+            || (current.s3Endpoint.isEmpty && !endpoint.s3Endpoint.isEmpty)
+            || (current.s3Bucket.isEmpty && !endpoint.s3Bucket.isEmpty)
+        let movedServer = !current.isEmpty && !endpoint.isEmpty && !current.hasSameServerSettings(as: endpoint)
+        guard fillsAGap || movedServer else { return }
+        endpoint.apply(to: &settings.sync)
     }
 
     /// The launch-time sync, capped so a dead server cannot hold up the resume.

@@ -24,6 +24,12 @@ public struct SyncPayload: Codable, Sendable, Equatable {
     /// never resolve. Optional so a file written by a build without
     /// subscriptions still decodes.
     public var subscriptions: [SourceSubscription]?
+    /// Where the sync server is, so a new device does not have to be told.
+    ///
+    /// Optional so a file written before this existed still decodes. Never
+    /// contains the password: it lives in the Keychain, and a sync file stored
+    /// on the server must not carry the credentials for that server.
+    public var endpoint: SyncEndpoint?
 
     public static let currentVersion = 1
 
@@ -33,7 +39,8 @@ public struct SyncPayload: Codable, Sendable, Equatable {
         deviceID: String,
         books: [Book],
         sources: [BookSource],
-        subscriptions: [SourceSubscription]? = nil
+        subscriptions: [SourceSubscription]? = nil,
+        endpoint: SyncEndpoint? = nil
     ) {
         self.version = version
         self.updatedAt = updatedAt
@@ -41,6 +48,7 @@ public struct SyncPayload: Codable, Sendable, Equatable {
         self.books = books
         self.sources = sources
         self.subscriptions = subscriptions
+        self.endpoint = endpoint
     }
 
     /// Whether this file is from a version this build understands.
@@ -55,6 +63,10 @@ public enum SyncMerge {
         public var books: [Book]
         public var sources: [BookSource]
         public var subscriptions: [SourceSubscription]
+        /// The connection details after the merge, or nil when neither side
+        /// had any. Kept out of `localChanged`: it is a settings change, and
+        /// the caller applies it separately.
+        public var endpoint: SyncEndpoint?
         /// True when the merged result differs from `local`, so the caller
         /// knows it has to save and re-upload.
         public var localChanged: Bool
@@ -63,11 +75,13 @@ public enum SyncMerge {
             books: [Book],
             sources: [BookSource],
             subscriptions: [SourceSubscription] = [],
+            endpoint: SyncEndpoint? = nil,
             localChanged: Bool
         ) {
             self.books = books
             self.sources = sources
             self.subscriptions = subscriptions
+            self.endpoint = endpoint
             self.localChanged = localChanged
         }
     }
@@ -280,10 +294,32 @@ public enum SyncMerge {
         }
         let subscriptions = subscriptionMap.values.sorted { $0.addedAt < $1.addedAt }
 
+        // The sync server's address: newest file wins, older one fills blanks.
+        //
+        // Keyed off nothing but the files themselves, because there is no id to
+        // match on. Using `updatedAt` here rather than a per-field timestamp is
+        // deliberate: the address changes when someone moves servers, and that
+        // is a deliberate act that should win over a stale copy, while a field
+        // the newer side never filled must not erase a working setup.
+        let endpoint: SyncEndpoint?
+        switch (local.endpoint, remote.endpoint) {
+        case let (localEndpoint?, remoteEndpoint?):
+            endpoint = remote.updatedAt > local.updatedAt
+                ? SyncEndpoint.merge(newer: remoteEndpoint, older: localEndpoint)
+                : SyncEndpoint.merge(newer: localEndpoint, older: remoteEndpoint)
+        case let (localEndpoint?, nil):
+            endpoint = localEndpoint
+        case let (nil, remoteEndpoint?):
+            endpoint = remoteEndpoint
+        case (nil, nil):
+            endpoint = nil
+        }
+
         return Outcome(
             books: bookMap.values.sorted { $0.id.uuidString < $1.id.uuidString },
             sources: sourceMap.values.sorted { $0.id.uuidString < $1.id.uuidString },
             subscriptions: subscriptions,
+            endpoint: endpoint,
             localChanged: changed
         )
     }

@@ -8,13 +8,26 @@ public actor SyncService {
     private let transport: SyncTransport
     private let store: LibraryStore
     private let deviceID: String
+    /// This device's connection details, written into the upload so another
+    /// device can set itself up from the file alone.
+    ///
+    /// A snapshot taken by the caller rather than read from the store: the
+    /// service must not know about `AppSettings`, and the caller already holds
+    /// the settings it is syncing with.
+    private let endpoint: SyncEndpoint?
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
 
-    public init(transport: SyncTransport, store: LibraryStore, deviceID: String) {
+    public init(
+        transport: SyncTransport,
+        store: LibraryStore,
+        deviceID: String,
+        endpoint: SyncEndpoint? = nil
+    ) {
         self.transport = transport
         self.store = store
         self.deviceID = deviceID
+        self.endpoint = endpoint
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         encoder.dateEncodingStrategy = .iso8601
@@ -32,6 +45,10 @@ public actor SyncService {
         public var sourcesAfter: Int
         public var remoteUpdatedAt: Date?
         public var progressAdvances: [SyncProgressAdvance]
+        /// The connection details to apply locally, or nil when there is
+        /// nothing new. The caller decides whether to adopt them; the service
+        /// has no business writing settings.
+        public var endpoint: SyncEndpoint?
 
         public init(
             uploaded: Bool,
@@ -39,7 +56,8 @@ public actor SyncService {
             booksAfter: Int,
             sourcesAfter: Int,
             remoteUpdatedAt: Date?,
-            progressAdvances: [SyncProgressAdvance] = []
+            progressAdvances: [SyncProgressAdvance] = [],
+            endpoint: SyncEndpoint? = nil
         ) {
             self.uploaded = uploaded
             self.downloaded = downloaded
@@ -47,6 +65,7 @@ public actor SyncService {
             self.sourcesAfter = sourcesAfter
             self.remoteUpdatedAt = remoteUpdatedAt
             self.progressAdvances = progressAdvances
+            self.endpoint = endpoint
         }
     }
 
@@ -67,7 +86,8 @@ public actor SyncService {
             deviceID: deviceID,
             books: localBooks,
             sources: localSources,
-            subscriptions: localSubscriptions
+            subscriptions: localSubscriptions,
+            endpoint: endpoint
         )
 
         var remote: SyncPayload?
@@ -96,7 +116,8 @@ public actor SyncService {
                 downloaded: false,
                 booksAfter: localBooks.count,
                 sourcesAfter: localSources.count,
-                remoteUpdatedAt: local.updatedAt
+                remoteUpdatedAt: local.updatedAt,
+                endpoint: endpoint
             )
         }
 
@@ -114,7 +135,8 @@ public actor SyncService {
                 deviceID: deviceID,
                 books: outcome.books,
                 sources: outcome.sources,
-                subscriptions: outcome.subscriptions
+                subscriptions: outcome.subscriptions,
+                endpoint: outcome.endpoint
             )
             try await upload(merged)
         }
@@ -147,7 +169,8 @@ public actor SyncService {
             booksAfter: outcome.books.count,
             sourcesAfter: outcome.sources.count,
             remoteUpdatedAt: needsUpload ? Date() : remote.updatedAt,
-            progressAdvances: advances
+            progressAdvances: advances,
+            endpoint: outcome.endpoint
         )
     }
 
@@ -239,6 +262,10 @@ public actor SyncService {
 
     /// Compares the merged result with what the remote already has, ignoring
     /// the wrapper's own timestamp and device.
+    ///
+    /// The endpoint is deliberately left out: it is settings, not content, and
+    /// a device whose own address differs from the file's would otherwise
+    /// re-upload on every single run just to restate the same values.
     private func sameContent(_ outcome: SyncMerge.Outcome, _ remote: SyncPayload) -> Bool {
         let remoteBooks = remote.books.sorted { $0.id.uuidString < $1.id.uuidString }
         let remoteSources = remote.sources.sorted { $0.id.uuidString < $1.id.uuidString }
