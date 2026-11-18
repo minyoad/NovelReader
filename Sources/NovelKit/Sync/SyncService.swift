@@ -15,6 +15,8 @@ public actor SyncService {
     /// service must not know about `AppSettings`, and the caller already holds
     /// the settings it is syncing with.
     private let endpoint: SyncEndpoint?
+    /// This device's AI settings, written into the upload for the same reason.
+    private let ai: SyncedAISettings?
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
 
@@ -22,12 +24,14 @@ public actor SyncService {
         transport: SyncTransport,
         store: LibraryStore,
         deviceID: String,
-        endpoint: SyncEndpoint? = nil
+        endpoint: SyncEndpoint? = nil,
+        ai: SyncedAISettings? = nil
     ) {
         self.transport = transport
         self.store = store
         self.deviceID = deviceID
         self.endpoint = endpoint
+        self.ai = ai
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         encoder.dateEncodingStrategy = .iso8601
@@ -49,6 +53,8 @@ public actor SyncService {
         /// nothing new. The caller decides whether to adopt them; the service
         /// has no business writing settings.
         public var endpoint: SyncEndpoint?
+        /// The AI settings to apply locally, or nil when there is nothing new.
+        public var ai: SyncedAISettings?
 
         public init(
             uploaded: Bool,
@@ -57,7 +63,8 @@ public actor SyncService {
             sourcesAfter: Int,
             remoteUpdatedAt: Date?,
             progressAdvances: [SyncProgressAdvance] = [],
-            endpoint: SyncEndpoint? = nil
+            endpoint: SyncEndpoint? = nil,
+            ai: SyncedAISettings? = nil
         ) {
             self.uploaded = uploaded
             self.downloaded = downloaded
@@ -66,6 +73,7 @@ public actor SyncService {
             self.remoteUpdatedAt = remoteUpdatedAt
             self.progressAdvances = progressAdvances
             self.endpoint = endpoint
+            self.ai = ai
         }
     }
 
@@ -87,7 +95,8 @@ public actor SyncService {
             books: localBooks,
             sources: localSources,
             subscriptions: localSubscriptions,
-            endpoint: endpoint
+            endpoint: endpoint,
+            ai: ai
         )
 
         var remote: SyncPayload?
@@ -117,7 +126,8 @@ public actor SyncService {
                 booksAfter: localBooks.count,
                 sourcesAfter: localSources.count,
                 remoteUpdatedAt: local.updatedAt,
-                endpoint: endpoint
+                endpoint: endpoint,
+                ai: ai
             )
         }
 
@@ -129,16 +139,20 @@ public actor SyncService {
         // this device counts too: `localChanged` is false then, but the remote
         // copy is now stale.
         let needsUpload = outcome.localChanged || !sameContent(outcome, remote)
+        var uploadedAt: Date?
         if needsUpload {
+            let now = Date()
             let merged = SyncPayload(
-                updatedAt: Date(),
+                updatedAt: now,
                 deviceID: deviceID,
                 books: outcome.books,
                 sources: outcome.sources,
                 subscriptions: outcome.subscriptions,
-                endpoint: outcome.endpoint
+                endpoint: outcome.endpoint,
+                ai: outcome.ai
             )
             try await upload(merged)
+            uploadedAt = now
         }
 
         // A failed upload must not silently consume the remote progress: the
@@ -168,9 +182,15 @@ public actor SyncService {
             downloaded: outcome.localChanged,
             booksAfter: outcome.books.count,
             sourcesAfter: outcome.sources.count,
-            remoteUpdatedAt: needsUpload ? Date() : remote.updatedAt,
+            // The time of the file that is now on the server: this device's own
+            // upload, or the remote file it merged from. Reporting a fresh
+            // `Date()` here would drift from the file by the upload's latency,
+            // and a later sync compares against it to decide whether the file
+            // has been written by someone else since.
+            remoteUpdatedAt: uploadedAt ?? remote.updatedAt,
             progressAdvances: advances,
-            endpoint: outcome.endpoint
+            endpoint: outcome.endpoint,
+            ai: outcome.ai
         )
     }
 
@@ -273,8 +293,13 @@ public actor SyncService {
         // field absent; comparing nil against an empty list would re-upload on
         // every sync forever.
         let remoteSubscriptions = (remote.subscriptions ?? []).sorted { $0.addedAt < $1.addedAt }
+        // Same for AI settings: a device that has none, or an older file, must
+        // not force a re-upload just to restate what is already there.
+        let remoteAI = remote.ai
+        let aiMatches = (remoteAI == nil && outcome.ai == nil) || remoteAI == outcome.ai
         return remoteBooks == outcome.books
             && remoteSources == outcome.sources
             && remoteSubscriptions == outcome.subscriptions
+            && aiMatches
     }
 }

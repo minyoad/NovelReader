@@ -495,7 +495,11 @@ final class AppModel: ObservableObject {
             transport: transport,
             store: store,
             deviceID: settings.sync.deviceID,
-            endpoint: SyncEndpoint(settings.sync)
+            endpoint: SyncEndpoint(settings.sync),
+            // Nothing configured here means nothing worth publishing: a fresh
+            // install must not overwrite the other device's provider with the
+            // defaults every device starts with.
+            ai: SyncedAISettings(settings).isConfigured ? SyncedAISettings(settings) : nil
         )
         let booksBeforeSync = books
         // Finish an in-memory progress update before the service snapshots disk.
@@ -550,8 +554,12 @@ final class AppModel: ObservableObject {
                 // pin can point at a source that is gone.
                 prunePinnedSources()
             }
-            settings.sync.lastSyncedAt = result.remoteUpdatedAt ?? Date()
+            // Read before `lastSyncedAt` moves: it is the baseline that tells
+            // "the file is this device's own upload" from "another device
+            // wrote it since".
             adoptSyncedEndpoint(result.endpoint)
+            adoptSyncedAI(result.ai, fileUpdatedAt: result.remoteUpdatedAt)
+            settings.sync.lastSyncedAt = result.remoteUpdatedAt ?? Date()
             saveSettings()
             if reportErrors {
                 showBanner("同步完成：\(result.booksAfter) 本书", isError: false)
@@ -563,6 +571,38 @@ final class AppModel: ObservableObject {
             }
             return .failed(error.localizedDescription)
         }
+    }
+
+    /// Takes AI settings from the file when this device cannot use its own, or
+    /// when the file was written after this device last finished a sync.
+    ///
+    /// Two cases, and both are real:
+    ///
+    /// - **This device cannot do AI cleanup on its own.** A fresh install, or
+    ///   one whose key was cleared. Taking the file's copy here is what makes
+    ///   the feature work on a second phone without retyping anything.
+    /// - **This device is configured, but the file is newer.** The user
+    ///   switched provider on another phone; that should reach every device.
+    ///
+    /// "Newer" compares the file's `updatedAt` with `lastSyncedAt` — the last
+    /// time this device successfully wrote its own state. If the file is newer
+    /// than that, another device wrote it since; if it is not, the file is
+    /// this device's own upload and there is nothing to adopt. No extra
+    /// timestamp is needed, and none is stored.
+    ///
+    /// The one thing that never happens is adopting a block that is not
+    /// configured at all — which is what a device that never opened AI
+    /// settings would upload if it were allowed to.
+    private func adoptSyncedAI(_ ai: SyncedAISettings?, fileUpdatedAt: Date?) {
+        guard let ai, ai.isConfigured else { return }
+        let current = SyncedAISettings(settings)
+        guard current != ai else { return }
+        // A working setup here loses only to a file written by another device
+        // after this one's last sync.
+        if current.isConfigured {
+            guard let fileUpdatedAt, fileUpdatedAt > (settings.sync.lastSyncedAt ?? .distantPast) else { return }
+        }
+        ai.apply(to: &settings)
     }
 
     /// Takes the sync server's address from the file, if this device has none

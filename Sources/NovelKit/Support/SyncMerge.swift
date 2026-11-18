@@ -30,6 +30,12 @@ public struct SyncPayload: Codable, Sendable, Equatable {
     /// contains the password: it lives in the Keychain, and a sync file stored
     /// on the server must not carry the credentials for that server.
     public var endpoint: SyncEndpoint?
+    /// AI provider and cleanup choices, so a second device can use AI cleanup
+    /// without being configured again.
+    ///
+    /// Optional so a file written before this existed still decodes. See
+    /// `SyncedAISettings` for what is in it and why.
+    public var ai: SyncedAISettings?
 
     public static let currentVersion = 1
 
@@ -40,7 +46,8 @@ public struct SyncPayload: Codable, Sendable, Equatable {
         books: [Book],
         sources: [BookSource],
         subscriptions: [SourceSubscription]? = nil,
-        endpoint: SyncEndpoint? = nil
+        endpoint: SyncEndpoint? = nil,
+        ai: SyncedAISettings? = nil
     ) {
         self.version = version
         self.updatedAt = updatedAt
@@ -49,6 +56,7 @@ public struct SyncPayload: Codable, Sendable, Equatable {
         self.sources = sources
         self.subscriptions = subscriptions
         self.endpoint = endpoint
+        self.ai = ai
     }
 
     /// Whether this file is from a version this build understands.
@@ -67,6 +75,8 @@ public enum SyncMerge {
         /// had any. Kept out of `localChanged`: it is a settings change, and
         /// the caller applies it separately.
         public var endpoint: SyncEndpoint?
+        /// AI settings after the merge, or nil when neither side had any.
+        public var ai: SyncedAISettings?
         /// True when the merged result differs from `local`, so the caller
         /// knows it has to save and re-upload.
         public var localChanged: Bool
@@ -76,12 +86,14 @@ public enum SyncMerge {
             sources: [BookSource],
             subscriptions: [SourceSubscription] = [],
             endpoint: SyncEndpoint? = nil,
+            ai: SyncedAISettings? = nil,
             localChanged: Bool
         ) {
             self.books = books
             self.sources = sources
             self.subscriptions = subscriptions
             self.endpoint = endpoint
+            self.ai = ai
             self.localChanged = localChanged
         }
     }
@@ -315,11 +327,35 @@ public enum SyncMerge {
             endpoint = nil
         }
 
+        // AI settings: the newer file wins whole, with the older one filling
+        // only what the newer left blank.
+        //
+        // Field-by-field merging would be wrong here: the address, model and
+        // preset are one coherent choice — `deepseek-chat` against a
+        // `wb.mybacc.com` endpoint is not a configuration anyone meant. So a
+        // device that just changed providers replaces the whole block, and a
+        // fresh install (which has none of it filled in) cannot blank out a
+        // working one.
+        let ai: SyncedAISettings?
+        switch (local.ai, remote.ai) {
+        case let (localAI?, remoteAI?):
+            ai = remote.updatedAt > local.updatedAt
+                ? SyncedAISettings.merge(newer: remoteAI, older: localAI)
+                : SyncedAISettings.merge(newer: localAI, older: remoteAI)
+        case let (localAI?, nil):
+            ai = localAI
+        case let (nil, remoteAI?):
+            ai = remoteAI
+        case (nil, nil):
+            ai = nil
+        }
+
         return Outcome(
             books: bookMap.values.sorted { $0.id.uuidString < $1.id.uuidString },
             sources: sourceMap.values.sorted { $0.id.uuidString < $1.id.uuidString },
             subscriptions: subscriptions,
             endpoint: endpoint,
+            ai: ai,
             localChanged: changed
         )
     }
