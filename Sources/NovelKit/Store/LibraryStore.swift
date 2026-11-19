@@ -192,7 +192,14 @@ public actor LibraryStore {
     }
 
     public func loadContent(bookID: UUID, chapterURL: String) -> ChapterContent? {
-        read(ChapterContent.self, from: contentPath(bookID: bookID, chapterURL: chapterURL))
+        guard let content = read(ChapterContent.self, from: contentPath(bookID: bookID, chapterURL: chapterURL)) else { return nil }
+        if content.cleaned, let original = content.originalText,
+           AIResponseValidation.hasIntroducedRefusal(content.text, original: original) {
+            let restored = content.restored()
+            saveContent(restored, bookID: bookID)
+            return restored
+        }
+        return content
     }
 
     public func saveContent(_ content: ChapterContent, bookID: UUID) {

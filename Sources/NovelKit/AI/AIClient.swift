@@ -4,6 +4,7 @@ import FoundationNetworking
 #endif
 
 public enum AIError: LocalizedError {
+    case unusableChapter
     case notConfigured
     case invalidURL(String)
     case api(String)
@@ -13,6 +14,7 @@ public enum AIError: LocalizedError {
 
     public var errorDescription: String? {
         switch self {
+        case .unusableChapter: return "AI 返回了拒答或新增内容，已保留原文"
         case .notConfigured: return "还没有配置 AI 服务，请到「设置 → AI 整理」填写接口地址和密钥"
         case .invalidURL(let url): return "AI 接口地址无效：\(url)"
         case .api(let message): return "AI 服务返回错误：\(message)"
@@ -120,7 +122,7 @@ public struct AIClient {
                 }
             }
             for try await (index, answer) in group {
-                results[index] = AIPrompt.cleanReply(answer)
+                results[index] = try AIResponseValidation.validated(answer, original: chunks[index], task: instruction)
                 finished += 1
                 progress?(Double(finished) / Double(chunks.count))
             }

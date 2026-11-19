@@ -2164,7 +2164,7 @@ final class AppModel: ObservableObject {
                     }
                 }
                 for try await (index, reply) in group {
-                    replies[index] = AIPrompt.cleanReply(reply)
+                    replies[index] = try AIResponseValidation.validated(reply, original: chunks[index], task: .stripAds)
                 }
             }
             let cleaned = replies.compactMap { $0 }

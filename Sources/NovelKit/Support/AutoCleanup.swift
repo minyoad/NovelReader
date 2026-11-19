@@ -124,7 +124,12 @@ public enum AutoCleanup {
 
         var output: [String] = []
         for (index, raw) in cleaned.enumerated() {
-            var lines = raw
+            // Defend this final assembly boundary as well: one rejected chunk
+            // must never become a paragraph in an otherwise valid chapter.
+            guard let validated = try? AIResponseValidation.validated(raw, original: chunks[index], task: .stripAds) else {
+                return ""
+            }
+            var lines = validated
                 .components(separatedBy: "\n")
                 .map { $0.trimmingCharacters(in: .whitespaces) }
                 .filter { !$0.isEmpty }
