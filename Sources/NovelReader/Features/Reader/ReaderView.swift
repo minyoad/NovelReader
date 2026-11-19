@@ -16,6 +16,7 @@ struct ReaderView: View {
     /// The book's detail page, opened from the top menu. Shown as a sheet so
     /// the reader underneath keeps its place; closing it returns to the page.
     @State private var showBookInfo = false
+    @State private var showPurification = false
     /// Fixed height of the top slot, shared by the chapter title and the
     /// toolbar so a tap swaps them without moving the text underneath.
     ///
@@ -91,7 +92,8 @@ struct ReaderView: View {
                             onShowSettings: { showSettings = true },
                             onShowCache: { showCacheSheet = true },
                             onShowTOC: { showTOC = true },
-                            onShowBookInfo: { showBookInfo = true }
+                            onShowBookInfo: { showBookInfo = true },
+                            onShowPurification: { showPurification = true }
                         )
                     } else {
                         ChapterHeaderTitle(
@@ -207,7 +209,7 @@ struct ReaderView: View {
         .modifier(SyncedProgressPrompt(
             advance: model.mode.recordsProgress ? app.pendingProgressAdvances[model.book.id] : nil,
             enabled: scenePhase == .active && !model.isLoading && model.errorMessage == nil
-                && !showSettings && !showTOC && !showCacheSheet && !showBookInfo && !model.showSourcePicker,
+                && !showSettings && !showTOC && !showCacheSheet && !showBookInfo && !showPurification && !model.showSourcePicker,
             onStay: { advance in
                 app.resolveSyncedProgress(bookID: advance.id, useRemote: false)
             },
@@ -243,6 +245,12 @@ struct ReaderView: View {
                 Task { await model.loadChapter(at: index) }
             }
             .presentationDetents([.medium, .large])
+            .preferredColorScheme(forcedScheme)
+        }
+        .sheet(isPresented: $showPurification) {
+            NavigationStack {
+                TextPurificationView(book: model.book)
+            }
             .preferredColorScheme(forcedScheme)
         }
         .sheet(isPresented: $showBookInfo) {
@@ -664,6 +672,7 @@ private struct ReaderTopBar: View {
     /// The overflow menu keeps the entry points that have no button of their
     /// own: book info, cache, AI cleanup and the output format.
     var onShowBookInfo: () -> Void
+    var onShowPurification: () -> Void
     @EnvironmentObject private var app: AppModel
 
     var body: some View {
@@ -734,6 +743,13 @@ private struct ReaderTopBar: View {
     /// What is left once the common actions have their own buttons.
     private var overflowMenu: some View {
         Menu {
+            Button {
+                onShowPurification()
+            } label: {
+                Label("文本净化", systemImage: "line.3.horizontal.decrease.circle")
+            }
+            .disabled(model.mode != .shelf)
+
             Button {
                 onShowBookInfo()
             } label: {
