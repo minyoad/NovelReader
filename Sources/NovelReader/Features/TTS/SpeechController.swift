@@ -279,7 +279,7 @@ final class SpeechController: NSObject, ObservableObject {
         case .system:
             guard synthesizer.isSpeaking else { return }
             synthesizer.pauseSpeaking(at: .immediate)
-        case .edge, .openAICompatible:
+        case .edge, .openAICompatible, .azure, .doubao, .cosyVoice:
             if isPreparing {
                 // Still waiting on the network: there is nothing to pause, so
                 // cancel the fetch instead of leaving a spinner that never
@@ -561,6 +561,8 @@ final class SpeechController: NSObject, ObservableObject {
             return settings.voiceIdentifier ?? "system-default"
         case .edge:
             return settings.remote.edgeVoice
+        case .azure, .doubao, .cosyVoice:
+            return settings.providerVoiceIdentity
         case .openAICompatible:
             // Two servers with the same voice name do not sound alike, so the
             // endpoint and model are part of the identity.
@@ -810,6 +812,8 @@ final class SpeechController: NSObject, ObservableObject {
             )
             audio = result.audio
             boundaries = result.boundaries
+        case .azure, .doubao, .cosyVoice:
+            audio = try await ProviderSpeechClient().synthesize(text: chunk.text, settings: settings)
         case .openAICompatible:
             audio = try await OpenAISpeechClient().synthesize(
                 text: chunk.text,

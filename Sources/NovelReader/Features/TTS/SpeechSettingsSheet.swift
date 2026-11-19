@@ -30,7 +30,7 @@ struct SpeechSettingsSheet: View {
                 } header: {
                     Text("语音朗读")
                 } footer: {
-                    Text("系统朗读完全离线；Edge 音色更自然但需要联网；自定义接口可以指向本地部署的语音模型。")
+                    Text("系统朗读可离线；Edge、Azure 和豆包需要联网；CosyVoice 连接自部署服务器。")
                 }
 
                 Section {

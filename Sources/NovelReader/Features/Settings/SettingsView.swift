@@ -146,6 +146,7 @@ struct SettingsView: View {
         switch app.settings.tts.engine {
         case .system: return "系统声音"
         case .edge: return "Edge 音色"
+        case .azure, .doubao, .cosyVoice: return app.settings.tts.engine.displayName
         case .openAICompatible: return "自定义接口"
         }
     }

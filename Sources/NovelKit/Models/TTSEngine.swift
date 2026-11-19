@@ -8,12 +8,18 @@ public enum TTSEngine: String, Codable, CaseIterable, Identifiable, Sendable {
     /// and is an unofficial endpoint.
     case edge
     /// Any OpenAI-compatible `/audio/speech` endpoint, including local ones.
+    case azure
+    case doubao
+    case cosyVoice
     case openAICompatible
 
     public var id: String { rawValue }
 
     public var displayName: String {
         switch self {
+        case .azure: return "Azure 语音"
+        case .doubao: return "豆包语音"
+        case .cosyVoice: return "CosyVoice 自部署"
         case .system: return "系统朗读"
         case .edge: return "Edge 在线（推荐）"
         case .openAICompatible: return "自定义接口"
@@ -22,6 +28,12 @@ public enum TTSEngine: String, Codable, CaseIterable, Identifiable, Sendable {
 
     public var detail: String {
         switch self {
+        case .azure:
+            return "微软官方语音接口，需填写 Speech 资源区域和密钥；免费额度与可用音色以 Azure 账户为准。"
+        case .doubao:
+            return "豆包语音合成，使用新版控制台的语音 API Key。需开通对应资源与音色，试用结束后按服务计费。"
+        case .cosyVoice:
+            return "连接电脑或服务器上自部署的 CosyVoice 网关；模型在服务器运行，不会下载到手机。"
         case .system:
             return "iOS 内置语音，完全离线、没有延迟，但长句听起来机械。可在系统「辅助功能 → 朗读内容」里下载更好的中文语音。"
         case .edge:
@@ -37,6 +49,10 @@ public enum TTSEngine: String, Codable, CaseIterable, Identifiable, Sendable {
 
 /// Settings for the remote engines.
 public struct RemoteTTSSettings: Codable, Hashable, Sendable {
+    public var azure = SpeechServiceSettings(voice: "zh-CN-XiaoxiaoNeural", region: "eastasia")
+    public var doubao = SpeechServiceSettings(voice: "", resourceID: "seed-tts-2.0")
+    public var cosyVoice = SpeechServiceSettings(model: "cosyvoice", voice: "default")
+
     /// Edge voice short name, e.g. `zh-CN-YunxiNeural`.
     public var edgeVoice: String
     /// Base URL of an OpenAI-compatible server, without the trailing path.
@@ -71,13 +87,16 @@ public struct RemoteTTSSettings: Codable, Hashable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case edgeVoice, baseURL, model, voice, apiKey
+        case edgeVoice, baseURL, model, voice, apiKey, azure, doubao, cosyVoice
     }
 
     /// Tolerant decoding so adding a field never wipes the rest.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let defaults = RemoteTTSSettings()
+        azure = try container.decodeIfPresent(SpeechServiceSettings.self, forKey: .azure) ?? defaults.azure
+        doubao = try container.decodeIfPresent(SpeechServiceSettings.self, forKey: .doubao) ?? defaults.doubao
+        cosyVoice = try container.decodeIfPresent(SpeechServiceSettings.self, forKey: .cosyVoice) ?? defaults.cosyVoice
         edgeVoice = try container.decodeIfPresent(String.self, forKey: .edgeVoice) ?? defaults.edgeVoice
         baseURL = try container.decodeIfPresent(String.self, forKey: .baseURL) ?? defaults.baseURL
         model = try container.decodeIfPresent(String.self, forKey: .model) ?? defaults.model
@@ -121,5 +140,43 @@ public enum EdgeVoiceCatalog {
 
     public static func name(for id: String) -> String {
         chinese.first { $0.id == id }?.name ?? id
+    }
+}
+
+/// Each service keeps its own credentials and voice; changing engines never
+/// sends a different provider's key to the newly selected endpoint.
+public struct SpeechServiceSettings: Codable, Hashable, Sendable {
+    public var baseURL: String
+    public var model: String
+    public var voice: String
+    public var region: String
+    public var resourceID: String
+    public var apiKey: String
+    public init(baseURL: String = "", model: String = "", voice: String = "", region: String = "", resourceID: String = "", apiKey: String = "") {
+        self.baseURL = baseURL; self.model = model; self.voice = voice
+        self.region = region; self.resourceID = resourceID; self.apiKey = apiKey
+    }
+    public var speechURL: URL? {
+        var text = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        while text.hasSuffix("/") { text.removeLast() }
+        if !text.hasSuffix("/audio/speech") { text += text.hasSuffix("/v1") ? "/audio/speech" : "/v1/audio/speech" }
+        guard let url = URL(string: text), ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+              url.host != nil, url.user == nil, url.password == nil, url.query == nil, url.fragment == nil else { return nil }
+        return url
+    }
+    public var hasVoiceAndKey: Bool { !voice.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    public var validAzureRegion: Bool {
+        !region.isEmpty && region.count < 64 && region.unicodeScalars.allSatisfy { (97...122).contains($0.value) || (48...57).contains($0.value) || $0 == "-" }
+    }
+}
+
+extension TTSSettings {
+    public var providerVoiceIdentity: String {
+        switch engine {
+        case .azure: return [remote.azure.region, remote.azure.voice, "mp3-v1"].joined(separator: "@")
+        case .doubao: return [remote.doubao.resourceID, remote.doubao.voice, "mp3-v1"].joined(separator: "@")
+        case .cosyVoice: return [remote.cosyVoice.baseURL, remote.cosyVoice.model, remote.cosyVoice.voice, "wav-v1"].joined(separator: "@")
+        default: return ""
+        }
     }
 }

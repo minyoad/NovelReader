@@ -55,6 +55,12 @@ enum TTSSettingSections {
             systemVoicePicker(tts)
         case .edge:
             edgeVoicePicker(tts)
+        case .azure:
+            serviceOptions(tts.remote.azure, engine: .azure)
+        case .doubao:
+            serviceOptions(tts.remote.doubao, engine: .doubao)
+        case .cosyVoice:
+            serviceOptions(tts.remote.cosyVoice, engine: .cosyVoice)
         case .openAICompatible:
             customEndpoint(tts)
         }
@@ -150,6 +156,55 @@ enum TTSSettingSections {
         Text("任何兼容 OpenAI /audio/speech 的服务都可以：本地部署的 Kokoro、ChatTTS 网关，或云端服务。地址填到 /v1 即可，程序会自动补上 /audio/speech。")
             .font(.caption2)
             .foregroundStyle(.secondary)
+    }
+
+    @ViewBuilder
+    private static func serviceOptions(_ service: Binding<SpeechServiceSettings>, engine: TTSEngine) -> some View {
+        if engine == .azure {
+            serviceField("资源区域", value: service.region, hint: "eastasia")
+            Text("填写 Speech 资源的区域标识（例如 eastasia），不是资源名称。密钥与区域必须属于同一个资源。")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        if engine == .cosyVoice {
+            serviceField("网关地址", value: service.baseURL, hint: "http://192.168.1.10:8880/v1")
+            serviceField("模型", value: service.model, hint: "cosyvoice")
+            Text("填写电脑/服务器的局域网地址；127.0.0.1 指的是手机本身。需运行项目提供的 CosyVoice 网关或兼容 /v1/audio/speech 且支持 WAV 的服务。")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        if engine == .doubao {
+            serviceField("资源 ID", value: service.resourceID, hint: "seed-tts-2.0")
+            Text("使用豆包语音新版控制台 API Key，不是方舟大语言模型 Key。音色 ID 必须属于所填资源版本并已获授权。")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        serviceField("音色 ID", value: service.voice, hint: engine == .cosyVoice ? "default" : "填写音色标识")
+        if engine == .azure {
+            Menu("选择常用中文音色") {
+                Button("晓晓 · 女声") { service.wrappedValue.voice = "zh-CN-XiaoxiaoNeural" }
+                Button("云希 · 男声") { service.wrappedValue.voice = "zh-CN-YunxiNeural" }
+                Button("云扬 · 男声") { service.wrappedValue.voice = "zh-CN-YunyangNeural" }
+            }
+        }
+        HStack {
+            Text(engine == .azure ? "Speech Key" : "API Key")
+            SecureField(engine == .cosyVoice ? "按网关配置，可留空" : "必填", text: service.apiKey)
+                .multilineTextAlignment(.trailing).textInputAutocapitalization(.never).autocorrectionDisabled()
+        }
+        if engine == .doubao {
+            Link("查看豆包音色与资源说明", destination: URL(string: "https://docs.volcengine.com/docs/doubao-voice/http-chunked-sse-unidirectional-streaming-v3?lang=zh")!)
+        }
+        if engine == .cosyVoice || engine == .doubao {
+            Text("本服务使用语速参数；音调不单独调整，音量由播放器控制。")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        Text("密钥保存在本机钥匙串。填写后点击下方试听，确认服务与音色可用。")
+            .font(.caption).foregroundStyle(.secondary)
+    }
+
+    private static func serviceField(_ title: String, value: Binding<String>, hint: String) -> some View {
+        LabeledContent(title) {
+            TextField(hint, text: value).multilineTextAlignment(.trailing)
+                .textInputAutocapitalization(.never).autocorrectionDisabled()
+        }
     }
 
     // MARK: - Proxy

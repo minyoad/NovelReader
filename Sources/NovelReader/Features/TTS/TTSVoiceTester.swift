@@ -58,6 +58,8 @@ final class TTSVoiceTester: ObservableObject {
                         volume: settings.volume,
                         proxy: settings.proxy
                     ).audio
+                case .azure, .doubao, .cosyVoice:
+                    audio = try await ProviderSpeechClient().synthesize(text: Self.sample, settings: settings)
                 case .openAICompatible:
                     audio = try await OpenAISpeechClient().synthesize(
                         text: Self.sample,

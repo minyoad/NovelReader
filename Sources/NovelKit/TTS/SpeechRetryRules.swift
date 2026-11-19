@@ -35,6 +35,14 @@ public enum SpeechRetryRules {
     public static func isPermanent(_ error: Error) -> Bool {
         if case EdgeTTSError.tokenRejected = error { return true }
         if case EdgeTTSError.noAudio = error { return true }
+        if let provider = error as? ProviderSpeechError {
+            switch provider {
+            case .configuration, .invalidAudio: return true
+            case .http(let status): return (400...499).contains(status) && status != 408 && status != 429
+            case .service(let code): return code == 45000000 || code == 40402003
+            case .incomplete: return false
+            }
+        }
         return false
     }
 }

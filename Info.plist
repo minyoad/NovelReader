@@ -61,6 +61,8 @@
     <key>ITSAppUsesNonExemptEncryption</key>
     <false/>
     <!-- Many Chinese novel sites still serve plain HTTP. -->
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>连接您配置的局域网语音服务器，提供 CosyVoice 等自部署朗读服务。</string>
     <key>NSAppTransportSecurity</key>
     <dict>
         <key>NSAllowsArbitraryLoads</key>

@@ -825,7 +825,7 @@ final class ReaderModel: ObservableObject {
             showToast(
                 app.settings.tts.engine == .edge
                     ? "还没有选择 Edge 音色，请到设置里选一个"
-                    : "自定义朗读接口还不完整，请到设置里填写地址和模型",
+                    : "\(app.settings.tts.engine.displayName)配置还不完整，请到朗读设置填写服务参数",
                 isError: true
             )
             return

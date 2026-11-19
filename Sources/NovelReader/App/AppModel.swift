@@ -197,6 +197,9 @@ final class AppModel: ObservableObject {
         var loaded = AppSettings()
         loaded.ai.apiKey = Keychain.get("ai.apiKey") ?? ""
         loaded.tts.remote.apiKey = Keychain.get("tts.apiKey") ?? ""
+        loaded.tts.remote.azure.apiKey = Keychain.get("tts.azure.apiKey") ?? ""
+        loaded.tts.remote.doubao.apiKey = Keychain.get("tts.doubao.apiKey") ?? ""
+        loaded.tts.remote.cosyVoice.apiKey = Keychain.get("tts.cosyVoice.apiKey") ?? ""
         loaded.sync.webdav.password = Keychain.get("sync.webdavPassword") ?? ""
         loaded.sync.s3.secretKey = Keychain.get("sync.s3SecretKey") ?? ""
         loaded.sync.s3.sessionToken = Keychain.get("sync.s3SessionToken") ?? ""
@@ -222,6 +225,9 @@ final class AppModel: ObservableObject {
         var loaded = await store.loadSettings()
         loaded.ai.apiKey = Keychain.get("ai.apiKey") ?? ""
         loaded.tts.remote.apiKey = Keychain.get("tts.apiKey") ?? ""
+        loaded.tts.remote.azure.apiKey = Keychain.get("tts.azure.apiKey") ?? ""
+        loaded.tts.remote.doubao.apiKey = Keychain.get("tts.doubao.apiKey") ?? ""
+        loaded.tts.remote.cosyVoice.apiKey = Keychain.get("tts.cosyVoice.apiKey") ?? ""
         loaded.sync.webdav.password = Keychain.get("sync.webdavPassword") ?? ""
         loaded.sync.s3.secretKey = Keychain.get("sync.s3SecretKey") ?? ""
         loaded.sync.s3.sessionToken = Keychain.get("sync.s3SessionToken") ?? ""
@@ -391,6 +397,12 @@ final class AppModel: ObservableObject {
             Keychain.delete("tts.apiKey")
         } else {
             Keychain.set(settings.tts.remote.apiKey, for: "tts.apiKey")
+        }
+        for (key, value) in [("tts.azure.apiKey", settings.tts.remote.azure.apiKey),
+                             ("tts.doubao.apiKey", settings.tts.remote.doubao.apiKey),
+                             ("tts.cosyVoice.apiKey", settings.tts.remote.cosyVoice.apiKey)] {
+            if value.isEmpty { Keychain.delete(key) }
+            else { Keychain.set(value, for: key) }
         }
         if settings.sync.webdav.password.isEmpty {
             Keychain.delete("sync.webdavPassword")

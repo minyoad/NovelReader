@@ -326,6 +326,12 @@ public struct TTSSettings: Codable, Hashable, Sendable {
             return false
         case .edge:
             return !remote.edgeVoice.isEmpty
+        case .azure:
+            return remote.azure.hasVoiceAndKey && remote.azure.validAzureRegion
+        case .doubao:
+            return remote.doubao.hasVoiceAndKey && !remote.doubao.resourceID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        case .cosyVoice:
+            return remote.cosyVoice.speechURL != nil && !remote.cosyVoice.model.isEmpty && !remote.cosyVoice.voice.isEmpty
         case .openAICompatible:
             return remote.speechURL != nil && !remote.model.isEmpty
         }
@@ -618,6 +624,9 @@ public struct AppSettings: Codable, Hashable, Sendable {
         var copy = self
         copy.ai.apiKey = ""
         copy.tts.remote.apiKey = ""
+        copy.tts.remote.azure.apiKey = ""
+        copy.tts.remote.doubao.apiKey = ""
+        copy.tts.remote.cosyVoice.apiKey = ""
         copy.sync = sync.strippingSecrets
         return copy
     }
