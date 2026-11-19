@@ -174,6 +174,7 @@ struct PagedReader: View {
         var url: String
         /// AI cleanup replaces the text while keeping the same chapter URL, so
         /// the content itself has to participate in the key.
+        var purificationRevision: Int
         var contentHash: Int
         var width: Int
         var height: Int
@@ -190,6 +191,7 @@ struct PagedReader: View {
     private func layoutKey(_ box: CGSize, content: ChapterContent? = nil) -> LayoutKey {
         return LayoutKey(
             url: (content ?? model.content)?.chapterURL ?? "",
+            purificationRevision: model.purificationRevision,
             contentHash: content?.text.hashValue ?? model.contentFingerprint,
             width: Int(box.width.rounded()),
             height: Int(box.height.rounded()),

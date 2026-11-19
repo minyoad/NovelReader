@@ -64,6 +64,11 @@ struct BookDetailView: View {
                 }
 
                 actions
+                NavigationLink {
+                    TextPurificationView(book: currentBook)
+                } label: {
+                    Label("本书文本净化", systemImage: "line.3.horizontal.decrease.circle")
+                }
 
                 if !chapters.isEmpty {
                     chapterPreview

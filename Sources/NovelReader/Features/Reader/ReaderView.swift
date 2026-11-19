@@ -172,6 +172,9 @@ struct ReaderView: View {
         // material on a dark page. `forcedScheme` is nil while following the
         // system, so that mode keeps reacting to the phone.
         .preferredColorScheme(forcedScheme)
+        .onChange(of: app.purificationSettings(for: model.book.id)) { _, _ in
+            model.refreshPurification()
+        }
         .onAppear { model.beginReadingSession() }
         .task { await model.start() }
         .onAppear { ScreenAwake.apply(app.settings.reading.keepScreenAwake) }

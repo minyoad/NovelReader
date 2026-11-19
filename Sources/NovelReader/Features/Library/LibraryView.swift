@@ -14,6 +14,7 @@ struct LibraryView: View {
     @State private var readingBook: Book?
     /// The book whose detail page was asked for from the long-press menu.
     @State private var detailBook: Book?
+    @State private var purificationBook: Book?
 
     var body: some View {
         NavigationStack {
@@ -55,6 +56,11 @@ struct LibraryView: View {
                                     } label: {
                                         Label("标记为未读", systemImage: "arrow.counterclockwise")
                                     }
+                                    Button {
+                                        purificationBook = book
+                                    } label: {
+                                        Label("文本净化", systemImage: "line.3.horizontal.decrease.circle")
+                                    }
                                     Button(role: .destructive) {
                                         app.removeFromShelf(book)
                                     } label: {
@@ -84,6 +90,9 @@ struct LibraryView: View {
         }
         // Full screen rather than a push: closing the reader returns to the
         // shelf, not to a detail page the user never asked to see.
+        .sheet(item: $purificationBook) { book in
+            NavigationStack { TextPurificationView(book: book) }
+        }
         .fullScreenCover(item: $readingBook) { book in
             ReaderView(book: book, app: app)
         }
@@ -133,6 +142,8 @@ private struct MissingSourceBanner: View {
 }
 
 private struct BookCard: View {
+    @EnvironmentObject private var app: AppModel
+    @State private var progress = ShelfReadingProgress(progress: ReadingProgress(), chapterCount: 0)
     let book: Book
     /// Whether this book's source is gone. Drawn as a badge so the card
     /// itself says "this one cannot be read right now", not just the banner.
@@ -142,7 +153,7 @@ private struct BookCard: View {
         VStack(alignment: .leading, spacing: 6) {
             ZStack(alignment: .bottomLeading) {
                 CoverImage(url: book.coverURL, width: 100, height: 138, cornerRadius: 8)
-                if book.progress.isStarted {
+                if progress.label != "未读" {
                     Text(progressLabel)
                         .font(.system(size: 10, weight: .semibold))
                         .padding(.horizontal, 6)
@@ -168,6 +179,20 @@ private struct BookCard: View {
                 .font(.caption2)
                 .foregroundStyle(missingSource ? .orange : .secondary)
                 .lineLimit(1)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(progress.label).font(.caption2).foregroundStyle(.secondary).lineLimit(1).minimumScaleFactor(0.7)
+                if let fraction = progress.fraction { ProgressView(value: fraction).tint(Palette.accent) }
+            }
+        }
+        .task(id: "\(book.hashValue)-\(app.purificationSettings(for: book.id).hashValue)") {
+            let chapters = await app.store.loadChapters(bookID: book.id) ?? []
+            var length: Int?
+            if chapters.indices.contains(book.progress.chapterIndex),
+               let content = await app.store.loadContent(bookID: book.id, chapterURL: chapters[book.progress.chapterIndex].url) {
+                length = app.purifiedContent(content, bookID: book.id).text.count
+            }
+            guard !Task.isCancelled else { return }
+            progress = ShelfReadingProgress(progress: book.progress, chapterCount: chapters.count, textLength: length)
         }
     }
 

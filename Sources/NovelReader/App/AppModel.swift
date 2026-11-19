@@ -172,6 +172,25 @@ final class AppModel: ObservableObject {
     /// Guards against a second run when the root view's task fires again.
     private var didBootstrap = false
 
+    @Published private(set) var textPurification: [String: TextPurificationSettings] = [:]
+
+    func purificationSettings(for bookID: UUID) -> TextPurificationSettings {
+        textPurification[bookID.uuidString] ?? TextPurificationSettings()
+    }
+
+    func savePurification(_ value: TextPurificationSettings, bookID: UUID) {
+        textPurification[bookID.uuidString] = value
+        let snapshot = textPurification
+        Task { await store.saveTextPurification(snapshot) }
+    }
+
+    func purifiedContent(_ content: ChapterContent, bookID: UUID) -> ChapterContent {
+        var result = content
+        result.text = TextPurification.apply(content.text, settings: purificationSettings(for: bookID)).text
+        return result
+    }
+
+
     init(store: LibraryStore = LibraryStore()) {
         self.store = store
 
@@ -209,6 +228,7 @@ final class AppModel: ObservableObject {
         loaded = await adoptSystemAppearanceIfNeeded(loaded)
         settings = loaded
         client = HTTPClient(settings: loaded.network)
+        textPurification = await store.loadTextPurification()
         books = await store.loadBooks()
         let waiting = await store.loadSyncProgressAdvances()
         pendingProgressAdvances = Dictionary(waiting.filter { advance in

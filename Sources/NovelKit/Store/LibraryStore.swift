@@ -45,6 +45,14 @@ public actor LibraryStore {
 
     // MARK: - Books
 
+    public func loadTextPurification() -> [String: TextPurificationSettings] {
+        read([String: TextPurificationSettings].self, from: "text-purification.json") ?? [:]
+    }
+
+    public func saveTextPurification(_ settings: [String: TextPurificationSettings]) {
+        write(settings, to: "text-purification.json")
+    }
+
     public func loadBooks() -> [Book] {
         read([Book].self, from: "books.json") ?? []
     }

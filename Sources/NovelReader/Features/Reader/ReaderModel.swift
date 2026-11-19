@@ -17,6 +17,32 @@ final class ReaderModel: ObservableObject {
     @Published var content: ChapterContent? {
         didSet { contentFingerprint = content?.text.hashValue ?? 0 }
     }
+    private(set) var purificationRevision = 0
+    private var unpurifiedContent: ChapterContent?
+
+    private func setContent(_ value: ChapterContent?) {
+        unpurifiedContent = value
+        content = value.map { app.purifiedContent($0, bookID: book.id) }
+    }
+
+    func refreshPurification() {
+        purificationRevision += 1
+        speech.stop()
+        nextChapterPrefetchTask?.cancel()
+        nextChapterText = nil
+        nextChapterTextURL = nil
+        setContent(unpurifiedContent)
+        currentSentenceIndex = 0
+        pendingOffset = 0
+        chapterProgress = 0
+        positionRevision += 1
+        if mode.recordsProgress {
+            app.updateProgress(bookID: book.id, chapterIndex: currentIndex,
+                               chapterTitle: currentChapter?.title ?? "", characterOffset: 0)
+        }
+        prefetchNextChapterForSpeech()
+    }
+
     /// Layout identity is read on every animation frame; hash the chapter only
     /// when its content changes, rather than walking the entire text per frame.
     private(set) var contentFingerprint = 0
@@ -325,7 +351,7 @@ final class ReaderModel: ObservableObject {
                 synchronous: shouldSpeak
             )
             guard chapterLoadID == loadID, !Task.isCancelled else { return }
-            content = fetched            // A trial read has no shelf entry to record progress against: the
+            setContent(fetched)            // A trial read has no shelf entry to record progress against: the
             // book may never be added, and writing here would also bump
             // `lastReadAt` and so change which book the app resumes.
             if mode.recordsProgress {
@@ -369,7 +395,7 @@ final class ReaderModel: ObservableObject {
                         synchronous: true
                     )
                     guard chapterLoadID == loadID, !Task.isCancelled else { return }
-                    content = retried
+                    setContent(retried)
                     if mode.recordsProgress {
                         app.updateProgress(bookID: book.id, chapterIndex: index, chapterTitle: chapter.title, characterOffset: offset)
                     }
@@ -387,12 +413,12 @@ final class ReaderModel: ObservableObject {
                     SpeechController.log.error(
                         "朗读跨章重试仍失败: \(String(describing: error), privacy: .public)"
                     )
-                    content = nil
+                    setContent(nil)
                     errorMessage = error.localizedDescription
                     speech.stop()
                 }
             } else {
-                content = nil
+                setContent(nil)
                 errorMessage = error.localizedDescription
                 // Nothing is going to play, so release the session kept alive for
                 // the chapter that failed to load.
@@ -409,7 +435,7 @@ final class ReaderModel: ObservableObject {
     /// read through the normal chapter pipeline on entry (including AI rules).
     func contentForPagination(at index: Int) async throws -> ChapterContent? {
         guard mode.cachesChapters, chapters.indices.contains(index) else { return nil }
-        return try await app.chapterContentPrepared(book: book, chapter: chapters[index])
+        return app.purifiedContent(try await app.chapterContentPrepared(book: book, chapter: chapters[index]), bookID: book.id)
     }
 
     /// Text of the chapter after the current one, once it is known.
@@ -504,7 +530,7 @@ final class ReaderModel: ObservableObject {
             guard let text = fetched?.text, !Task.isCancelled else { return }
             await MainActor.run {
                 guard let self, self.currentIndex + 1 == target else { return }
-                self.nextChapterText = text
+                self.nextChapterText = app.purifiedContent(ChapterContent(chapterURL: chapter.url, text: text), bookID: book.id).text
                 self.nextChapterTextURL = chapter.url
             }
         }
@@ -873,7 +899,7 @@ final class ReaderModel: ObservableObject {
     // MARK: - AI
 
     func runAI(task: AIPrompt.ChapterTask) async {
-        guard let content else { return }
+        guard let content = unpurifiedContent else { return }
         guard app.settings.ai.isUsable else {
             errorMessage = AIError.notConfigured.localizedDescription
             return
@@ -891,7 +917,7 @@ final class ReaderModel: ObservableObject {
             ) { [weak self] progress in
                 Task { @MainActor in self?.aiProgress = progress }
             }
-            self.content = cleaned
+            self.setContent(cleaned)
             // A trial read keeps the cleanup in memory only: writing it would
             // create a chapter file for a book the library does not know about.
             if mode.cachesChapters {
@@ -908,12 +934,12 @@ final class ReaderModel: ObservableObject {
 
     /// Restores the text exactly as downloaded, undoing a previous AI cleanup.
     func restoreOriginalText() async {
-        guard let content, content.originalText != nil else {
+        guard let content = unpurifiedContent, content.originalText != nil else {
             showToast("这一章还没有可还原的原文")
             return
         }
         let restored = content.restored()
-        self.content = restored
+        self.setContent(restored)
         if mode.cachesChapters {
             app.persistContent(restored, for: book)
         }
