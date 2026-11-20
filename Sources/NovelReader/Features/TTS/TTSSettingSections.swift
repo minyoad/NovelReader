@@ -17,25 +17,37 @@ enum TTSSettingSections {
 
     @ViewBuilder
     static func engine(_ tts: Binding<TTSSettings>) -> some View {
-        Picker("朗读引擎", selection: tts.engine) {
-            ForEach(TTSEngine.allCases) { engine in
-                Text(engine.displayName).tag(engine)
+        Picker("朗读服务", selection: tts.engine) {
+            Section("常用服务") {
+                ForEach([TTSEngine.system, .edge, .azure, .doubao]) { engine in
+                    Text(engineOptionName(engine, settings: tts.wrappedValue)).tag(engine)
+                }
+            }
+            Section("更多服务") {
+                ForEach([TTSEngine.cosyVoice, .openAICompatible]) { engine in
+                    Text(engineOptionName(engine, settings: tts.wrappedValue)).tag(engine)
+                }
             }
         }
-        .pickerStyle(.inline)
-        .labelsHidden()
+        .pickerStyle(.navigationLink)
 
-        Text(tts.wrappedValue.engine.detail)
-            .font(.caption)
-            .foregroundStyle(.secondary)
-            .padding(.vertical, 2)
+        if tts.wrappedValue.engine.needsNetwork && !tts.wrappedValue.isRemoteUsable {
+            Label("需填写下方配置后试听", systemImage: "exclamationmark.circle")
+                .font(.footnote).foregroundStyle(.orange)
+        } else {
+            Label("可以试听", systemImage: "play.circle")
+                .font(.footnote).foregroundStyle(.secondary)
+        }
+        DisclosureGroup("服务说明") {
+            Text(tts.wrappedValue.engine.detail).font(.footnote).foregroundStyle(.secondary)
+        }
 
         slider(
             title: "语速",
             value: tts.rate,
             range: 0.25...1.0,
             step: 0.05
-        ) { String(format: "%.2fx", $0) }
+        ) { String(format: "%.1f×", $0 / 0.5) }
 
         if tts.wrappedValue.rate < 0.35 {
             Text("再慢一些会让部分音色听起来断续。")
@@ -44,6 +56,12 @@ enum TTSSettingSections {
         }
 
         Toggle("读完自动下一章", isOn: tts.autoNextChapter)
+    }
+
+    private static func engineOptionName(_ engine: TTSEngine, settings: TTSSettings) -> String {
+        var candidate = settings
+        candidate.engine = engine
+        return engine.displayName + (engine.needsNetwork && !candidate.isRemoteUsable ? " · 需配置" : "")
     }
 
     // MARK: - Voices

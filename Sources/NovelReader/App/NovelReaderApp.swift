@@ -47,6 +47,7 @@ struct RootView: View {
                 .tabItem { Label("设置", systemImage: "gearshape") }
                 .tag(AppTab.settings)
         }
+        .tint(Palette.accent)
         // Search is reached from the discover page rather than from the bar.
         // It has to be outside `TabView`: a child without `.tabItem` still
         // reserves a blank slot, which leaves a dead gap in the bar.

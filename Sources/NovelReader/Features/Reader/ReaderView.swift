@@ -173,6 +173,7 @@ struct ReaderView: View {
         // 深灰/纯黑 leaves a light status bar, light sheets and a light toolbar
         // material on a dark page. `forcedScheme` is nil while following the
         // system, so that mode keeps reacting to the phone.
+        .tint(theme.accent)
         .preferredColorScheme(forcedScheme)
         .onChange(of: app.purificationSettings(for: model.book.id)) { _, _ in
             model.refreshPurification()
@@ -683,7 +684,7 @@ private struct ReaderTopBar: View {
             Button(action: onClose) {
                 Image(systemName: "chevron.left")
                     .font(.system(size: 17, weight: .semibold))
-                    .frame(width: 40, height: 36)
+                    .frame(width: 44, height: 44)
                     .contentShape(Rectangle())
             }
             .accessibilityLabel("返回书架")
@@ -728,7 +729,7 @@ private struct ReaderTopBar: View {
                 onShowTOC()
             }
 
-            TopBarButton(title: "设置", systemImage: "textformat.size", theme: theme) {
+            TopBarButton(title: "阅读样式", systemImage: "textformat.size", theme: theme) {
                 onShowSettings()
             }
 
@@ -803,7 +804,7 @@ private struct ReaderTopBar: View {
         } label: {
             Image(systemName: "ellipsis")
                 .font(.system(size: 17, weight: .medium))
-                .frame(width: 40, height: 36)
+                .frame(width: 44, height: 44)
                 .contentShape(Rectangle())
         }
         .accessibilityLabel("更多操作")
@@ -828,13 +829,13 @@ private struct TopBarButton: View {
                     .font(.system(size: 17))
                     .frame(height: 20)
                 Text(title)
-                    .font(.system(size: 10))
+                    .font(.caption2)
                     .foregroundStyle(theme.secondaryText)
                     .lineLimit(1)
             }
             .frame(minWidth: 56)
             .padding(.horizontal, 6)
-            .frame(height: 40)
+            .frame(minHeight: 44)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)

@@ -39,7 +39,10 @@ struct RankingsView: View {
                 if loading {
                     HStack { ProgressView().controlSize(.small); Text("正在更新榜单…").font(.footnote) }
                 }
-                if let message { Text(message).font(.footnote).foregroundStyle(.secondary) }
+                if let message {
+                    Text(message).font(.footnote).foregroundStyle(.secondary)
+                    Button("重试") { revision += 1 }.disabled(loading)
+                }
             } footer: {
                 Text("榜单来自官方网页摘要，每 6 小时检查更新。点击书籍将在已启用书源中搜索可读版本。")
             }
@@ -78,8 +81,6 @@ struct RankingsView: View {
                 Button("重新获取") { revision += 1 }.disabled(loading)
             }
         }
-        .navigationTitle("新书榜单")
-        .navigationBarTitleDisplayMode(.inline)
         .task(id: "\(provider.rawValue)-\(revision)") {
             let force = revision != consumedRevision
             consumedRevision = revision

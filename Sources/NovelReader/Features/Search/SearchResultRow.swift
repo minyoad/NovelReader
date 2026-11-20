@@ -28,8 +28,8 @@ struct SearchResultRow: View {
                     // A line of blurb is what lets the user skip obvious
                     // wrong editions without opening every row.
                     Text(result.intro)
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                         .lineLimit(2)
                 }
                 if !result.lastChapterTitle.isEmpty {

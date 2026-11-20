@@ -8,6 +8,10 @@ struct TextPurificationView: View {
     let book: Book
     @State private var draft = TextPurificationSettings()
     @State private var loaded = false
+    @State private var baseline = TextPurificationSettings()
+    @State private var showingDiscard = false
+    @State private var showOriginal = true
+    private var isDirty: Bool { loaded && draft != baseline }
     @State private var sample = "在这里粘贴一段正文，检查规则效果。"
     @State private var preview: TextPurificationResult?
     @State private var previewing = false
@@ -41,7 +45,18 @@ struct TextPurificationView: View {
                     .disabled(draft.rules.count >= 50)
             } header: { Text("本书规则 · \(draft.rules.count)/50") }
             Section {
-                TextEditor(text: $sample).frame(minHeight: 130)
+                Picker("预览内容", selection: $showOriginal) {
+                    Text("原文").tag(true)
+                    Text("净化后").tag(false)
+                }.pickerStyle(.segmented)
+                if showOriginal {
+                    TextEditor(text: $sample).frame(minHeight: 130)
+                } else if let preview {
+                    Text(preview.text.isEmpty ? "（净化后为空）" : preview.text).textSelection(.enabled)
+                } else {
+                    Text("点击预览，查看净化后的正文。")
+                        .foregroundStyle(.secondary).frame(minHeight: 100)
+                }
                 Button(previewing ? "正在预览…" : "预览净化效果") {
                     let input = sample
                     let settings = draft
@@ -50,13 +65,12 @@ struct TextPurificationView: View {
                         let result = await Task.detached(priority: .userInitiated) {
                             TextPurification.apply(input, settings: settings)
                         }.value
-                        if draft == settings, sample == input { preview = result }
+                        if draft == settings, sample == input { preview = result; showOriginal = false }
                         previewing = false
                     }
                 }
                 .disabled(previewing)
                 if let preview {
-                    Text(preview.text.isEmpty ? "（净化后为空）" : preview.text).textSelection(.enabled)
                     ForEach(Array(preview.warnings.enumerated()), id: \.offset) { _, warning in
                         Text(warning).font(.footnote).foregroundStyle(.orange)
                     }
@@ -64,27 +78,33 @@ struct TextPurificationView: View {
             } header: { Text("正文预览") } footer: {
                 Text("优先载入当前章节的本地缓存，也可粘贴测试文本。预览不会修改正文。")
             }
-            if let error { Text(error).foregroundStyle(.red) }
         }
         .navigationTitle("文本净化")
         .navigationBarTitleDisplayMode(.inline)
+        .interactiveDismissDisabled(isDirty)
         .toolbar {
-            ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
+            ToolbarItem(placement: .cancellationAction) {
+                Button("取消") {
+                    if isDirty { showingDiscard = true } else { dismiss() }
+                }
+            }
             ToolbarItem(placement: .primaryAction) { EditButton() }
             ToolbarItem(placement: .confirmationAction) {
-                Button("保存") {
-                    if draft.enabled, let invalid = draft.rules.first(where: { $0.enabled && $0.validationError != nil }) {
-                        error = invalid.validationError
-                        return
-                    }
-                    app.savePurification(draft, bookID: book.id)
-                    dismiss()
-                }.disabled(!loaded)
+                Button("保存") { saveAndClose() }.disabled(!loaded)
             }
         }
+        .confirmationDialog("保存本书净化规则的修改？", isPresented: $showingDiscard, titleVisibility: .visible) {
+            Button("保存修改") { saveAndClose() }
+            Button("放弃修改", role: .destructive) { dismiss() }
+            Button("继续编辑", role: .cancel) {}
+        }
+        .alert("规则无法保存", isPresented: Binding(get: { error != nil }, set: { if !$0 { error = nil } })) {
+            Button("继续编辑", role: .cancel) { error = nil }
+        } message: { Text(error ?? "") }
         .task {
             guard !loaded else { return }
             draft = app.purificationSettings(for: book.id)
+            baseline = draft
             loaded = true
             if let chapters = await app.store.loadChapters(bookID: book.id),
                chapters.indices.contains(book.progress.chapterIndex),
@@ -94,6 +114,16 @@ struct TextPurificationView: View {
         }
         .onChange(of: draft) { _, _ in preview = nil; error = nil }
         .onChange(of: sample) { _, _ in preview = nil }
+    }
+
+    private func saveAndClose() {
+        if draft.enabled, let invalid = draft.rules.first(where: { $0.enabled && $0.validationError != nil }) {
+            error = invalid.validationError
+            return
+        }
+        app.savePurification(draft, bookID: book.id)
+        baseline = draft
+        dismiss()
     }
 }
 

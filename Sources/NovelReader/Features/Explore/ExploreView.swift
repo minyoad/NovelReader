@@ -11,6 +11,12 @@ struct ExploreView: View {
     @State private var showingSources = false
     @State private var showingBrowser = false
     @State private var isVisible = false
+    @State private var page = Page.recommended
+
+    private enum Page: String, CaseIterable, Identifiable {
+        case recommended = "推荐", rankings = "榜单"
+        var id: String { rawValue }
+    }
 
     private enum Destination: Hashable {
         case preview(SearchResult)
@@ -23,27 +29,43 @@ struct ExploreView: View {
 
     var body: some View {
         NavigationStack {
-            List {
-                Section {
-                    NavigationLink {
-                        RankingsView()
-                    } label: {
-                        Label {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text("新书榜单")
-                                Text("纵横 · 晋江，看看大家在读什么")
-                                    .font(.caption).foregroundStyle(.secondary)
-                            }
-                        } icon: {
-                            Image(systemName: "chart.bar.xaxis")
-                        }
+            VStack(spacing: 0) {
+                Button { app.isSearching = true } label: {
+                    Label("搜索书名或作者", systemImage: "magnifyingglass")
+                        .foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(12).background(.quaternary, in: RoundedRectangle(cornerRadius: 12))
+                }.buttonStyle(.plain).padding(.horizontal).padding(.top, 8)
+                Picker("发现内容", selection: $page) {
+                    ForEach(Page.allCases) { Text($0.rawValue).tag($0) }
+                }.pickerStyle(.segmented).padding()
+                if page == .recommended { recommendations }
+                else { RankingsView() }
+            }
+            .navigationTitle("发现")
+            .toolbar {
+                if page == .recommended {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Menu {
+                            Button("发现来源", systemImage: "line.3.horizontal.decrease.circle") { showingSources = true }
+                            Button("按书源浏览", systemImage: "books.vertical") { showingBrowser = true }
+                            Button("刷新推荐", systemImage: "arrow.clockwise") { model.refresh() }
+                                .disabled(model.isLoading)
+                        } label: { Image(systemName: "line.3.horizontal.decrease.circle") }
+                        .disabled(!model.hasLoadedCache)
+                        .accessibilityLabel("推荐筛选与来源")
                     }
                 }
+            }
+        }
+    }
+
+    private var recommendations: some View {
+            List {
                 Section {
                     HStack {
                         VStack(alignment: .leading, spacing: 4) {
-                            Text("发现新书").font(.headline)
-                            Text(model.selectedSourceIDs.isEmpty ? "自动选择少量来源，先返回先展示" : "聚合 \(model.selectedSourceIDs.count) 个指定来源")
+                            Text("为你推荐").font(.headline)
+                            Text("看看有没有你想读的故事")
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                         Spacer()
@@ -51,25 +73,14 @@ struct ExploreView: View {
                             .buttonStyle(.bordered)
                             .disabled(!model.canChangeBatch || !model.hasLoadedCache || (candidates.isEmpty && model.entries.isEmpty))
                     }
-                    HStack {
-                        Button { showingSources = true } label: {
-                            Label("发现来源", systemImage: "line.3.horizontal.decrease.circle")
-                        }
-                        .disabled(!model.hasLoadedCache)
-                        Spacer()
-                        Button { showingBrowser = true } label: {
-                            Label("按书源浏览", systemImage: "books.vertical")
-                        }
-                    }
-                    .font(.subheadline)
-                    .buttonStyle(.borderless)
+
                 }
 
                 if model.isLoading {
                     Section {
                         HStack(spacing: 10) {
                             ProgressView().controlSize(.small)
-                            Text("正在更新 \(model.completed)/\(model.total) 个来源")
+                            Text("正在更新推荐…")
                                 .font(.footnote).foregroundStyle(.secondary)
                             Spacer()
                             Button("停止") { model.stopLoading() }
@@ -80,7 +91,10 @@ struct ExploreView: View {
                 }
                 if let message = model.message {
                     Section {
-                        Text(message).font(.footnote).foregroundStyle(.secondary)
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(message).font(.footnote).foregroundStyle(.secondary)
+                            if !model.isLoading { Button("重新获取推荐") { model.refresh() } }
+                        }
                     }
                 }
                 if !model.visibleEntries.isEmpty {
@@ -112,7 +126,7 @@ struct ExploreView: View {
                             Text("这一批 \(model.visibleEntries.count) 本")
                             Spacer()
                             if let updated = model.updatedAt {
-                                Text("缓存于 \(updated.formatted(date: .abbreviated, time: .shortened))")
+                                Text("更新于 \(updated.formatted(date: .abbreviated, time: .shortened))")
                                     .font(.caption2).textCase(nil)
                             }
                         }
@@ -137,24 +151,12 @@ struct ExploreView: View {
             }
             .listStyle(.insetGrouped)
             .refreshable { await model.refreshAndWait() }
-            .navigationTitle("发现")
             .navigationDestination(item: $destination) { target in
                 switch target {
                 case .preview(let result): BookPreviewView(result: result)
                 case .shelf(let id):
                     if let book = app.books.first(where: { $0.id == id }) { BookDetailView(book: book) }
                     else { ContentUnavailableView("书籍已移出书架", systemImage: "book.closed") }
-                }
-            }
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button { app.isSearching = true } label: { Image(systemName: "magnifyingglass") }
-                        .accessibilityLabel("搜索书籍")
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button { model.refresh() } label: { Image(systemName: "arrow.clockwise") }
-                        .disabled(model.isLoading || !model.hasLoadedCache)
-                        .accessibilityLabel("刷新发现")
                 }
             }
             .sheet(isPresented: $showingSources) {
@@ -175,7 +177,6 @@ struct ExploreView: View {
             .onChange(of: app.settings.network) { _, _ in
                 if isVisible && !showingBrowser { openFeed() }
             }
-        }
     }
 
     private func openFeed() {

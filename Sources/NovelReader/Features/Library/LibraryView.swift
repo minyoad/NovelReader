@@ -4,6 +4,7 @@ import NovelKit
 
 struct LibraryView: View {
     @EnvironmentObject private var app: AppModel
+    @Environment(\.scenePhase) private var scenePhase
 
     private let columns = [GridItem(.adaptive(minimum: 100), spacing: 18)]
 
@@ -15,56 +16,60 @@ struct LibraryView: View {
     /// The book whose detail page was asked for from the long-press menu.
     @State private var detailBook: Book?
     @State private var purificationBook: Book?
+    @State private var pendingRemoval: Book?
+    @State private var recentProgress: ShelfReadingProgress?
 
     var body: some View {
         NavigationStack {
             Group {
-                if app.books.isEmpty {
-                    EmptyStateView(
-                        title: "书架是空的",
-                        message: "去「找书」搜索，或者导入书源后开始阅读。",
-                        systemImage: "books.vertical"
-                    )
+                if sortedBooks.isEmpty {
+                    ContentUnavailableView {
+                        Label("书架是空的", systemImage: "books.vertical")
+                    } description: {
+                        Text("找一本喜欢的书，开始阅读。")
+                    } actions: {
+                        Button("搜索书籍") { app.isSearching = true }.buttonStyle(.borderedProminent)
+                        NavigationLink("添加书源") { SourcesView() }.buttonStyle(.bordered)
+                    }
                 } else {
                     ScrollView {
-                        LazyVGrid(columns: columns, spacing: 22) {
-                            // One warning strip for every book whose source
-                            // went away, above the grid rather than on each
-                            // card: the fix is the same for all of them, and
-                            // a badge on twelve covers is twelve things to
-                            // read instead of one sentence.
+                        VStack(alignment: .leading, spacing: 20) {
+                            if let recent = ReadingRecents.mostRecent(in: sortedBooks) {
+                                continueReading(recent)
+                            }
                             if let warning = missingSourceWarning {
                                 MissingSourceBanner(text: warning)
-                                    .padding(.bottom, 4)
                             }
-
-                            ForEach(sortedBooks) { book in
-                                Button {
-                                    readingBook = book
-                                } label: {
-                                    BookCard(book: book, missingSource: app.source(for: book) == nil)
-                                }
-                                .buttonStyle(.plain)
-                                .contextMenu {
+                            Text("我的书架 · \(sortedBooks.count) 本").font(.headline)
+                            LazyVGrid(columns: columns, alignment: .leading, spacing: 22) {
+                                ForEach(sortedBooks) { book in
                                     Button {
-                                        detailBook = book
+                                        readingBook = book
                                     } label: {
-                                        Label("书籍信息", systemImage: "info.circle")
+                                        BookCard(book: book, missingSource: app.source(for: book) == nil)
                                     }
-                                    Button {
-                                        app.updateProgress(bookID: book.id, chapterIndex: 0, chapterTitle: "", characterOffset: 0)
-                                    } label: {
-                                        Label("标记为未读", systemImage: "arrow.counterclockwise")
-                                    }
-                                    Button {
-                                        purificationBook = book
-                                    } label: {
-                                        Label("文本净化", systemImage: "line.3.horizontal.decrease.circle")
-                                    }
-                                    Button(role: .destructive) {
-                                        app.removeFromShelf(book)
-                                    } label: {
-                                        Label("移出书架", systemImage: "trash")
+                                    .buttonStyle(.plain)
+                                    .contextMenu {
+                                        Button {
+                                            detailBook = book
+                                        } label: {
+                                            Label("书籍信息", systemImage: "info.circle")
+                                        }
+                                        Button {
+                                            app.updateProgress(bookID: book.id, chapterIndex: 0, chapterTitle: "", characterOffset: 0)
+                                        } label: {
+                                            Label("标记为未读", systemImage: "arrow.counterclockwise")
+                                        }
+                                        Button {
+                                            purificationBook = book
+                                        } label: {
+                                            Label("文本净化", systemImage: "line.3.horizontal.decrease.circle")
+                                        }
+                                        Button(role: .destructive) {
+                                            stageRemoval(book)
+                                        } label: {
+                                            Label("移出书架", systemImage: "trash")
+                                        }
                                     }
                                 }
                             }
@@ -79,13 +84,30 @@ struct LibraryView: View {
             }
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    NavigationLink {
-                        ReadingNowView()
-                    } label: {
-                        Image(systemName: "play.circle")
-                    }
-                    .disabled(app.books.isEmpty)
+                    Button { app.isSearching = true } label: { Image(systemName: "magnifyingglass") }
+                        .accessibilityLabel("搜索书籍")
                 }
+            }
+            .safeAreaInset(edge: .bottom) {
+                if let removed = pendingRemoval {
+                    HStack {
+                        Text("已移出《\(removed.name)》").font(.footnote).lineLimit(2)
+                        Spacer()
+                        Button("撤销") { pendingRemoval = nil }.fontWeight(.semibold)
+                    }
+                    .padding().background(.regularMaterial)
+                    .accessibilityElement(children: .contain)
+                }
+            }
+            .task(id: pendingRemoval?.id) {
+                guard let id = pendingRemoval?.id else { return }
+                do { try await Task.sleep(for: .seconds(8)) } catch { return }
+                guard !Task.isCancelled, pendingRemoval?.id == id else { return }
+                commitRemoval()
+            }
+            .onDisappear { commitRemoval() }
+            .onChange(of: scenePhase) { _, phase in
+                if phase != .active { commitRemoval() }
             }
         }
         // Full screen rather than a push: closing the reader returns to the
@@ -99,11 +121,57 @@ struct LibraryView: View {
     }
 
     private var sortedBooks: [Book] {
-        app.books.sorted { lhs, rhs in
+        app.books.filter { $0.id != pendingRemoval?.id }.sorted { lhs, rhs in
             let lhsDate = lhs.lastReadAt ?? lhs.addedAt
             let rhsDate = rhs.lastReadAt ?? rhs.addedAt
             return lhsDate > rhsDate
         }
+    }
+
+    private func continueReading(_ book: Book) -> some View {
+        Button { readingBook = book } label: {
+            HStack(spacing: 14) {
+                CoverImage(url: book.coverURL, width: 58, height: 80, cornerRadius: 7)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("继续阅读").font(.caption.weight(.semibold)).foregroundStyle(Palette.accent)
+                    Text(book.name).font(.headline).foregroundStyle(.primary).lineLimit(2)
+                    Text(book.progress.chapterTitle.isEmpty ? "第 \(book.progress.chapterIndex + 1) 章" : book.progress.chapterTitle)
+                        .font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
+                    if let progress = recentProgress {
+                        Text(progress.label).font(.caption).foregroundStyle(.secondary)
+                        if let value = progress.fraction { ProgressView(value: value) }
+                    }
+                }
+                Spacer(minLength: 0)
+                Image(systemName: "book.fill").font(.title3).foregroundStyle(Palette.accent)
+            }
+            .padding(16).frame(maxWidth: .infinity, alignment: .leading)
+            .background(Palette.accent.opacity(0.08), in: RoundedRectangle(cornerRadius: 16))
+        }.buttonStyle(.plain)
+        .task(id: "\(book.hashValue)-\(app.purificationSettings(for: book.id).hashValue)") {
+            recentProgress = nil
+            let chapters = await app.store.loadChapters(bookID: book.id) ?? []
+            var length: Int?
+            if chapters.indices.contains(book.progress.chapterIndex),
+               let content = await app.store.loadContent(bookID: book.id, chapterURL: chapters[book.progress.chapterIndex].url) {
+                length = app.purifiedContent(content, bookID: book.id).text.count
+            }
+            guard !Task.isCancelled else { return }
+            recentProgress = ShelfReadingProgress(progress: book.progress, chapterCount: chapters.count, textLength: length)
+        }
+    }
+
+    private func stageRemoval(_ book: Book) {
+        commitRemoval()
+        pendingRemoval = book
+    }
+
+    private func commitRemoval() {
+        guard let book = pendingRemoval else { return }
+        pendingRemoval = nil
+        // Stage only the visible removal during the undo window. The original
+        // record and chapter cache remain intact until this commit.
+        app.removeFromShelf(book)
     }
 
     /// A sentence naming the books whose source a refresh removed, or nil.
@@ -113,7 +181,7 @@ struct LibraryView: View {
     /// Naming them here is what turns that into a message the reader can act on
     /// — the fix is 长按 → 书籍信息 → 换源.
     private var missingSourceWarning: String? {
-        let broken = app.booksWithMissingSource
+        let broken = app.booksWithMissingSource.filter { $0.id != pendingRemoval?.id }
         guard !broken.isEmpty else { return nil }
         let names = broken.prefix(3).map(\.name).joined(separator: "、")
         let suffix = broken.count > 3 ? " 等 \(broken.count) 本" : ""
@@ -174,13 +242,14 @@ private struct BookCard: View {
             }
             Text(book.name)
                 .font(.footnote.weight(.medium))
-                .lineLimit(1)
+                .lineLimit(2)
+                .frame(minHeight: 36, alignment: .topLeading)
             Text(book.author.isEmpty ? book.sourceName : book.author)
                 .font(.caption2)
                 .foregroundStyle(missingSource ? .orange : .secondary)
                 .lineLimit(1)
             VStack(alignment: .leading, spacing: 3) {
-                Text(progress.label).font(.caption2).foregroundStyle(.secondary).lineLimit(1).minimumScaleFactor(0.7)
+                Text(progress.label).font(.caption2).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 if let fraction = progress.fraction { ProgressView(value: fraction).tint(Palette.accent) }
             }
         }
@@ -204,16 +273,4 @@ private struct BookCard: View {
     }
 }
 
-/// A tiny "continue reading" entry point that skips the detail screen.
-private struct ReadingNowView: View {
-    @EnvironmentObject private var app: AppModel
-
-    var body: some View {
-        if let book = ReadingRecents.mostRecent(in: app.books) {
-            BookDetailView(book: book, autoOpenReader: true)
-        } else {
-            EmptyStateView(title: "还没有阅读记录", message: "先从书架打开一本书。", systemImage: "book")
-        }
-    }
-}
 #endif

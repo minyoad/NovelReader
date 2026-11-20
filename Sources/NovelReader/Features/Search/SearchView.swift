@@ -16,11 +16,13 @@ struct SearchView: View {
     @State private var query = ""
     @State private var initialSearchStarted = false
     @State private var errorMessage: String?
+    @State private var failureDetails: String?
 
     /// Where a tapped row leads: the full preview for a book that is not on the
     /// shelf yet (it needs a deliberate "加入书架"), or the library detail page
     /// for one that already is.
     private enum Destination: Hashable {
+        case versions(DiscoveryEntry)
         case preview(SearchResult)
         case shelf(UUID)
 
@@ -28,6 +30,7 @@ struct SearchView: View {
         /// string key is what the navigation stack remembers.
         var id: String {
             switch self {
+            case .versions(let entry): return "versions|\(entry.id)"
             case .preview(let result): return "preview|\(result.id)"
             case .shelf(let id): return "shelf|\(id.uuidString)"
             }
@@ -110,15 +113,24 @@ struct SearchView: View {
                             VStack(spacing: 10) {
                                 EmptyStateView(
                                     title: "没有找到结果",
-                                    message: emptyResultMessage(failed: failed, skipped: skipped),
+                                    message: failed.isEmpty && skipped.isEmpty
+                                        ? "换个书名或作者试试，也可以添加更多书源。"
+                                        : "部分书源暂不可用，可以检查网络后重试或调整书源。",
                                     systemImage: "questionmark.folder"
                                 )
+                                if !failed.isEmpty || !skipped.isEmpty {
+                                    Button("查看原因") { failureDetails = emptyResultMessage(failed: failed, skipped: skipped) }
+                                        .buttonStyle(.bordered)
+                                }
                             }
                         } else {
                             resultsList(failed: failed, skipped: skipped, count: count, progress: nil)
                         }
                     case .failed(let message):
-                        EmptyStateView(title: "搜索失败", message: message, systemImage: "wifi.exclamationmark")
+                        VStack(spacing: 12) {
+                            EmptyStateView(title: "搜索暂未完成", message: "可以检查网络或书源配置后重试。", systemImage: "wifi.exclamationmark")
+                            Button("查看原因") { failureDetails = message }.buttonStyle(.bordered)
+                        }
                     }
                 }
             }
@@ -144,6 +156,8 @@ struct SearchView: View {
             }
             .navigationDestination(item: $destination) { target in
                 switch target {
+                case .versions(let entry):
+                    SearchVariantsView(entry: entry)
                 case .preview(let result):
                     BookPreviewView(result: result)
                 case .shelf(let id):
@@ -195,6 +209,18 @@ struct SearchView: View {
                         }
                     }
                     .disabled(query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+            .sheet(isPresented: Binding(get: { failureDetails != nil }, set: { if !$0 { failureDetails = nil } })) {
+                NavigationStack {
+                    ScrollView {
+                        Text(failureDetails ?? "").textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading).padding()
+                    }
+                    .navigationTitle("搜索详情").navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) { Button("完成") { failureDetails = nil } }
+                    }
                 }
             }
             .alert("出错了", isPresented: Binding(
@@ -324,15 +350,34 @@ struct SearchView: View {
         return matches + app.searchResults.filter { $0.author != authorHint }
     }
 
+    private var groupedResults: [DiscoveryEntry] {
+        DiscoveryCatalog.entries(orderedResults)
+    }
+
     private func resultsList(failed: [String], skipped: [String], count: Int, progress: String?) -> some View {
         List {
             Section {
-                ForEach(orderedResults) { result in
-                    resultRow(result)
+                ForEach(groupedResults) { entry in
+                    Button {
+                        if entry.variants.count > 1 { destination = .versions(entry) }
+                        else {
+                            destination = app.bookOnShelf(for: entry.primary)
+                                .map { .shelf($0.id) } ?? .preview(entry.primary)
+                        }
+                    } label: {
+                        VStack(alignment: .leading, spacing: 5) {
+                            SearchResultRow(result: entry.primary,
+                                            onShelf: DiscoveryCatalog.shelfBook(for: entry, in: app.books) != nil)
+                            if entry.variants.count > 1 {
+                                Label("\(entry.sourceCount) 个书源 · \(entry.variants.count) 个版本", systemImage: "square.stack")
+                                    .font(.caption).foregroundStyle(.secondary).padding(.leading, 64)
+                            }
+                        }.foregroundStyle(.primary)
+                    }.buttonStyle(.plain)
                 }
             } header: {
                 HStack {
-                    Text("\(count) 个结果")
+                    Text("\(groupedResults.count) 本书 · \(count) 个结果")
                     Spacer()
                     if let progress {
                         HStack(spacing: 6) {
@@ -345,29 +390,20 @@ struct SearchView: View {
                             .foregroundStyle(.orange)
                     }
                 }
-            } footer: {
-                if !skipped.isEmpty {
-                    // Shown with the results, not only when the search comes up
-                    // empty: this is why one of the sources returned nothing, and
-                    // it stays true for every future search.
-                    Text("\(skipped.joined(separator: "、")) 的搜索规则依赖尚未支持的 JS 能力，已在「书源管理」里标出。")
-                        .font(.caption2)
+            }
+            if !failed.isEmpty || !skipped.isEmpty {
+                Section {
+                    DisclosureGroup("部分书源暂不可用（\(failed.count + skipped.count)）") {
+                        Text(emptyResultMessage(failed: failed, skipped: skipped))
+                            .font(.footnote).foregroundStyle(.secondary)
+                        NavigationLink("管理书源") { SourcesView() }
+                    }
                 }
             }
+
         }
         .listStyle(.plain)
     }
 
-    private func resultRow(_ result: SearchResult) -> some View {
-        SearchResultRow(result: result, onShelf: app.bookOnShelf(for: result) != nil)
-            // Tapping a result never adds it: it opens the preview, which is
-            // where the blurb and the chapter count live and where "加入书架"
-            // is the only way in. A one-tap `+` here was too easy to hit by
-            // accident.
-            .onTapGesture {
-                destination = app.bookOnShelf(for: result)
-                    .map { .shelf($0.id) } ?? .preview(result)
-            }
-    }
 }
 #endif

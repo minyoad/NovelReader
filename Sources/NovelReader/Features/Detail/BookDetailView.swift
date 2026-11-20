@@ -17,6 +17,7 @@ struct BookDetailView: View {
     @State private var isLoadingChapters = false
     @State private var showReader = false
     @State private var showTOC = false
+    @State private var showPurification = false
     @State private var startIndex: Int?
     @State private var openReaderAfterTOC = false
     @State private var intro: String = ""
@@ -64,9 +65,7 @@ struct BookDetailView: View {
                 }
 
                 actions
-                NavigationLink {
-                    TextPurificationView(book: currentBook)
-                } label: {
+                Button { showPurification = true } label: {
                     Label("本书文本净化", systemImage: "line.3.horizontal.decrease.circle")
                 }
 
@@ -108,6 +107,9 @@ struct BookDetailView: View {
                 showTOC = false
             }
             .presentationDetents([.medium, .large])
+        }
+        .sheet(isPresented: $showPurification) {
+            NavigationStack { TextPurificationView(book: currentBook) }
         }
         .fullScreenCover(isPresented: $showReader) {
             ReaderView(book: currentBook, app: app, startIndex: startIndex)
